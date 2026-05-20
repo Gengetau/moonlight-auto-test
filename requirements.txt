@@ -3,3 +3,4 @@ pytest-html
 playwright
 openpyxl
 pandas
+python-dotenv

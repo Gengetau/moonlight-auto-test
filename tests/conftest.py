@@ -1,44 +1,63 @@
 import pytest
-from playwright.sync_api import Playwright, Page, expect
+from playwright.sync_api import sync_playwright
+from src.config_parser import Config
+import os
 
-# 登录凭证，建议使用环境变量或秘密管理工具
-BASE_URL = "https://your-patentsquare-url.com"
-USERNAME = "testuser"
-PASSWORD = "your_password"
+def pytest_addoption(parser):
+    parser.addoption(
+        "--test-browser", 
+        action="store", 
+        default="chrome_port", 
+        help="支持的参数: edge / firefox / chrome_port"
+    )
 
 @pytest.fixture(scope="session")
-def page(playwright: Playwright) -> Page:
-    """
-    提供一个带有登录态的浏览器页面 Page 对象。
-    """
-    browser = playwright.chromium.launch(headless=False) # 可设置为 True
-    context = browser.new_context()
-    page = context.new_page()
+def browser_name(request):
+    return request.config.getoption("--test-browser")
 
-    # --- 登录逻辑 ---
-    # 1. 导航到登录页
-    page.goto(f"{BASE_URL}/login")
-    
-    # 2. 输入用户名和密码
-    page.fill("input[name='username']", USERNAME)
-    page.fill("input[name='password']", PASSWORD)
-    
-    # 3. 点击登录
-    page.click("button[type='submit']")
-    
-    # 4. 等待登录成功（例如，等待某个特定元素出现）
-    page.wait_for_selector("#user-profile-menu")
-    
-    print("Login successful, session established.")
-    
-    yield page
-    
-    # --- 清理逻辑 ---
-    context.close()
-    browser.close()
+@pytest.fixture(scope="session")
+def page(browser_name):
+    """
+    提供一个带有登录态的浏览器页面 Page 对象，支持多端适配。
+    """
+    with sync_playwright() as p:
+        # 1. 启动特定浏览器
+        if browser_name == "edge":
+            browser = p.chromium.launch(channel="msedge", headless=False)
+        elif browser_name == "firefox":
+            browser = p.firefox.launch(headless=False)
+        elif browser_name == "chrome_port":
+            if not Config.CHROME_PORTABLE_PATH:
+                raise ValueError("CHROME_PORTABLE_PATH not set in .env")
+            browser = p.chromium.launch(
+                executable_path=Config.CHROME_PORTABLE_PATH, 
+                headless=False,
+                args=["--incognito"] # 便携版强制无痕模式
+            )
+        else:
+            raise ValueError(f"不支持的浏览器类型: {browser_name}")
+
+        # 2. 创建 Context (允许下载，隔离三端)
+        context = browser.new_context(
+            accept_downloads=True,
+            user_agent="Patlics-Automation-Agent"
+        )
+        page = context.new_page()
+
+        # 3. 执行登录逻辑 (示例)
+        page.goto(f"{Config.NEW_URL}/login")
+        page.fill("input[name='username']", Config.USERNAME)
+        page.fill("input[name='password']", Config.PASSWORD)
+        page.click("button[type='submit']")
+        
+        # 等待登录态建立
+        page.wait_for_load_state("networkidle")
+        
+        yield page
+        
+        # 4. 清理
+        context.close()
+        browser.close()
 
 def pytest_html_report_title(report):
-    """
-    自定义 pytest-html 报告标题。
-    """
-    report.title = "Patlics UI 自动化迁移测试报告"
+    report.title = "Patlics UI 自动化多端适配测试报告"

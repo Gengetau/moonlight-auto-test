@@ -10,32 +10,32 @@ test_cases = []
 try:
     test_cases = load_checklist(checklist_path)
 except Exception:
-    # 占位数据，用于演示
     test_cases = [{"test_id": "Init", "action_type": "wait", "action_target": "body", "expected_text": "PatentSQUARE"}]
 
 @pytest.mark.parametrize("case", test_cases)
-def test_migration_flow(page, case):
+def test_migration_flow(page, browser_name, case):
     test_id = case["test_id"]
     
-    # 1. 执行动作
+    # 1. 执行动作 (传入 browser_name 进行行为差异抹平)
     try:
         execute_action(
             page, 
             case.get("action_type"), 
             case.get("action_target"), 
-            case.get("input_value")
+            case.get("input_value"),
+            browser_name=browser_name
         )
     except Exception as e:
-        # 2. 异常监控与截图
-        error_found, msg, path = check_server_error(page, test_id)
+        # 2. 异常监控与三端隔离截图
+        error_found, msg, path = check_server_error(page, test_id, browser_name)
         if error_found:
-            pytest.fail(f"Server Error detected: {msg}. Screenshot: {path}")
+            pytest.fail(f"Server Error on {browser_name}: {msg}. Screenshot: {path}")
         raise e
     
-    # 3. 最终状态监控 (防止动作执行完但页面报错)
-    error_found, msg, path = check_server_error(page, test_id)
+    # 3. 最终状态监控
+    error_found, msg, path = check_server_error(page, test_id, browser_name)
     if error_found:
-        pytest.fail(f"Server Error detected: {msg}. Screenshot: {path}")
+        pytest.fail(f"Server Error on {browser_name}: {msg}. Screenshot: {path}")
 
     # 4. 断言
     assert_expectation(
