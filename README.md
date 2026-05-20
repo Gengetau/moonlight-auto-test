@@ -1,7 +1,7 @@
-# Patlics UI 自动化测试工具箱 (Patlics Auto Test)
+# Moonlight UI 自动化测试工具箱 (Moonlight Auto Test)
 
 ## 🚀 项目概述 (Project Overview)
-本项目是专为 **PatentSQUARE 在线应用** 从 Struts 架构向 Spring 架构迁移而设计的 UI 自动化回归测试框架。通过解析 Excel 格式的迁移测试检查单，利用 Python + Playwright 执行数据驱动测试 (DDT)，旨在自动检测 UI 布局及核心功能的退化 (Regression)。
+本项目是专为 **TargetApp 在线应用** 从 Struts 架构向 Spring 架构迁移而设计的 UI 自动化回归测试框架。通过解析 Excel 格式的迁移测试检查单，利用 Python + Playwright 执行数据驱动测试 (DDT)，旨在自动检测 UI 布局及核心功能的退化 (Regression)。
 
 ## 🛠️ 技术栈 (Tech Stack)
 - **语言**: Python 3.9+
@@ -20,7 +20,7 @@
 
 ## 📂 目录结构 (Project Structure)
 ```text
-patlics-auto-test/
+moonlight-auto-test/
 ├── data/               # 存放 checklist.xlsx 检查单
 ├── output/             # 存放报告、截图及下载文件
 ├── src/
@@ -68,4 +68,4 @@ pytest --test-browser=firefox --html=output/report.html
 ```
 
 ---
-*Developed with Luna's Grace | Patlics Migration Project 2026*
+*Developed with Luna's Grace | Moonlight Migration Project 2026*

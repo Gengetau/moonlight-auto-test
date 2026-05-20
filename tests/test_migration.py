@@ -10,7 +10,7 @@ test_cases = []
 try:
     test_cases = load_checklist(checklist_path)
 except Exception:
-    test_cases = [{"test_id": "Init", "action_type": "wait", "action_target": "body", "expected_text": "PatentSQUARE"}]
+    test_cases = [{"test_id": "Init", "action_type": "wait", "action_target": "body", "expected_text": "TargetApp"}]
 
 @pytest.mark.parametrize("case", test_cases)
 def test_migration_flow(page, browser_name, case):

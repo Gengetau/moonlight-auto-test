@@ -1,6 +1,6 @@
-🚀 Patlics UI 自动化测试工具箱 - 开发者规范 (Developer Specification)
+🚀 Moonlight UI 自动化测试工具箱 - 开发者规范 (Developer Specification)
 1. 🎯 项目概述 (Project Overview)
-本项目旨在为“PatentSQUARE 在线应用”从 Struts+JSP 向 Spring+JSP 的系统迁移提供支持，开发一款用于自动检测 UI 及功能退化（Regression）的测试工具。
+本项目旨在为“TargetApp 在线应用”从 Struts+JSP 向 Spring+JSP 的系统迁移提供支持，开发一款用于自动检测 UI 及功能退化（Regression）的测试工具。
 工具将以 Excel/CSV 格式的“移行测试检查单 (移行テストチェックリスト)”作为数据源，利用 Python + Playwright 执行数据驱动测试 (DDT)。
 2. 🛠️ 技术栈 (Tech Stack)
 语言: Python 3.9+
@@ -9,7 +9,7 @@ UI 自动化: playwright (推荐使用同步 API sync_api)
 数据处理: openpyxl (Excel 读写), pandas (数据清洗与格式化)
 3. 📂 目录结构 (Directory Structure)
 请 Agent 按照以下结构生成并配置代码文件：
-patlics-auto-test/
+moonlight-auto-test/
 ├── data/
 │ ├── checklist.xlsx # 迁移测试检查单 (数据输入源)
 │ └── test_data/ # 用于上传测试的文件集合

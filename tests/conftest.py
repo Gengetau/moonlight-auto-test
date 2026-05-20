@@ -40,7 +40,7 @@ def page(browser_name):
         # 2. 创建 Context (允许下载，隔离三端)
         context = browser.new_context(
             accept_downloads=True,
-            user_agent="Patlics-Automation-Agent"
+            user_agent="Moonlight-Automation-Agent"
         )
         page = context.new_page()
 
@@ -60,4 +60,4 @@ def page(browser_name):
         browser.close()
 
 def pytest_html_report_title(report):
-    report.title = "Patlics UI 自动化多端适配测试报告"
+    report.title = "Moonlight UI 自动化多端适配测试报告"
