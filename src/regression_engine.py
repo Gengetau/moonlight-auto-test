@@ -240,6 +240,10 @@ class RegressionEngine:
         page_id = mapping.get("page_id") or "unknown"
         results: List[Dict[str, Any]] = []
         
+        # 强制更新 Page 事件处理器以适配接管后的新上下文
+        self._ensure_page_listeners(legacy_page)
+        self._ensure_page_listeners(new_page)
+        
         legacy_state = _capture_state(legacy_page, page_dir, "00_legacy_initial")
         new_state = _capture_state(new_page, page_dir, "00_new_initial")
         results.append(
@@ -384,6 +388,24 @@ class RegressionEngine:
             },
             **extra,
         }
+
+    @staticmethod
+    def _ensure_page_listeners(page: Page):
+        """确保页面具备基本的事件监听，尤其是接管后的新页面对象"""
+        try:
+            # 简单的保活心跳，确保 CDP 链路通畅
+            page.evaluate("1 + 1")
+            
+            # 如果是接管后的页面，需要重新绑定 Dialog 处理器以防挂起
+            # 注意: Playwright sync_api 不支持直接 remove_all_listeners，我们直接叠加安全处理器
+            def _safe_dialog(dialog):
+                try:
+                    dialog.accept()
+                except:
+                    pass
+            page.on("dialog", _safe_dialog)
+        except:
+            pass
 
     def render_report(self, results: List[Dict[str, Any]]) -> Path:
         report_path = self.output_dir / "regression_report.html"
