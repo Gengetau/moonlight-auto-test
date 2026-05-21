@@ -40,6 +40,12 @@ def pytest_addoption(parser):
         default=False,
         help="开启半自动接管模式：由人工在浏览器中导航至目标页面，自动化脚本负责后续接管执行"
     )
+    parser.addoption(
+        "--struts-config",
+        action="store",
+        default="data/struts-config.xml",
+        help="Struts 配置文件路径，用于解析 Action 路由"
+    )
 
 @pytest.fixture(scope="session")
 def browser_name(request):
@@ -64,6 +70,10 @@ def target_page(request):
 @pytest.fixture(scope="session")
 def manual(request):
     return request.config.getoption("--manual")
+
+@pytest.fixture(scope="session")
+def struts_config(request):
+    return request.config.getoption("--struts-config")
 
 @pytest.fixture(scope="session")
 def browser(browser_name):

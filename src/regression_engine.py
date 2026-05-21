@@ -32,6 +32,7 @@ class RegressionEngine:
         output_dir: str = "./output/regression",
         visual_threshold_percent: float = 0.1,
         timeout: int = 15000,
+        struts_config_path: Optional[str] = None,
     ) -> None:
         self.mapping_path = Path(mapping_path)
         self.legacy_base_url = (legacy_base_url or Config.LEGACY_URL).rstrip("/")
@@ -43,9 +44,11 @@ class RegressionEngine:
         
         # 智能化路由解析
         self.resolver = StrutsResolver()
-        struts_config = Path("data/struts-config.xml")
-        if struts_config.exists():
-            self.resolver.load_config(struts_config)
+        config_file = Path(struts_config_path or "data/struts-config.xml")
+        if config_file.exists():
+            self.resolver.load_config(config_file)
+        elif struts_config_path:
+            print(f"[WARN] Struts config not found: {struts_config_path}")
 
     def load_mapping(self) -> Dict[str, Any]:
         if not self.mapping_path.exists():
