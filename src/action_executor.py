@@ -211,6 +211,63 @@ def _default_upload_file(capture_dir: Optional[Union[str, Path]] = None) -> str:
     return str(sample)
 
 
+
+
+def _resolve_upload_locator(frame: Frame, selector: str) -> Tuple[str, Dict[str, Any]]:
+    """
+    upload action 专用 selector 修正。
+
+    历史 Struts JSP 中 <html:file name="FormBean" property="uploadFile" />
+    容易被扫描成 [name='FormBean']，实际运行时该 locator 指向 <form>，
+    不能执行 set_input_files()。这里在执行 upload 前确认目标是否为
+    <input type="file">；如果不是，则自动 fallback 到页面内的 file input。
+    """
+    diagnostics: Dict[str, Any] = {
+        "original_selector": selector,
+        "resolved_selector": selector,
+        "fallback_used": False,
+    }
+
+    def _is_file_input(candidate_selector: str) -> bool:
+        try:
+            locator = frame.locator(candidate_selector).first
+            if locator.count() == 0:
+                return False
+            tag_name = locator.evaluate("el => (el.tagName || '').toLowerCase()")
+            input_type = locator.evaluate("el => (el.getAttribute('type') || '').toLowerCase()")
+            diagnostics["resolved_tag"] = tag_name
+            diagnostics["resolved_type"] = input_type
+            return tag_name == "input" and input_type == "file"
+        except Exception as exc:
+            diagnostics["validation_error"] = str(exc)
+            return False
+
+    if selector and _is_file_input(selector):
+        return selector, diagnostics
+
+    fallback_selectors = [
+        "input[type='file']",
+        "input[name='uploadFile']",
+        "input[type='file'][name='uploadFile']",
+    ]
+
+    for fallback in fallback_selectors:
+        try:
+            count = frame.locator(fallback).count()
+            if count > 0 and _is_file_input(fallback):
+                diagnostics.update(
+                    {
+                        "resolved_selector": fallback,
+                        "fallback_used": True,
+                        "fallback_count": count,
+                    }
+                )
+                return fallback, diagnostics
+        except Exception as exc:
+            diagnostics[f"fallback_error:{fallback}"] = str(exc)
+
+    return selector, diagnostics
+
 def execute_action(
     page: Page,
     action_type: str,
@@ -285,10 +342,13 @@ def execute_action(
             locator.dispatch_event("change", timeout=timeout)
             result["selected_value"] = selected_value
         elif semantic_action == "upload":
-            frame.locator(selector).first.wait_for(state="attached", timeout=timeout)
+            resolved_selector, upload_locator_state = _resolve_upload_locator(frame, selector)
+            result["upload_locator_state"] = upload_locator_state
+            frame.locator(resolved_selector).first.wait_for(state="attached", timeout=timeout)
             upload_file = value or _default_upload_file(capture_dir)
-            frame.locator(selector).first.set_input_files(upload_file, timeout=timeout)
+            frame.locator(resolved_selector).first.set_input_files(upload_file, timeout=timeout)
             result["upload_file"] = upload_file
+            result["resolved_selector"] = resolved_selector
         elif semantic_action == "submit":
             locator = frame.locator(selector).first
             locator.wait_for(state="attached", timeout=timeout)

@@ -49,6 +49,30 @@ def attr(element: Element, *names: str) -> Optional[str]:
     return None
 
 
+
+def normalize_locator(element: Element) -> Optional[str]:
+    """
+    実行用 locator を正規化する。
+
+    Struts の html:file では name は Form Bean 名、property が実際の input 名。
+    mapping には実行可能な input[type=file] locator を出す。
+    """
+    kind = str(element.get("kind") or "")
+    tag = str(element.get("tag") or "").lower()
+    attrs = element.get("attributes") or {}
+
+    if kind == "file" or tag == "html:file":
+        field_name = (
+            attrs.get("property")
+            or attrs.get("path")
+            or attrs.get("name")
+            or attrs.get("id")
+        )
+        if field_name:
+            return f"input[name='{field_name}']"
+
+    return element.get("locator")
+
 def element_label(element: Element) -> str:
     return (
         attr(element, "id", "styleId")
@@ -80,14 +104,6 @@ def action_target(element: Element) -> Optional[str]:
 
 def element_key(element: Element) -> Tuple[str, str]:
     kind = str(element.get("kind") or "unknown")
-    
-    # 针对 form 标签，如果同时存在 name 和 modelAttribute，由于旧系统只有 name，
-    # 为了建立映射，我们优先使用 name 作为标识。
-    if kind == "form":
-        name = attr(element, "name")
-        if name:
-            return kind, f"name:{name}"
-
     locator = element.get("locator")
     if locator:
         return kind, f"locator:{locator}"
@@ -109,19 +125,6 @@ def semantic_key(element: Element) -> Tuple[str, str]:
     target = action_target(element)
     if target:
         return kind, f"action:{target}"
-
-    # 针对 form 标签，即使新系统引入了 modelAttribute，如果 name 依然存在且与旧系统一致，
-    # 我们应优先使用 name 作为语义匹配键。
-    if kind == "form":
-        name = attr(element, "name")
-        if name:
-            return kind, f"label:{name}"
-
-    # 针对上传字段，Struts 的 property 和 Spring 原生 input 的 name 通常是稳定的
-    if kind == "file":
-        name = attr(element, "name", "property")
-        if name:
-            return kind, f"label:{name}"
 
     label = attr(element, "id", "styleId", "name", "property", "path", "modelAttribute", "commandName", "value", "title")
     if label:
@@ -166,8 +169,8 @@ def locator_change_candidates(legacy: List[Element], new: List[Element]) -> List
     changes: List[Dict[str, Any]] = []
     for key in sorted(set(legacy_by_semantic) & set(new_by_semantic)):
         for old, current in zip(legacy_by_semantic[key], new_by_semantic[key]):
-            old_locator = old.get("locator")
-            new_locator = current.get("locator")
+            old_locator = normalize_locator(old)
+            new_locator = normalize_locator(current)
             if old_locator and new_locator and old_locator != new_locator:
                 changes.append(
                     {
@@ -191,30 +194,66 @@ def classify_risk(missing_count: int, locator_change_count: int, legacy_count: i
     return "Low"
 
 
+def normalized_locator(element: Element) -> Optional[str]:
+    kind = str(element.get("kind") or "")
+    tag = str(element.get("tag") or "").lower()
+    attrs = element.get("attributes") or {}
+
+    if kind == "file" or tag == "html:file":
+        field_name = (
+            attrs.get("property")
+            or attrs.get("path")
+            or attrs.get("name")
+            or attrs.get("id")
+        )
+        if field_name:
+            return f"input[name='{field_name}']"
+
+    locator = element.get("locator")
+    if locator:
+        return str(locator)
+
+    return None
+
+
 def compare_page(page: str, legacy_pages: List[Page], new_pages: List[Page]) -> Dict[str, Any]:
     legacy_elements = flatten_elements(legacy_pages)
     new_elements = flatten_elements(new_pages)
     legacy_counts = count_by_key(legacy_elements, semantic_key)
     new_counts = count_by_key(new_elements, semantic_key)
-
+    new_semantic_keys = {semantic_key(element) for element in new_elements}
+    new_locators = {
+        normalized_locator(element)
+        for element in new_elements
+        if normalized_locator(element)
+    }
+    
     missing: List[Dict[str, Any]] = []
     for key, count in legacy_counts.items():
         delta = count - new_counts.get(key, 0)
         if delta <= 0:
             continue
+
         sample = next(element for element in legacy_elements if semantic_key(element) == key)
+
+        sample_locator = normalized_locator(sample)
+
+        # 二次兜底：如果 New 侧存在相同 normalized locator，则不认为缺失
+        if sample_locator and sample_locator in new_locators:
+            continue
+
         missing.append(
             {
                 "kind": key[0],
                 "key": key[1],
                 "label": element_label(sample),
-                "locator": sample.get("locator"),
+                "locator": sample_locator or sample.get("locator"),
                 "action": action_target(sample),
                 "line": sample.get("line"),
                 "count": delta,
             }
         )
-
+        
     locator_changes = locator_change_candidates(legacy_elements, new_elements)
     legacy_nav = sorted({target for target in map(navigation_target, legacy_elements) if target})
     new_nav = sorted({target for target in map(navigation_target, new_elements) if target})
