@@ -324,15 +324,29 @@ class RegressionEngine:
                 )
                 continue
 
-            # [状态重置隔离] 每个 Action 执行前，确保页面回到初始测试状态
-            # 防止前一个动作导致的页面跳转、弹窗或 DOM 销毁影响后续测试
+            # [物理重置隔离] 每个 Action 执行前，通过浏览器原生 Back 逻辑回退或重定向
+            # 针对旧系统，直接 goto 可能导致 Session 丢失，而 goBack() 或重定向至初始捕获 URL 更稳健
             if not manual:
-                legacy_page.goto(legacy_url, wait_until="domcontentloaded", timeout=max(self.timeout, 30000))
-                new_page.goto(new_url, wait_until="domcontentloaded", timeout=max(self.timeout, 30000))
+                if legacy_page.url != legacy_url:
+                    try:
+                        legacy_page.go_back(wait_until="domcontentloaded", timeout=10000)
+                    except:
+                        legacy_page.goto(legacy_url, wait_until="domcontentloaded", timeout=15000)
+                if new_page.url != new_url:
+                    try:
+                        new_page.go_back(wait_until="domcontentloaded", timeout=10000)
+                    except:
+                        new_page.goto(new_url, wait_until="domcontentloaded", timeout=15000)
             else:
-                # 在接管模式下，如果发生了跳转，引导主祭重置页面
-                # 为了自动化连贯性，这里也可以尝试自动 goBack()，但旧系统状态通常不可控
-                pass
+                # 在接管模式下，如果当前 URL 偏离了接管时的初始 URL，尝试执行原生回退
+                if legacy_page.url != legacy_url:
+                    print(f" [DEBUG] Legacy 页面发生偏移，尝试执行原生 Back...")
+                    try: legacy_page.go_back(wait_until="domcontentloaded", timeout=5000)
+                    except: pass
+                if new_page.url != new_url:
+                    print(f" [DEBUG] New 页面发生偏移，尝试执行原生 Back...")
+                    try: new_page.go_back(wait_until="domcontentloaded", timeout=5000)
+                    except: pass
 
             legacy_action = execute_action(
                 legacy_page,
