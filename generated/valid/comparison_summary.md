@@ -7,8 +7,8 @@
 - 同名页面匹配数：1659
 - Legacy 独有页面数：0
 - New 独有页面数：11
-- 高风险页面数：235
-- 中风险页面数：414
+- 高风险页面数：377
+- 中风险页面数：466
 - 公共导航路径数：588
 - Action 映射数：861
 
@@ -57,47 +57,54 @@
 
 | 页面 | Legacy元素 | New元素 | 缺失 | 定位器变更 | 公共导航 |
 |---|---:|---:|---:|---:|---|
-| AiAutoClsEntry.jsp | 2 | 23 | 1 | 0 | `AiAutoClsEntry` |
-| AiAutoClsEntryList.jsp | 2 | 22 | 1 | 0 | `AiAutoClsEntryList` |
-| AiAutoClsEvalRankSelect.jsp | 3 | 4 | 1 | 0 | `AiAutoClsEntryDisp` |
+| AbstListEdit.jsp | 352 | 158 | 33 | 0 | `AbstListViewEntry` |
+| AbstPDFDownload.jsp | 86 | 86 | 5 | 2 | `JpAbstPDFDownload` |
 | AiAutoClsSettingClass.jsp | 3 | 3 | 1 | 0 | - |
 | AiAutoClsSettingEvalRank.jsp | 3 | 3 | 1 | 0 | - |
 | AzureADUserListUpload.jsp | 3 | 2 | 1 | 0 | `AzureADUserUpAdminUpload`, `UserUpUserListCtrl` |
-| BiblioListSaveUpdateListSelect.jsp | 3 | 9 | 1 | 0 | `BiblioListSaveUpdateListSelect` |
+| BiblioComplexSelectList.jsp | 3 | 3 | 1 | 0 | `BiblioSetSearch` |
+| BiblioFileDownloadDisp.jsp | 60 | 60 | 5 | 0 | `JpBiblioFileDownload` |
 | BookmarkWord.jsp | 2 | 2 | 1 | 1 | - |
 | ClassificationCodeToolTip.jsp | 7 | 7 | 0 | 7 | - |
 | ClassificationMatrix.jsp | 12 | 12 | 0 | 12 | - |
+| ClassificationMatrixFrame.jsp | 24 | 24 | 6 | 0 | `CnClassificationMatrixHeader`, `EuClassificationMatrixHeader`, `JpClassificationMatrixHeader` |
 | ClassificationMatrixHeader.jsp | 8 | 10 | 0 | 6 | - |
+| ClsCopy.jsp | 17 | 18 | 3 | 0 | `ClsCopy` |
 | ClsDeleteForClsSystem.jsp | 3 | 3 | 1 | 0 | `ClsDeleteFromContext` |
 | ClsDeleteForClsSystemMg.jsp | 3 | 3 | 1 | 0 | `ClsDeleteFromContext` |
-| ClsDtlForClsSystem.jsp | 3 | 5 | 1 | 0 | `ClsUpdateFromContext` |
-| ClsFileDownload.jsp | 3 | 12 | 2 | 0 | `ClsFileDownload` |
-| ClsNewEntryForClsSystem.jsp | 3 | 5 | 1 | 0 | `ClsNewEntryFromContext` |
-| CnAbstList.jsp | 50 | 148 | 11 | 1 | `CnAbstListPaging` |
-| CnBiblioList.jsp | 18 | 57 | 3 | 1 | `CnAbstListForBiblioList` |
-| CnBiblioListHeader.jsp | 29 | 84 | 5 | 0 | - |
-| CnBiblioListTableBody.jsp | 7 | 9 | 3 | 0 | - |
+| ClsDtlForClsSystem.jsp | 5 | 5 | 2 | 0 | `ClsUpdateFromContext` |
+| ClsNewEntryForClsSystem.jsp | 5 | 5 | 2 | 0 | `ClsNewEntryFromContext` |
+| CnAbstList.jsp | 158 | 148 | 15 | 1 | `CnAbstListPaging` |
+| CnAbstList0.jsp | 103 | 95 | 4 | 0 | `CnAbstListPaging` |
+| CnAbstPDFDownload.jsp | 86 | 86 | 6 | 0 | `CnAbstPDFDownload` |
+| CnAnalyzeRankingHeader.jsp | 23 | 23 | 1 | 5 | - |
+| CnBiblioFileDownloadDisp.jsp | 58 | 58 | 5 | 0 | `CnBiblioFileDownload` |
+| CnBiblioList.jsp | 63 | 57 | 4 | 1 | `CnAbstListForBiblioList` |
+| CnBiblioList0.jsp | 102 | 94 | 4 | 0 | `CnAbstListForBiblioList` |
+| CnBiblioListHeader.jsp | 92 | 84 | 7 | 0 | - |
+| CnBiblioListTableBody.jsp | 9 | 9 | 4 | 0 | - |
 | CnClassCodeDetail.jsp | 3 | 3 | 1 | 1 | - |
-| CnClsAid.jsp | 3 | 12 | 1 | 0 | `CnClsAidSearch` |
+| CnClsAid.jsp | 11 | 12 | 4 | 0 | `CnClsAidSearch` |
 | CnCpcAidResult.jsp | 3 | 3 | 1 | 0 | - |
 | CnEpcAidResult.jsp | 3 | 3 | 1 | 0 | - |
-| CnGazetteImageWin_list.jsp | 3 | 3 | 1 | 1 | - |
-| CnGazetteImageWin_zoomin.jsp | 3 | 3 | 1 | 1 | - |
-| CnIpcAidResult.jsp | 3 | 3 | 1 | 0 | - |
-| CnPersonAidResult.jsp | 3 | 3 | 1 | 0 | - |
-| CnSearchAid.jsp | 4 | 17 | 2 | 0 | `CnSearchAidSearch` |
-| CnTechDicResult.jsp | 3 | 3 | 1 | 0 | - |
 
 ## 代表性缺失/定位器变更
 
-### AiAutoClsEntry.jsp
-- 缺失：file `trainFile` locator=[name='trainFile'] action=-
+### AbstListEdit.jsp
+- 缺失：field `AbstListViewEditForm` locator=[name='AbstListViewEditForm'] action=-
+- 缺失：field `<%= slctItemIds[index].toString()%>` locator=- action=-
+- 缺失：field `SET_ID` locator=[name='SET_ID'] action=-
+- 缺失：field `zumen` locator=[name='zumen'] action=-
+- 缺失：field `1` locator=- action=-
 
-### AiAutoClsEntryList.jsp
-- 缺失：file `trainFile` locator=[name='trainFile'] action=-
-
-### AiAutoClsEvalRankSelect.jsp
-- 缺失：button `<bean:message bundle='PATLICS_MESSAGE' key='btn.clsSelect.close'/>` locator=- action=-
+### AbstPDFDownload.jsp
+- 缺失：field `<%= entSecItemIds[index].toString()%>` locator=- action=-
+- 缺失：field `JpAbstListForm` locator=[name='JpAbstListForm'] action=-
+- 缺失：field `<%= slctItemIds[index].toString()%>` locator=- action=-
+- 缺失：field `SLCT_ITEM_ID` locator=[name='SLCT_ITEM_ID'] action=-
+- 缺失：field `INIT_ITEM_ID` locator=[name='INIT_ITEM_ID'] action=-
+- 定位器变更：field `JpAbstListForm` [name='JpAbstListForm'] -> [name='standardFlag']
+- 定位器变更：field `JpAbstListForm` [name='JpAbstListForm'] -> [name='standardFlag']
 
 ### AiAutoClsSettingClass.jsp
 - 缺失：button `<bean:message bundle='PATLICS_MESSAGE' key='btn.close'/>` locator=- action=-
@@ -108,8 +115,15 @@
 ### AzureADUserListUpload.jsp
 - 缺失：file `UserUpUploadForm` locator=[name='UserUpUploadForm'] action=-
 
-### BiblioListSaveUpdateListSelect.jsp
-- 缺失：button `<bean:message bundle='PATLICS_MESSAGE' key='btn.cancel' />` locator=- action=-
+### BiblioComplexSelectList.jsp
+- 缺失：field `INIT_ITEM_ID` locator=[name='INIT_ITEM_ID'] action=-
+
+### BiblioFileDownloadDisp.jsp
+- 缺失：field `JpBiblioFileDownloadForm` locator=[name='JpBiblioFileDownloadForm'] action=-
+- 缺失：field `<%= entSecItemIds[index].toString()%>` locator=- action=-
+- 缺失：field `<%= slctItemIds[index].toString()%>` locator=- action=-
+- 缺失：field `SLCT_ITEM_ID` locator=[name='SLCT_ITEM_ID'] action=-
+- 缺失：field `INIT_ITEM_ID` locator=[name='INIT_ITEM_ID'] action=-
 
 ### BookmarkWord.jsp
 - 缺失：button `<bean:message bundle='PATLICS_MESSAGE' key='btn.close'/>` locator=- action=-
@@ -183,86 +197,3 @@
 | `CnAnalyzeRankingFrame` | 1 | CnAnalyzeRankingHeader.jsp |
 | `CnAnalyzeRankingHeader` | 1 | CnAnalyzeRankingFrame.jsp |
 | `CnBiblioFileDownload` | 1 | CnBiblioFileDownloadDisp.jsp |
-
-## 数量偏差分析
-
-### 结论
-
-`checklist.md` 行数远高于 `checklist_2.md`，主要不是页面数量导致，而是 New 环境的 Spring JSP 标签被 `jsp_scanner` 过度识别为 `form` 元素。当前 scanner 正则会把 `<form:hidden>`、`<form:option>`、`<form:input>`、`<form:select>` 等 Spring 表单字段按 `form` 命中；Legacy 的 `<html:hidden>`、`<html:text>` 等字段标签不在扫描范围内，因此没有产生对称膨胀。
-
-数据上看，New 的 `form` 总数是 15,356，但其中真正的表单容器只有 1,369 个（`form:form` 829 + 原生 `form` 538 + `html:form` 2），与 Legacy 的 `form=1,369` 完全一致。额外的 13,987 个 `form` 实际是 Spring 字段/选项标签。
-
-### 元素密度
-
-| 指标 | New: elements.json | Legacy: elements_2.json | 差异 |
-|---|---:|---:|---:|
-| 页面数 | 1,685 | 1,673 | +12 |
-| 元素总数 | 20,514 | 5,244 | +15,270 |
-| 每页平均元素数 | 12.17 | 3.13 | 3.89 倍 |
-| 每页中位数元素数 | 3 | 1 | 3.00 倍 |
-| form | 15,356 | 1,369 | 11.22 倍 |
-| button | 5,106 | 3,345 | 1.53 倍 |
-| file | 0 | 21 | -21 |
-| link | 52 | 509 | -457 |
-| hidden 字段识别数 | 4,915 | 0 | +4,915 |
-| locator 缺失元素数 | 15,587 | 2,215 | +13,372 |
-
-New 中被误归类为 `form` 的 Spring 字段标签分布如下：
-
-| Spring 标签 | 数量 |
-|---|---:|
-| `form:hidden` | 4,915 |
-| `form:option` | 4,684 |
-| `form:input` | 1,608 |
-| `form:select` | 1,505 |
-| `form:radiobutton` | 690 |
-| `form:checkbox` | 284 |
-| `form:options` | 146 |
-| `form:textarea` | 125 |
-| `form:password` | 30 |
-
-如果把这些 Spring 字段标签从 New 的 `form` 中剥离，只保留真正表单容器，New 的可比元素约为 6,527 个（真实 form 1,369 + button 5,106 + link 52），与 Legacy 的 5,244 个接近得多。剩余差异主要来自 New 中按钮识别更多，以及 New 有少量 `_part.jsp` 片段页被单独扫描。
-
-### checklist 行数为什么爆炸
-
-`checklist_generator` 对元素是线性放大的：
-
-- `form` / `file`：每个元素生成 4 条测试用例。
-- `button` / `link`：每个元素生成 3 条测试用例。
-- “元素证据”章节再为每个唯一元素追加 1 行。
-
-因此当前数据可以精确解释 Markdown 行数：
-
-| 指标 | New | Legacy | 差异 |
-|---|---:|---:|---:|
-| 生成测试用例数 | 76,898 | 17,122 | +59,776 |
-| 元素证据行数 | 20,514 | 5,244 | +15,270 |
-| 可解释主体行数 | 97,412 | 22,366 | +75,046 |
-| 实际 checklist 行数 | 97,444 | 22,398 | +75,046 |
-
-实际行数与公式差异只来自固定标题/表头等 32 行。因此 New checklist 更多，根因是“元素数量变了”，并且主要是 Spring 字段标签被当作 `form` 类型；不是 `checklist_generator` 改变了类型规则。
-
-如果按“真实表单容器”重新估算，New 的用例数会降到约 20,950 条（form 1,369 * 4 + button 5,106 * 3 + link 52 * 3），不再是 76,898 条。
-
-### 行数爆炸 Top 5 页面
-
-“行数贡献”按当前 generator 规则计算：`form/file * 4 + button/link * 3 + 元素证据行`。以下是 New 相对 Legacy 增量最大的页面：
-
-| 页面 | New 元素 | Legacy 元素 | New hidden | New 主要来源 | 预计行数增量 |
-|---|---:|---:|---:|---|---:|
-| `RsvDlListReserve.jsp` | 235 | 1 | 75 | `form:option` 104, `form:hidden` 75, `form:select` 34 | +1,163 |
-| `RsvDlDocListReserveRegist_part.jsp` | 217 | 0 | 33 | New 独有 `_part.jsp`；`form:option` 125, `form:select` 37, `form:hidden` 33 | +1,082 |
-| `WwEasyInputPullText.jsp` | 220 | 0 | 0 | `input type=button` 128, `form:input` 72 | +972 |
-| `AbstListEdit_part.jsp` | 194 | 0 | 22 | New 独有 `_part.jsp`；`form:option` 115, `form:select` 36, `form:hidden` 22 | +970 |
-| `UsEasyInput.jsp` | 199 | 15 | 1 | `form:input` 95, `input type=button` 84 | +850 |
-
-这些 Top 页面说明了两件事：
-
-1. New 中确实有 `_part.jsp` 片段页被单独扫描，带来少量页面级新增。
-2. 更大的影响来自同一业务页内部的字段标签膨胀。例如 `RsvDlListReserve.jsp` 的 Legacy 只有 1 个 `html:form`，New 有 228 个被归为 `form` 的元素，其中 75 个是 `form:hidden`，104 个是 `form:option`。
-
-### 对主祭疑问的回答
-
-页面总数接近但 checklist 行数相差约 4.35 倍，是因为元素密度从每页 3.13 个上升到每页 12.17 个；而元素密度上升主要由 scanner 对 Spring `<form:*>` 标签的解析方式造成。New 架构中的公共片段页和按钮数量增加也有贡献，但不是主因。
-
-后续如需让 New/Legacy 数量可比，建议在 `jsp_scanner` 中把 `form:hidden`、`form:input`、`form:select`、`form:option` 等字段标签分类为 `field` 或直接排除出 checklist 生成范围，只保留真正的 `form:form` / `html:form` / 原生 `form` 作为 `form` 测试入口。

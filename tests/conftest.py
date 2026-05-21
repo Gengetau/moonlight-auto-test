@@ -85,10 +85,10 @@ def _authenticated_page(browser, base_url):
     )
     page = context.new_page()
     try:
-        page.goto(f"{base_url.rstrip('/')}/login", wait_until="load", timeout=30000)
-        page.fill("input[name='username']", Config.USERNAME)
+        page.goto(base_url, wait_until="load", timeout=30000)
+        page.fill("input[name='user']", Config.USERNAME)
         page.fill("input[name='password']", Config.PASSWORD)
-        page.click("button[type='submit']")
+        page.click("input[type='button']")
 
         # 等待登录态建立
         page.wait_for_load_state("networkidle", timeout=30000)
