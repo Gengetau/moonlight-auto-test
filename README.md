@@ -74,9 +74,11 @@ python src/jsp_scanner.py /path/to/new/jsp -o mappings/new_elements.json
 ```
 
 ### 2. 生成跨时空映射
-比对并识别风险页面：
+比对并识别风险页面，输出 JSON 映射文件与 Markdown 摘要报告：
 ```bash
-python src/page_mapping.py mappings/legacy_elements.json mappings/new_elements.json -o mappings/page_diff.json
+python src/page_mapping.py mappings/legacy_elements.json mappings/new_elements.json \
+  -o mappings/page_diff.json \
+  --md generated/comparison_summary.md
 ```
 
 ### 3. 获取测试清单

@@ -2,7 +2,7 @@ import argparse
 import json
 import re
 from collections import Counter, defaultdict
-from pathlib import PureWindowsPath
+from pathlib import Path, PureWindowsPath
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 
@@ -340,21 +340,34 @@ def render_markdown(mapping: Dict[str, Any], limit: int = 30) -> str:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Build reduced Legacy/New JSP page mappings.")
-    parser.add_argument("--legacy", default="mappings/valid/elements_2.json")
-    parser.add_argument("--new", default="mappings/valid/elements.json")
-    parser.add_argument("--json-output", default="generated/valid/page_mapping.json")
-    parser.add_argument("--md-output", default="generated/valid/comparison_summary.md")
+    parser.add_argument("legacy", type=Path, help="Legacy elements.json")
+    parser.add_argument("new", type=Path, help="New elements.json")
+    parser.add_argument(
+        "-o", "--output", type=Path, help="JSON mapping output path (optional)"
+    )
+    parser.add_argument(
+        "--md", type=Path, help="Markdown summary output path (optional)"
+    )
     args = parser.parse_args()
 
-    with open(args.legacy, encoding="utf-8") as handle:
-        legacy_data = json.load(handle)
-    with open(args.new, encoding="utf-8") as handle:
-        new_data = json.load(handle)
+    legacy_data = json.loads(args.legacy.read_text(encoding="utf-8"))
+    new_data = json.loads(args.new.read_text(encoding="utf-8"))
 
     mapping = build_mapping(legacy_data, new_data)
-    write_json(mapping, args.json_output)
-    with open(args.md_output, "w", encoding="utf-8") as handle:
-        handle.write(render_markdown(mapping))
+
+    if args.output:
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        args.output.write_text(
+            json.dumps(mapping, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+        )
+
+    md_report = render_markdown(mapping)
+    if args.md:
+        args.md.parent.mkdir(parents=True, exist_ok=True)
+        args.md.write_text(md_report, encoding="utf-8")
+
+    if not args.output and not args.md:
+        print(md_report)
 
 
 if __name__ == "__main__":
