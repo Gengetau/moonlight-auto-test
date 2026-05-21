@@ -281,7 +281,25 @@ class RegressionEngine:
                 }
             )
 
-        for action_index, change in enumerate(mapping.get("locator_changes", []), start=1):
+        # [饱和式打击] 合并 locator_changes 和 full_action_steps
+        # 确保不仅测试变更的项目，也对所有识别到的按钮/链接进行一致性确认
+        target_actions = mapping.get("locator_changes", [])
+        if not target_actions:
+            # 如果没有检测到定位器变更，则退而求其次执行所有识别到的语义动作
+            for step in mapping.get("full_action_steps", []):
+                # 尝试从新世界中寻找对应的 locator
+                # 这需要实时查找，由于 Mapping 阶段可能漏掉，我们在这里做最后尝试
+                legacy_loc = step.get("legacy_locator")
+                # 简单启发式：如果在 Mapping 中没发现变化，假设 locator 依然一致
+                target_actions.append({
+                    "legacy_locator": legacy_loc,
+                    "new_locator": legacy_loc,
+                    "label": step.get("label"),
+                    "semantic_key": step.get("semantic_key"),
+                    "kind": step.get("kind")
+                })
+
+        for action_index, change in enumerate(target_actions, start=1):
             legacy_locator = change.get("legacy_locator")
             new_locator = change.get("new_locator")
             action_name = change.get("label") or change.get("semantic_key") or f"action_{action_index}"

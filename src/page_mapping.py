@@ -219,6 +219,19 @@ def normalized_locator(element: Element) -> Optional[str]:
 def compare_page(page: str, legacy_pages: List[Page], new_pages: List[Page]) -> Dict[str, Any]:
     legacy_elements = flatten_elements(legacy_pages)
     new_elements = flatten_elements(new_pages)
+    
+    # [月眸增强] 提取所有潜在的可交互元素，不仅限于 locator_changes
+    # 这将显著增加回归测试的项目数量，涵盖所有识别到的按钮、链接和输入框
+    full_action_steps = []
+    for element in legacy_elements:
+        if element.get("kind") in ("button", "link", "file", "field"):
+            full_action_steps.append({
+                "kind": element.get("kind"),
+                "label": element_label(element),
+                "legacy_locator": element.get("locator"),
+                "semantic_key": semantic_key(element)[1]
+            })
+
     legacy_counts = count_by_key(legacy_elements, semantic_key)
     new_counts = count_by_key(new_elements, semantic_key)
     new_semantic_keys = {semantic_key(element) for element in new_elements}
@@ -278,6 +291,7 @@ def compare_page(page: str, legacy_pages: List[Page], new_pages: List[Page]) -> 
         "legacy_only_navigation_paths": sorted(set(legacy_nav) - set(new_nav)),
         "new_only_navigation_paths": sorted(set(new_nav) - set(legacy_nav)),
         "actions": actions,
+        "full_action_steps": full_action_steps,
         "missing_legacy_elements": missing,
         "locator_changes": locator_changes,
         "risk": classify_risk(len(missing), len(locator_changes), len(legacy_elements)),
