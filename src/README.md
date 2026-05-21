@@ -18,6 +18,7 @@ It currently extracts:
 - `html:link` as `kind: link`
 
 Each record includes the tag name, source line, parsed attributes, a best-effort locator, and an action hint such as `submit`, `upload`, `click`, or `navigate`.
+`action_executor.py` consumes those hints through the semantic execution layer, so migration tests can execute the intended behavior even when the raw locator action would otherwise be ambiguous.
 
 ## Contribution to Moonlight
 
@@ -28,6 +29,8 @@ Moonlight compares behavior between the legacy Struts application and the migrat
 - identify form, upload, button, and link coverage gaps before Playwright tests are written
 
 This reduces manual inspection of JSP pages and gives the test executor a stable JSON bridge from legacy UI source to automated regression scenarios.
+
+The regression executor now captures evidence from the detected business frame rather than blindly using the top-level page. HTML reports include target frame metadata, wait diagnostics, action type, locator pairs, and blocked reasons for each case.
 
 ## Remote Collaboration Flow
 
