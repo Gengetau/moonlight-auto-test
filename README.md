@@ -93,6 +93,14 @@ python src/checklist_generator.py mappings/page_diff.json -o generated/migration
 pytest --test-browser=chrome_port --html=output/report.html
 ```
 
+单画面精准打击：主祭指定一个 JSP 文件名，只执行该画面的回归测试；此模式会无视风险等级过滤。
+```bash
+pytest tests/test_migration.py \
+  --test-browser=chrome_port \
+  --target-page=AbstListEdit.jsp \
+  --html=output/AbstListEdit_report.html
+```
+
 ---
 
 ## 📂 架构图谱

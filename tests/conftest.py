@@ -28,6 +28,12 @@ def pytest_addoption(parser):
         default=None,
         help="限制回归页面数量，便于冒烟验证"
     )
+    parser.addoption(
+        "--target-page",
+        action="store",
+        default=None,
+        help="只执行指定 JSP 文件名的回归测试；指定后无视风险等级"
+    )
 
 @pytest.fixture(scope="session")
 def browser_name(request):
@@ -44,6 +50,10 @@ def risk_only(request):
 @pytest.fixture(scope="session")
 def regression_limit(request):
     return request.config.getoption("--regression-limit")
+
+@pytest.fixture(scope="session")
+def target_page(request):
+    return request.config.getoption("--target-page")
 
 @pytest.fixture(scope="session")
 def browser(browser_name):

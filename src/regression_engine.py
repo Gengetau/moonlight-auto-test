@@ -2,7 +2,7 @@ import html
 import json
 import re
 from collections import Counter
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import Any, Dict, Iterable, List, Optional
 from urllib.parse import urlsplit
 
@@ -51,7 +51,28 @@ class RegressionEngine:
         risk_only: bool = True,
         risk_levels: Optional[Iterable[str]] = None,
         limit: Optional[int] = None,
+        target_page: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
+        if target_page:
+            normalized_target = self._target_page_name(target_page)
+            pages = [
+                page
+                for page in self.mapping.get("page_mappings", [])
+                if self._target_page_name(page.get("page_id")) == normalized_target
+            ]
+            if not pages:
+                available = sorted(
+                    self._target_page_name(page.get("page_id"))
+                    for page in self.mapping.get("page_mappings", [])
+                    if page.get("page_id")
+                )
+                sample = ", ".join(available[:10])
+                suffix = f" Available pages include: {sample}" if sample else " Mapping contains no pages."
+                raise ValueError(
+                    f"Target JSP page not found in mapping file {self.mapping_path}: {target_page}.{suffix}"
+                )
+            return pages[:1]
+
         levels = list(risk_levels or (["High", "Medium"] if risk_only else ["High", "Medium", "Low"]))
         rank = {level.lower(): index for index, level in enumerate(levels)}
         pages = [
@@ -70,12 +91,18 @@ class RegressionEngine:
         risk_only: bool = True,
         risk_levels: Optional[Iterable[str]] = None,
         limit: Optional[int] = None,
+        target_page: Optional[str] = None,
         browser_name: str = "chrome",
     ) -> Dict[str, Any]:
         self.output_dir.mkdir(parents=True, exist_ok=True)
         results: List[Dict[str, Any]] = []
         for page_index, mapping in enumerate(
-            self.select_pages(risk_only=risk_only, risk_levels=risk_levels, limit=limit),
+            self.select_pages(
+                risk_only=risk_only,
+                risk_levels=risk_levels,
+                limit=limit,
+                target_page=target_page,
+            ),
             start=1,
         ):
             results.extend(
@@ -348,6 +375,10 @@ class RegressionEngine:
     @staticmethod
     def _safe_name(value: Any) -> str:
         return re.sub(r"[^A-Za-z0-9_.-]+", "_", str(value or "unknown")).strip("_")[:120] or "unknown"
+
+    @staticmethod
+    def _target_page_name(value: Any) -> str:
+        return PureWindowsPath(str(value or "").replace("/", "\\")).name
 
     def _goto(self, page: Page, url: str) -> Dict[str, Any]:
         try:

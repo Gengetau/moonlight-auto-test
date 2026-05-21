@@ -41,6 +41,41 @@ def test_select_pages_orders_high_then_medium(tmp_path):
     assert [page["page_id"] for page in pages] == ["high.jsp", "medium.jsp"]
 
 
+def test_select_pages_target_page_ignores_risk(tmp_path):
+    mapping = {
+        "page_mappings": [
+            {"page_id": "low.jsp", "risk": "Low"},
+            {"page_id": "high.jsp", "risk": "High"},
+        ]
+    }
+    mapping_path = tmp_path / "page_mapping.json"
+    mapping_path.write_text(json.dumps(mapping), encoding="utf-8")
+
+    engine = RegressionEngine(mapping_path=str(mapping_path), output_dir=str(tmp_path / "out"))
+    pages = engine.select_pages(risk_only=True, target_page="low.jsp")
+
+    assert [page["page_id"] for page in pages] == ["low.jsp"]
+
+
+def test_select_pages_target_page_reports_missing_mapping(tmp_path):
+    mapping = {"page_mappings": [{"page_id": "exists.jsp", "risk": "High"}]}
+    mapping_path = tmp_path / "page_mapping.json"
+    mapping_path.write_text(json.dumps(mapping), encoding="utf-8")
+
+    engine = RegressionEngine(mapping_path=str(mapping_path), output_dir=str(tmp_path / "out"))
+
+    try:
+        engine.select_pages(target_page="missing.jsp")
+    except ValueError as exc:
+        message = str(exc)
+    else:
+        raise AssertionError("Expected missing target page to raise ValueError")
+
+    assert "Target JSP page not found" in message
+    assert "missing.jsp" in message
+    assert "exists.jsp" in message
+
+
 def test_render_report_contains_side_by_side_sections(tmp_path):
     mapping_path = tmp_path / "page_mapping.json"
     mapping_path.write_text(json.dumps({"page_mappings": []}), encoding="utf-8")
