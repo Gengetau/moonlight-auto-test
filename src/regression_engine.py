@@ -153,7 +153,14 @@ class RegressionEngine:
             print(f"\n[MANUAL MODE] 请手动操作浏览器并导航至目标页面:")
             print(f" - Legacy: {legacy_url}")
             print(f" - New:    {new_url}")
-            input(f" >>> 请在浏览器中确认页面已完全渲染后，在此处按下回车 [ENTER] 以接管自动化测试...")
+            input(f" >>> 请在浏览器中确认页面已完全渲染（包括处理新弹出的窗口）后，按下回车 [ENTER] ...")
+            
+            # 自动探测并接管最新打开的页面（处理 window.open 场景）
+            legacy_page = legacy_page.context.pages[-1]
+            new_page = new_page.context.pages[-1]
+            
+            print(f" [INFO] 已接管最新页面: Legacy({legacy_page.url}) | New({new_page.url})")
+            
             legacy_nav = {"status": "PASS", "url": legacy_page.url, "manual": True}
             new_nav = {"status": "PASS", "url": new_page.url, "manual": True}
         else:
