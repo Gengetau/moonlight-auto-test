@@ -3,6 +3,7 @@ from src.regression_engine import RegressionEngine
 
 def test_migration_regression(
     target_page,
+    manual,
     legacy_page,
     new_page,
     browser_name,
@@ -24,6 +25,7 @@ def test_migration_regression(
         risk_only=risk_only,
         limit=regression_limit,
         target_page=target_page,
+        manual=manual,
     )
 
     assert result["summary"].get("BLOCKED", 0) == 0, f"Blocked regression steps. Report: {result['report_path']}"

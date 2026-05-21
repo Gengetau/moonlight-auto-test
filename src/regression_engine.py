@@ -93,6 +93,7 @@ class RegressionEngine:
         limit: Optional[int] = None,
         target_page: Optional[str] = None,
         browser_name: str = "chrome",
+        manual: bool = False,
     ) -> Dict[str, Any]:
         self.output_dir.mkdir(parents=True, exist_ok=True)
         results: List[Dict[str, Any]] = []
@@ -112,6 +113,7 @@ class RegressionEngine:
                     mapping,
                     page_index=page_index,
                     browser_name=browser_name,
+                    manual=manual,
                 )
             )
 
@@ -137,6 +139,7 @@ class RegressionEngine:
         *,
         page_index: int,
         browser_name: str,
+        manual: bool = False,
     ) -> List[Dict[str, Any]]:
         page_id = mapping.get("page_id") or f"page_{page_index}"
         page_dir = self.output_dir / f"{page_index:04d}_{self._safe_name(page_id)}"
@@ -145,8 +148,17 @@ class RegressionEngine:
 
         legacy_url = self._page_url(self.legacy_base_url, page_id)
         new_url = self._page_url(self.new_base_url, page_id)
-        legacy_nav = self._goto(legacy_page, legacy_url)
-        new_nav = self._goto(new_page, new_url)
+
+        if manual:
+            print(f"\n[MANUAL MODE] 请手动操作浏览器并导航至目标页面:")
+            print(f" - Legacy: {legacy_url}")
+            print(f" - New:    {new_url}")
+            input(f" >>> 请在浏览器中确认页面已完全渲染后，在此处按下回车 [ENTER] 以接管自动化测试...")
+            legacy_nav = {"status": "PASS", "url": legacy_page.url, "manual": True}
+            new_nav = {"status": "PASS", "url": new_page.url, "manual": True}
+        else:
+            legacy_nav = self._goto(legacy_page, legacy_url)
+            new_nav = self._goto(new_page, new_url)
 
         legacy_state = _capture_state(legacy_page, page_dir, "00_legacy_initial")
         new_state = _capture_state(new_page, page_dir, "00_new_initial")

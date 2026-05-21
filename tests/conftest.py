@@ -34,6 +34,12 @@ def pytest_addoption(parser):
         default=None,
         help="只执行指定 JSP 文件名的回归测试；指定后无视风险等级"
     )
+    parser.addoption(
+        "--manual",
+        action="store_true",
+        default=False,
+        help="开启半自动接管模式：由人工在浏览器中导航至目标页面，自动化脚本负责后续接管执行"
+    )
 
 @pytest.fixture(scope="session")
 def browser_name(request):
@@ -54,6 +60,10 @@ def regression_limit(request):
 @pytest.fixture(scope="session")
 def target_page(request):
     return request.config.getoption("--target-page")
+
+@pytest.fixture(scope="session")
+def manual(request):
+    return request.config.getoption("--manual")
 
 @pytest.fixture(scope="session")
 def browser(browser_name):

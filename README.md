@@ -103,6 +103,16 @@ pytest tests/test_migration.py \
   --html=output/AbstListEdit_report.html
 ```
 
+半自动接管模式 (Takeover Mode)：当旧系统由于 Frame 嵌套或 Session 状态复杂导致直接 `page.goto` 白屏时，由主祭人工操作浏览器至目标页面，自动化脚本负责后续接管。
+```bash
+pytest tests/test_migration.py \
+  --test-browser=chrome_port \
+  --target-page=ProjectMemberUploadDisp.jsp \
+  --manual \
+  --html=output/manual_report.html
+```
+*注：此模式下，引擎会暂停执行并等待你在终端按下回车，请在接管前确保浏览器已停留在正确的 JSP 画面。*
+
 ---
 
 ## 📂 架构图谱
