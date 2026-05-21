@@ -1,0 +1,165 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <title>Moonlight Legacy/New Regression Report</title>
+  <style>
+    body { margin: 0; font-family: Arial, sans-serif; color: #17202a; background: #f5f7fb; }
+    header { padding: 24px 32px; background: #17202a; color: white; }
+    h1 { margin: 0 0 12px; font-size: 26px; letter-spacing: 0; }
+    .summary { display: flex; gap: 12px; flex-wrap: wrap; }
+    .pill { padding: 8px 12px; border-radius: 6px; background: #273746; font-weight: 700; }
+    main { padding: 24px 32px; }
+    .case { margin-bottom: 20px; border: 1px solid #d9e0ea; border-radius: 8px; background: white; overflow: hidden; }
+    .case-head { display: flex; align-items: center; gap: 12px; padding: 12px 16px; border-bottom: 1px solid #e7ecf3; }
+    .status { padding: 4px 8px; border-radius: 4px; color: white; font-weight: 700; font-size: 12px; }
+    .PASS { background: #1e8449; } .DIFF { background: #b7950b; } .BLOCKED { background: #922b21; }
+    .meta { color: #52616f; font-size: 13px; overflow-wrap: anywhere; }
+    .grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; padding: 16px; }
+    figure { margin: 0; }
+    figcaption { margin-bottom: 6px; font-size: 12px; color: #52616f; font-weight: 700; }
+    img { width: 100%; max-height: 520px; object-fit: contain; border: 1px solid #d9e0ea; background: #fff; }
+    .details { padding: 0 16px 16px; font-size: 13px; color: #34495e; }
+    .diag { margin-top: 10px; padding: 10px; border: 1px solid #e7ecf3; border-radius: 6px; background: #f8fafc; overflow-wrap: anywhere; }
+    code { font-family: Consolas, monospace; font-size: 12px; white-space: pre-wrap; }
+    @media (max-width: 900px) { .grid { grid-template-columns: 1fr; } }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Moonlight Legacy/New Regression Report</h1>
+    <div class="summary">
+      <span class="pill">Total: 2</span>
+      <span class="pill">PASS: 0</span>
+      <span class="pill">DIFF: 1</span>
+      <span class="pill">BLOCKED: 1</span>
+    </div>
+  </header>
+  <main>
+<section class="case">
+  <div class="case-head">
+    <span class="status DIFF">DIFF</span>
+    <strong>ProjectMemberUploadDisp.jsp</strong>
+    <span class="meta">risk=Medium action=page_snapshot diff=0.0000%</span>
+  </div>
+  <div class="grid">
+    <figure><figcaption>Legacy</figcaption><img src="0001_ProjectMemberUploadDisp.jsp\00_legacy_initial.png" alt="Legacy"></figure>
+    <figure><figcaption>New</figcaption><img src="0001_ProjectMemberUploadDisp.jsp\00_new_initial.png" alt="New"></figure>
+    <figure><figcaption>Diff</figcaption><img src="0001_ProjectMemberUploadDisp.jsp\00_diff.png" alt="Diff"></figure>
+  </div>
+  <div class="details">
+    URL match: True | DOM match: False | Action type: -<br>
+    Legacy: http://192.168.167.47/patlics/ProjectMemberUploadDisp.do<br>
+    New: http://192.168.167.192/patlics/ProjectMemberUploadDisp.do<br>
+    Reason: -<br>
+    <div class="diag"><code>{
+  &quot;legacy_locator&quot;: null,
+  &quot;new_locator&quot;: null,
+  &quot;legacy_frame&quot;: {
+    &quot;name&quot;: &quot;&quot;,
+    &quot;url&quot;: &quot;http://192.168.167.47/patlics/ProjectMemberUploadDisp.do&quot;
+  },
+  &quot;new_frame&quot;: {
+    &quot;name&quot;: &quot;&quot;,
+    &quot;url&quot;: &quot;http://192.168.167.192/patlics/ProjectMemberUploadDisp.do&quot;
+  },
+  &quot;legacy_wait&quot;: null,
+  &quot;new_wait&quot;: null,
+  &quot;legacy_selector_found&quot;: null,
+  &quot;new_selector_found&quot;: null,
+  &quot;legacy_blocked_reason&quot;: null,
+  &quot;new_blocked_reason&quot;: null,
+  &quot;frame_candidates&quot;: {
+    &quot;legacy&quot;: [
+      {
+        &quot;name&quot;: &quot;&quot;,
+        &quot;url&quot;: &quot;http://192.168.167.47/patlics/ProjectMemberUploadDisp.do&quot;,
+        &quot;score&quot;: 168,
+        &quot;forms&quot;: 1,
+        &quot;tables&quot;: 7,
+        &quot;controls&quot;: 11,
+        &quot;body_visible&quot;: true,
+        &quot;text_len&quot;: 136
+      }
+    ],
+    &quot;new&quot;: [
+      {
+        &quot;name&quot;: &quot;&quot;,
+        &quot;url&quot;: &quot;http://192.168.167.192/patlics/ProjectMemberUploadDisp.do&quot;,
+        &quot;score&quot;: 168,
+        &quot;forms&quot;: 1,
+        &quot;tables&quot;: 7,
+        &quot;controls&quot;: 11,
+        &quot;body_visible&quot;: true,
+        &quot;text_len&quot;: 136
+      }
+    ]
+  }
+}</code></div>
+  </div>
+</section>
+
+<section class="case">
+  <div class="case-head">
+    <span class="status BLOCKED">BLOCKED</span>
+    <strong>ProjectMemberUploadDisp.jsp</strong>
+    <span class="meta">risk=Medium action=ProjectMemberUploadForm diff=-</span>
+  </div>
+  <div class="grid">
+    <figure><figcaption>Legacy</figcaption><img src="0001_ProjectMemberUploadDisp.jsp\00_legacy_initial.png" alt="Legacy"></figure>
+    <figure><figcaption>New</figcaption><img src="0001_ProjectMemberUploadDisp.jsp\00_new_initial.png" alt="New"></figure>
+    <figure><figcaption>Diff</figcaption><div class="meta">No screenshot</div></figure>
+  </div>
+  <div class="details">
+    URL match: None | DOM match: None | Action type: upload<br>
+    Legacy: -<br>
+    New: -<br>
+    Reason: Legacy element has no mapped New equivalent<br>
+    <div class="diag"><code>{
+  &quot;legacy_locator&quot;: &quot;[name=&#x27;ProjectMemberUploadForm&#x27;]&quot;,
+  &quot;new_locator&quot;: null,
+  &quot;legacy_frame&quot;: {
+    &quot;name&quot;: &quot;&quot;,
+    &quot;url&quot;: &quot;http://192.168.167.47/patlics/ProjectMemberUploadDisp.do&quot;
+  },
+  &quot;new_frame&quot;: {
+    &quot;name&quot;: &quot;&quot;,
+    &quot;url&quot;: &quot;http://192.168.167.192/patlics/ProjectMemberUploadDisp.do&quot;
+  },
+  &quot;legacy_wait&quot;: null,
+  &quot;new_wait&quot;: null,
+  &quot;legacy_selector_found&quot;: null,
+  &quot;new_selector_found&quot;: null,
+  &quot;legacy_blocked_reason&quot;: null,
+  &quot;new_blocked_reason&quot;: null,
+  &quot;frame_candidates&quot;: {
+    &quot;legacy&quot;: [
+      {
+        &quot;name&quot;: &quot;&quot;,
+        &quot;url&quot;: &quot;http://192.168.167.47/patlics/ProjectMemberUploadDisp.do&quot;,
+        &quot;score&quot;: 168,
+        &quot;forms&quot;: 1,
+        &quot;tables&quot;: 7,
+        &quot;controls&quot;: 11,
+        &quot;body_visible&quot;: true,
+        &quot;text_len&quot;: 136
+      }
+    ],
+    &quot;new&quot;: [
+      {
+        &quot;name&quot;: &quot;&quot;,
+        &quot;url&quot;: &quot;http://192.168.167.192/patlics/ProjectMemberUploadDisp.do&quot;,
+        &quot;score&quot;: 168,
+        &quot;forms&quot;: 1,
+        &quot;tables&quot;: 7,
+        &quot;controls&quot;: 11,
+        &quot;body_visible&quot;: true,
+        &quot;text_len&quot;: 136
+      }
+    ]
+  }
+}</code></div>
+  </div>
+</section></main>
+</body>
+</html>
