@@ -78,6 +78,11 @@ def page_entries(scan_data: Dict[str, Any]) -> Iterable[Dict[str, Any]]:
     if "pages" in scan_data:
         yield from scan_data.get("pages", [])
         return
+    # Support data from page_mapping.py (high_risk_pages, medium_risk_pages, etc.)
+    for key in ["high_risk_pages", "medium_risk_pages", "page_mappings"]:
+        if key in scan_data and isinstance(scan_data[key], list):
+            yield from scan_data[key]
+            return
     yield {
         "source": scan_data.get("source", scan_data.get("root", "<unknown>")),
         "counts": scan_data.get("counts", {}),
@@ -299,8 +304,14 @@ CASE_BUILDERS = {
 def generate_cases(scan_data: Dict[str, Any]) -> List[TestCase]:
     cases: List[TestCase] = []
     for page in page_entries(scan_data):
-        page_name = as_text(page.get("source"), "<unknown>")
-        for element in attach_related_fields(page.get("elements", [])):
+        page_name = as_text(page.get("source") or page.get("page_id"), "<unknown>")
+        # elements may be inside 'missing_legacy_elements' or just 'elements'
+        elements = list(page.get("elements", []))
+        if not elements:
+            # If coming from page_mapping, we might want to test the missing ones
+            elements.extend(page.get("missing_legacy_elements", []))
+            
+        for element in attach_related_fields(elements):
             kind = as_text(element.get("kind")).lower()
             if kind not in CASE_GENERATING_KINDS:
                 continue
