@@ -43,8 +43,8 @@ def pytest_addoption(parser):
     parser.addoption(
         "--struts-config",
         action="store",
-        default=None,
-        help="Path to struts-config.xml directory",
+        default="data/",
+        help="Struts 配置文件路径或目录。支持逗号分隔的列表，若是目录则递归搜索所有 .xml"
     )
 
 @pytest.fixture(scope="session")
@@ -89,7 +89,16 @@ def browser(browser_name):
             browser = p.chromium.launch(
                 executable_path=Config.CHROME_PORTABLE_PATH, 
                 headless=False,
-                args=["--incognito"] # 便携版强制无痕模式
+                args=[
+                    "--disable-popup-blocking",
+                    "--disable-features=IsolateOrigins,site-per-process",
+                    "--disable-site-isolation-trials",
+                    "--disable-web-security",
+                    "--allow-running-insecure-content",
+                    "--no-sandbox",
+                    "--disable-setuid-sandbox",
+                    "--disable-dev-shm-usage",
+                ]
             )
         else:
             raise ValueError(f"不支持的浏览器类型: {browser_name}")
@@ -103,6 +112,14 @@ def _authenticated_page(browser, base_url):
         accept_downloads=True,
         user_agent="Moonlight-Automation-Agent"
     )
+    # 自动处理旧系统的 Alert/Confirm 弹窗，防止阻塞 UI
+    context.on("dialog", lambda dialog: dialog.accept())
+    
+    # 自动处理新页面打开，辅助 Playwright 及时挂载
+    def _on_page(new_page):
+        new_page.wait_for_load_state("domcontentloaded", timeout=10000).catch(lambda e: None)
+    context.on("page", _on_page)
+
     page = context.new_page()
     try:
         page.goto(base_url, wait_until="load", timeout=30000)

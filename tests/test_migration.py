@@ -18,7 +18,7 @@ def test_migration_regression(
     默认执行全量页面；传入 --risk-only 时只执行 High/Medium 风险页面。
     传入 --target-page 时只执行指定 JSP，且无视风险等级。
     """
-    engine = RegressionEngine(mapping_path=mapping_path)
+    engine = RegressionEngine(mapping_path=mapping_path, struts_config_path=struts_config)
     result = engine.run(
         legacy_page,
         new_page,

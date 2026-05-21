@@ -32,6 +32,7 @@ class RegressionEngine:
         output_dir: str = "./output/regression",
         visual_threshold_percent: float = 0.1,
         timeout: int = 15000,
+        struts_config_path: Optional[str] = None,
     ) -> None:
         self.mapping_path = Path(mapping_path)
         self.legacy_base_url = (legacy_base_url or Config.LEGACY_URL).rstrip("/")
@@ -43,9 +44,8 @@ class RegressionEngine:
         
         # 智能化路由解析
         self.resolver = StrutsResolver()
-        struts_config = Path("data/struts-config.xml")
-        if struts_config.exists():
-            self.resolver.load_config(struts_config)
+        config_paths = struts_config_path or "data/"
+        self.resolver.load_configs(config_paths)
 
     def load_mapping(self) -> Dict[str, Any]:
         if not self.mapping_path.exists():
@@ -157,22 +157,59 @@ class RegressionEngine:
 
         if manual:
             print(f"\n[MANUAL MODE] 请手动操作浏览器并导航至目标页面:")
-            print(f" - Legacy: {legacy_url}")
-            print(f" - New:    {new_url}")
-            input(f" >>> 请在浏览器中确认页面已完全渲染（包括处理新弹出的窗口）后，按下回车 [ENTER] ...")
-            
-            def _get_active_page(p: Page) -> Page:
-                all_pages = p.context.pages
-                target = all_pages[-1]
-                try:
-                    target.bring_to_front()
-                    target.wait_for_load_state("domcontentloaded", timeout=3000)
-                except:
-                    pass
-                return target
+            print(f" - 期待的目标画面: {page_id}")
+            print(f" - Legacy 入口: {legacy_url}")
+            print(f" - New 入口:    {new_url}")
 
-            legacy_page = _get_active_page(legacy_page)
-            new_page = _get_active_page(new_page)
+            def _interactive_takeover(p: Page, label: str) -> Page:
+                print(f"\n >>> [{label}] 准备就绪后，在此处按回车 [ENTER] 进行接管...")
+                print(f"     (注: 如果浏览器点击无响应，请按回车激活同步锁)")
+                
+                while True:
+                    # 每 200ms 检查一次，同时让 Playwright 处理 protocol 消息
+                    try:
+                        p.wait_for_timeout(200)
+                    except:
+                        pass
+                    
+                    input_signal = input(f" [{label} READY?] 按回车扫描页面 (或输入 'q' 放弃): ").strip().lower()
+                    if input_signal == 'q':
+                        raise InterruptedError("User cancelled manual takeover")
+
+                    all_pages = p.context.pages
+                    print(f" [{label}] 探测到 {len(all_pages)} 个页面对象:")
+                    
+                    match_idx = -1
+                    # 匹配优先级：1. 精确包含 JSP 名  2. 包含对应的 Struts Action 名
+                    target_action = self.resolver.resolve_entry_url(page_id).lower()
+                    
+                    for idx, page_item in enumerate(all_pages):
+                        url_lower = page_item.url.lower()
+                        print(f"    [{idx}] {page_item.url[:120]}")
+                        if page_id.lower() in url_lower or target_action in url_lower:
+                            match_idx = idx
+                    
+                    if match_idx != -1:
+                        print(f" [SUCCESS] 发现潜在匹配页面: [{match_idx}]")
+                        choice_idx = match_idx
+                    else:
+                        print(f" [WARN] 未发现包含 '{page_id}' 或 Action '{target_action}' 的页面。")
+                        raw_choice = input(f" >>> 请输入页面索引 [0-{len(all_pages)-1}] 手动指定，或直接回车重试: ").strip()
+                        if raw_choice.isdigit() and 0 <= int(raw_choice) < len(all_pages):
+                            choice_idx = int(raw_choice)
+                        else:
+                            continue
+                    
+                    target = all_pages[choice_idx]
+                    try:
+                        target.bring_to_front()
+                        target.wait_for_load_state("domcontentloaded", timeout=3000)
+                        return target
+                    except Exception as e:
+                        print(f" [ERROR] 挂载失败 ({e})，请重试。")
+
+            legacy_page = _interactive_takeover(legacy_page, "Legacy")
+            new_page = _interactive_takeover(new_page, "New")
             
             print(f" [INFO] 已重定向接管目标: Legacy({legacy_page.url}) | New({new_page.url})")
             
