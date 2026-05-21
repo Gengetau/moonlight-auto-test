@@ -8,7 +8,7 @@ from urllib.parse import urlsplit
 
 from playwright.sync_api import Page, Error as PlaywrightError, TimeoutError as PlaywrightTimeoutError
 
-from src.action_executor import _capture_state, _normalize_text, execute_action
+from src.action_executor import _capture_state, _normalize_text, execute_action, infer_semantic_action
 from src.assert_engine import compare_visual_screenshot
 from src.config_parser import Config
 
@@ -169,12 +169,19 @@ class RegressionEngine:
                     "page_id": page_id,
                     "risk": mapping.get("risk"),
                     "action": blocked.get("label") or blocked.get("key") or "missing_legacy_element",
+                    "action_type": infer_semantic_action(blocked.get("action_hint") or blocked.get("kind"), blocked),
                     "status": "BLOCKED",
                     "reason": "Legacy element has no mapped New equivalent",
                     "legacy_locator": blocked.get("locator"),
                     "new_locator": None,
                     "legacy_screenshot": legacy_state.get("screenshot"),
                     "new_screenshot": new_state.get("screenshot"),
+                    "legacy_frame": legacy_state.get("target_frame"),
+                    "new_frame": new_state.get("target_frame"),
+                    "frame_candidates": {
+                        "legacy": legacy_state.get("frame_candidates", []),
+                        "new": new_state.get("frame_candidates", []),
+                    },
                 }
             )
 
@@ -182,12 +189,14 @@ class RegressionEngine:
             legacy_locator = change.get("legacy_locator")
             new_locator = change.get("new_locator")
             action_name = change.get("label") or change.get("semantic_key") or f"action_{action_index}"
+            action_type = infer_semantic_action(change.get("action_hint") or change.get("kind") or "click", change)
             if not legacy_locator or not new_locator:
                 results.append(
                     {
                         "page_id": page_id,
                         "risk": mapping.get("risk"),
                         "action": action_name,
+                        "action_type": action_type,
                         "status": "BLOCKED",
                         "reason": "legacy_locator or new_locator is missing",
                         "legacy_locator": legacy_locator,
@@ -198,21 +207,25 @@ class RegressionEngine:
 
             legacy_action = execute_action(
                 legacy_page,
-                "click",
+                action_type,
                 legacy_locator,
+                change.get("value"),
                 browser_name=browser_name,
                 capture_dir=page_dir,
                 test_id=f"{action_index:02d}_legacy_{action_name}",
                 timeout=self.timeout,
+                action_context={**change, "locator": legacy_locator},
             )
             new_action = execute_action(
                 new_page,
-                "click",
+                action_type,
                 new_locator,
+                change.get("value"),
                 browser_name=browser_name,
                 capture_dir=page_dir,
                 test_id=f"{action_index:02d}_new_{action_name}",
                 timeout=self.timeout,
+                action_context={**change, "locator": new_locator},
             )
             legacy_action_state = legacy_action.get("state") or {}
             new_action_state = new_action.get("state") or {}
@@ -226,7 +239,7 @@ class RegressionEngine:
                 legacy_action=legacy_action,
                 new_action=new_action,
             )
-            compared.update({"legacy_locator": legacy_locator, "new_locator": new_locator})
+            compared.update({"action_type": action_type, "legacy_locator": legacy_locator, "new_locator": new_locator})
             results.append(compared)
 
         return results
@@ -271,6 +284,12 @@ class RegressionEngine:
             "legacy_screenshot": legacy_state.get("screenshot"),
             "new_screenshot": new_state.get("screenshot"),
             "diff_screenshot": visual.get("diff_screenshot"),
+            "legacy_frame": legacy_state.get("target_frame"),
+            "new_frame": new_state.get("target_frame"),
+            "frame_candidates": {
+                "legacy": legacy_state.get("frame_candidates", []),
+                "new": new_state.get("frame_candidates", []),
+            },
             **extra,
         }
 
@@ -301,6 +320,8 @@ class RegressionEngine:
     figcaption {{ margin-bottom: 6px; font-size: 12px; color: #52616f; font-weight: 700; }}
     img {{ width: 100%; max-height: 520px; object-fit: contain; border: 1px solid #d9e0ea; background: #fff; }}
     .details {{ padding: 0 16px 16px; font-size: 13px; color: #34495e; }}
+    .diag {{ margin-top: 10px; padding: 10px; border: 1px solid #e7ecf3; border-radius: 6px; background: #f8fafc; overflow-wrap: anywhere; }}
+    code {{ font-family: Consolas, monospace; font-size: 12px; white-space: pre-wrap; }}
     @media (max-width: 900px) {{ .grid {{ grid-template-columns: 1fr; }} }}
   </style>
 </head>
@@ -326,6 +347,8 @@ class RegressionEngine:
         visual = item.get("visual") or {}
         diff_percent = visual.get("diff_percent")
         diff_text = "-" if diff_percent is None else f"{diff_percent:.4f}%"
+        action_type = item.get("action_type") or self._action_type_from_payload(item)
+        reason = item.get("reason") or self._blocked_reason(item) or "-"
         return f"""
 <section class="case">
   <div class="case-head">
@@ -339,10 +362,11 @@ class RegressionEngine:
     {self._figure('Diff', item.get('diff_screenshot'))}
   </div>
   <div class="details">
-    URL match: {item.get('url_match')} | DOM match: {item.get('dom_match')}<br>
+    URL match: {item.get('url_match')} | DOM match: {item.get('dom_match')} | Action type: {html.escape(str(action_type or '-'))}<br>
     Legacy: {html.escape(str(item.get('legacy_url') or '-'))}<br>
     New: {html.escape(str(item.get('new_url') or '-'))}<br>
-    Reason: {html.escape(str(item.get('reason') or self._blocked_reason(item) or '-'))}
+    Reason: {html.escape(str(reason))}<br>
+    {self._render_diagnostics(item)}
   </div>
 </section>"""
 
@@ -359,6 +383,34 @@ class RegressionEngine:
             if value.get("reason"):
                 return value.get("reason")
         return None
+
+    @staticmethod
+    def _action_type_from_payload(item: Dict[str, Any]) -> Optional[str]:
+        for key in ("legacy_action", "new_action"):
+            value = item.get(key) or {}
+            if value.get("semantic_action"):
+                return value.get("semantic_action")
+        return None
+
+    def _render_diagnostics(self, item: Dict[str, Any]) -> str:
+        legacy_action = item.get("legacy_action") or {}
+        new_action = item.get("new_action") or {}
+        legacy_frame = item.get("legacy_frame") or legacy_action.get("target_frame") or {}
+        new_frame = item.get("new_frame") or new_action.get("target_frame") or {}
+        diagnostics = {
+            "legacy_locator": item.get("legacy_locator"),
+            "new_locator": item.get("new_locator"),
+            "legacy_frame": legacy_frame,
+            "new_frame": new_frame,
+            "legacy_wait": legacy_action.get("wait_state"),
+            "new_wait": new_action.get("wait_state"),
+            "legacy_selector_found": legacy_action.get("selector_found"),
+            "new_selector_found": new_action.get("selector_found"),
+            "legacy_blocked_reason": legacy_action.get("reason"),
+            "new_blocked_reason": new_action.get("reason"),
+            "frame_candidates": item.get("frame_candidates"),
+        }
+        return f'<div class="diag"><code>{html.escape(json.dumps(diagnostics, ensure_ascii=False, default=str, indent=2))}</code></div>'
 
     @staticmethod
     def _page_url(base_url: str, page_id: str) -> str:

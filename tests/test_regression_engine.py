@@ -3,7 +3,7 @@ from pathlib import Path
 
 from PIL import Image
 
-from src.action_executor import build_steps_from_page_mapping
+from src.action_executor import build_steps_from_page_mapping, infer_semantic_action
 from src.assert_engine import compare_visual_screenshot
 from src.regression_engine import RegressionEngine
 
@@ -120,3 +120,50 @@ def test_build_steps_from_page_mapping_is_risk_first():
     )
 
     assert [step["page_id"] for step in steps] == ["h.jsp", "m.jsp"]
+
+
+def test_infer_semantic_action_uses_scanner_hints():
+    assert infer_semantic_action("click", {"kind": "form", "locator": "[name='SearchForm']"}) == "submit"
+    assert infer_semantic_action(None, {"kind": "file", "action_hint": "upload"}) == "upload"
+    assert infer_semantic_action("click", {"raw": '<form:select path="country">'}) == "select"
+    assert infer_semantic_action(None, {"kind": "link", "raw": '<html:link href="/next">'}) == "navigate"
+
+
+def test_render_report_contains_semantic_diagnostics(tmp_path):
+    mapping_path = tmp_path / "page_mapping.json"
+    mapping_path.write_text(json.dumps({"page_mappings": []}), encoding="utf-8")
+    output_dir = tmp_path / "out"
+    output_dir.mkdir()
+    screenshot = output_dir / "shot.png"
+    Image.new("RGB", (1, 1), "white").save(screenshot)
+
+    engine = RegressionEngine(mapping_path=str(mapping_path), output_dir=str(output_dir))
+    report = engine.render_report(
+        [
+            {
+                "page_id": "FramePage.jsp",
+                "risk": "High",
+                "action": "submitForm",
+                "action_type": "submit",
+                "status": "BLOCKED",
+                "url_match": False,
+                "dom_match": False,
+                "legacy_locator": "[name='LegacyForm']",
+                "new_locator": "[name='NewForm']",
+                "legacy_url": "https://legacy.example/app/FramePage.jsp",
+                "new_url": "https://new.example/app/FramePage.jsp",
+                "legacy_screenshot": str(screenshot),
+                "new_screenshot": str(screenshot),
+                "diff_screenshot": str(screenshot),
+                "visual": {"diff_percent": 0.0},
+                "legacy_frame": {"name": "frEditFrame", "url": "https://legacy.example/app/inner.do"},
+                "new_action": {"reason": "Timeout waiting for locator", "selector_found": False},
+            }
+        ]
+    )
+
+    html = Path(report).read_text(encoding="utf-8")
+    assert "Action type: submit" in html
+    assert "frEditFrame" in html
+    assert "new_locator" in html
+    assert "Timeout waiting for locator" in html

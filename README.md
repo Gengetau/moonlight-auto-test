@@ -28,10 +28,12 @@ Moonlight 是为 **TargetApp 从 Struts 迁移到 Spring** 架构而设计的“
 - **Excel**: 适合主祭（ミカ）进行大规模资产核对与状态追踪。
 - **字段证据**: 所有的表单用例都会附带其内部字段的完整性校验线索。
 
-### Phase 4: [时空同步] 自动比对 (`action_executor.py`)
-利用 Playwright 驱动，在两个时空下执行相同的动作序列：
-- **双端复现**: 在 Legacy 环境执行，在 New 环境同步复现。
-- **视觉/逻辑对齐**: 自动对比截图、URL 路由和 DOM 关键节点。
+### Phase 4: [语义执行层] 自动比对 (`action_executor.py`, `regression_engine.py`)
+利用 Playwright 驱动，在两个时空下执行相同的业务意图，而不是机械复读录制脚本：
+- **Frame 穿透**: 自动扫描嵌套 frame，优先锁定包含业务 URL、`form`、`table` 或控件的目标 frame，并从该 frame 采集截图、文本和 DOM。
+- **语义动作**: 将 `form`、`file`、`button`、`link`、`select/input` 等扫描结果推断为 `submit`、`upload`、`click`、`navigate`、`select/fill`。
+- **稳定等待**: 组合 `networkidle`、2 秒稳定窗口、`body` 可见性和关键业务元素自适应等待，降低迁移页面的白屏 Diff。
+- **诊断闭环**: HTML 报告展示 action type、Legacy/New locator、目标 frame、等待状态和 BLOCKED 原因，便于直接定位失效时空。
 
 ---
 
