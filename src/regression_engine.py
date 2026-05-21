@@ -157,22 +157,45 @@ class RegressionEngine:
 
         if manual:
             print(f"\n[MANUAL MODE] 请手动操作浏览器并导航至目标页面:")
-            print(f" - Legacy: {legacy_url}")
-            print(f" - New:    {new_url}")
-            input(f" >>> 请在浏览器中确认页面已完全渲染（包括处理新弹出的窗口）后，按下回车 [ENTER] ...")
-            
-            def _get_active_page(p: Page) -> Page:
-                all_pages = p.context.pages
-                target = all_pages[-1]
-                try:
-                    target.bring_to_front()
-                    target.wait_for_load_state("domcontentloaded", timeout=3000)
-                except:
-                    pass
-                return target
+            print(f" - 期待的目标画面: {page_id}")
+            print(f" - Legacy 入口: {legacy_url}")
+            print(f" - New 入口:    {new_url}")
 
-            legacy_page = _get_active_page(legacy_page)
-            new_page = _get_active_page(new_page)
+            def _interactive_takeover(p: Page, label: str) -> Page:
+                while True:
+                    input(f" >>> [{label}] 请在浏览器中准备好画面后，按回车 [ENTER] ...")
+                    all_pages = p.context.pages
+                    print(f" [{label}] 探测到 {len(all_pages)} 个可用页面:")
+                    
+                    match_idx = -1
+                    for idx, page_item in enumerate(all_pages):
+                        url = page_item.url
+                        print(f"    [{idx}] {url[:120]}")
+                        if page_id.lower() in url.lower():
+                            match_idx = idx
+                    
+                    if match_idx != -1:
+                        print(f" [SUCCESS] 自动匹配到页面索引: [{match_idx}]")
+                        choice = match_idx
+                    else:
+                        print(f" [WARN] 未发现包含 '{page_id}' 的页面。")
+                        raw_choice = input(f" >>> 请输入页面索引 [0-{len(all_pages)-1}] 手动接管，或直接回车重试: ").strip()
+                        if raw_choice.isdigit() and 0 <= int(raw_choice) < len(all_pages):
+                            choice = int(raw_choice)
+                        else:
+                            continue
+                    
+                    target = all_pages[choice]
+                    try:
+                        target.bring_to_front()
+                        # 确保页面已加载
+                        target.wait_for_load_state("domcontentloaded", timeout=3000)
+                        return target
+                    except Exception as e:
+                        print(f" [ERROR] 接管失败 ({e})，请重试。")
+
+            legacy_page = _interactive_takeover(legacy_page, "Legacy")
+            new_page = _interactive_takeover(new_page, "New")
             
             print(f" [INFO] 已重定向接管目标: Legacy({legacy_page.url}) | New({new_page.url})")
             
