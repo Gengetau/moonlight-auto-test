@@ -91,7 +91,13 @@ def browser(browser_name):
                 headless=False,
                 args=[
                     "--disable-popup-blocking",
-                    "--disable-features=IsolateOrigins,site-per-process", # 缓解旧系统跨域/跨窗口通信限制
+                    "--disable-features=IsolateOrigins,site-per-process",
+                    "--disable-site-isolation-trials",
+                    "--disable-web-security",
+                    "--allow-running-insecure-content",
+                    "--no-sandbox",
+                    "--disable-setuid-sandbox",
+                    "--disable-dev-shm-usage",
                 ]
             )
         else:
