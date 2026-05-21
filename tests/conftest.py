@@ -112,12 +112,21 @@ def _authenticated_page(browser, base_url):
         accept_downloads=True,
         user_agent="Moonlight-Automation-Agent"
     )
-    # 自动处理旧系统的 Alert/Confirm 弹窗，防止阻塞 UI
-    context.on("dialog", lambda dialog: dialog.accept())
+    # 自动处理旧系统的 Alert/Confirm 弹窗
+    # 增加 try-except 保护，防止 Dialog 已经关闭时的 ProtocolError
+    def _safe_accept(dialog):
+        try:
+            dialog.accept()
+        except:
+            pass
+    context.on("dialog", _safe_accept)
     
-    # 自动处理新页面打开，辅助 Playwright 及时挂载
+    # 自动处理新页面打开
     def _on_page(new_page):
-        new_page.wait_for_load_state("domcontentloaded", timeout=10000).catch(lambda e: None)
+        try:
+            new_page.wait_for_load_state("domcontentloaded", timeout=10000)
+        except:
+            pass
     context.on("page", _on_page)
 
     page = context.new_page()

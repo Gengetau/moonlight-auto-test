@@ -52,8 +52,10 @@ class StrutsResolver:
                     forward_path = forward.get("path", "")
                     if forward_path.endswith(".jsp"):
                         jsp_name = Path(forward_path).name
-                        # Map JSP name to the .do entry
-                        self.route_map[jsp_name] = entry_url
+                        # 多路径处理：如果已存在映射，优先保留第一个发现的（或根据业务逻辑调整）
+                        # 这里简单处理：如果已存在，不再覆盖，或者可以存储为列表
+                        if jsp_name not in self.route_map:
+                            self.route_map[jsp_name] = entry_url
         except Exception as e:
             print(f"[STRUTS_RESOLVER] Failed to parse {config_path}: {e}")
 
