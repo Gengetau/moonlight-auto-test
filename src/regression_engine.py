@@ -44,11 +44,8 @@ class RegressionEngine:
         
         # 智能化路由解析
         self.resolver = StrutsResolver()
-        config_file = Path(struts_config_path or "data/struts-config.xml")
-        if config_file.exists():
-            self.resolver.load_config(config_file)
-        elif struts_config_path:
-            print(f"[WARN] Struts config not found: {struts_config_path}")
+        config_paths = struts_config_path or "data/"
+        self.resolver.load_configs(config_paths)
 
     def load_mapping(self) -> Dict[str, Any]:
         if not self.mapping_path.exists():

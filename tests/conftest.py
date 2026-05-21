@@ -43,8 +43,8 @@ def pytest_addoption(parser):
     parser.addoption(
         "--struts-config",
         action="store",
-        default="data/struts-config.xml",
-        help="Struts 配置文件路径，用于解析 Action 路由"
+        default="data/",
+        help="Struts 配置文件路径或目录。支持逗号分隔的列表，若是目录则递归搜索所有 .xml"
     )
 
 @pytest.fixture(scope="session")
