@@ -79,20 +79,27 @@ def infer_semantic_action(action_type: Optional[str], context: Optional[Dict[str
 def _wait_for_semantic_ready(page: Page, timeout: int = 10000) -> Dict[str, Any]:
     wait_state: Dict[str, Any] = {
         "networkidle": False,
+        "domcontentloaded": False,
         "settle_timeout_ms": 2000,
         "body_visible": False,
         "business_elements": 0,
     }
+    # 针对旧系统，优先使用 domcontentloaded
     try:
-        page.wait_for_load_state("networkidle", timeout=timeout)
-        wait_state["networkidle"] = True
+        page.wait_for_load_state("domcontentloaded", timeout=timeout)
+        wait_state["domcontentloaded"] = True
     except (PlaywrightTimeoutError, PlaywrightError) as exc:
-        wait_state["networkidle_error"] = str(exc)
+        wait_state["domcontentloaded_error"] = str(exc)
 
     try:
-        page.wait_for_timeout(2000)
-    except PlaywrightError as exc:
-        wait_state["settle_error"] = str(exc)
+        page.wait_for_load_state("networkidle", timeout=min(timeout, 5000))
+        wait_state["networkidle"] = True
+    except (PlaywrightTimeoutError, PlaywrightError):
+        # networkidle 对于旧系统经常超时，不作为硬性阻塞
+        pass
+
+    # 强制 settle 时间，给旧系统 JS 渲染留白
+    page.wait_for_timeout(2000)
 
     target, diagnostics = _find_business_frame(page, timeout=min(timeout, 3000))
     wait_state["target_frame"] = _frame_identity(target)
@@ -231,7 +238,20 @@ def execute_action(
         "browser_name": browser_name,
     }
 
+    def _log_event(event_type: str, details: Any):
+        # 内部闭包用于记录 Playwright 事件
+        test_id_str = test_id or "global"
+        log_dir = Path(capture_dir) if capture_dir else Path("./output/logs")
+        log_dir.mkdir(parents=True, exist_ok=True)
+        with open(log_dir / f"{test_id_str}_events.log", "a", encoding="utf-8") as f:
+            f.write(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {event_type}: {details}\n")
+
     try:
+        # 注入 Runtime Debugger
+        page.on("console", lambda msg: _log_event("CONSOLE", f"{msg.type}: {msg.text}"))
+        page.on("pageerror", lambda err: _log_event("JS_ERROR", str(err)))
+        page.on("requestfailed", lambda req: _log_event("REQ_FAILED", f"{req.url} ({req.failure})"))
+
         result["wait_state"] = _wait_for_semantic_ready(page, timeout=max(timeout, 15000 if browser_name == "firefox" else timeout))
         semantic_action = result["semantic_action"]
         navigated_directly = False
