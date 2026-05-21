@@ -97,6 +97,7 @@ def build_locator(attributes: Dict[str, Any]) -> Optional[str]:
 
     name = attributes.get("name") or attributes.get("property") or attributes.get("path")
     if name:
+        # 兼容处理：Playwright 属性定位器
         return f"[name='{name}']"
 
     model_attr = attributes.get("modelAttribute") or attributes.get("commandName")

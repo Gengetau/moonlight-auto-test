@@ -80,6 +80,14 @@ def action_target(element: Element) -> Optional[str]:
 
 def element_key(element: Element) -> Tuple[str, str]:
     kind = str(element.get("kind") or "unknown")
+    
+    # 针对 form 标签，如果同时存在 name 和 modelAttribute，由于旧系统只有 name，
+    # 为了建立映射，我们优先使用 name 作为标识。
+    if kind == "form":
+        name = attr(element, "name")
+        if name:
+            return kind, f"name:{name}"
+
     locator = element.get("locator")
     if locator:
         return kind, f"locator:{locator}"
@@ -101,6 +109,19 @@ def semantic_key(element: Element) -> Tuple[str, str]:
     target = action_target(element)
     if target:
         return kind, f"action:{target}"
+
+    # 针对 form 标签，即使新系统引入了 modelAttribute，如果 name 依然存在且与旧系统一致，
+    # 我们应优先使用 name 作为语义匹配键。
+    if kind == "form":
+        name = attr(element, "name")
+        if name:
+            return kind, f"label:{name}"
+
+    # 针对上传字段，Struts 的 property 和 Spring 原生 input 的 name 通常是稳定的
+    if kind == "file":
+        name = attr(element, "name", "property")
+        if name:
+            return kind, f"label:{name}"
 
     label = attr(element, "id", "styleId", "name", "property", "path", "modelAttribute", "commandName", "value", "title")
     if label:
