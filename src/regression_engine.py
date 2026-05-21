@@ -11,6 +11,7 @@ from playwright.sync_api import Page, Error as PlaywrightError, TimeoutError as 
 from src.action_executor import _capture_state, _normalize_text, execute_action, infer_semantic_action
 from src.assert_engine import compare_visual_screenshot
 from src.config_parser import Config
+from src.utils.struts_resolver import StrutsResolver
 
 
 class RegressionEngine:
@@ -39,6 +40,12 @@ class RegressionEngine:
         self.visual_threshold_percent = visual_threshold_percent
         self.timeout = timeout
         self.mapping = self.load_mapping()
+        
+        # 智能化路由解析
+        self.resolver = StrutsResolver()
+        struts_config = Path("data/struts-config.xml")
+        if struts_config.exists():
+            self.resolver.load_config(struts_config)
 
     def load_mapping(self) -> Dict[str, Any]:
         if not self.mapping_path.exists():
@@ -145,8 +152,8 @@ class RegressionEngine:
         page_dir = self.output_dir / f"{page_index:04d}_{self._safe_name(page_id)}"
         page_dir.mkdir(parents=True, exist_ok=True)
 
-        legacy_url = self._page_url(self.legacy_base_url, page_id)
-        new_url = self._page_url(self.new_base_url, page_id)
+        legacy_url = self._page_url(self.legacy_base_url, self.resolver.resolve_entry_url(page_id))
+        new_url = self._page_url(self.new_base_url, self.resolver.resolve_entry_url(page_id))
 
         if manual:
             print(f"\n[MANUAL MODE] 请手动操作浏览器并导航至目标页面:")
