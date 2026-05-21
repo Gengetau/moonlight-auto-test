@@ -78,11 +78,20 @@ def page_entries(scan_data: Dict[str, Any]) -> Iterable[Dict[str, Any]]:
     if "pages" in scan_data:
         yield from scan_data.get("pages", [])
         return
-    # Support data from page_mapping.py (high_risk_pages, medium_risk_pages, etc.)
-    for key in ["high_risk_pages", "medium_risk_pages", "page_mappings"]:
-        if key in scan_data and isinstance(scan_data[key], list):
+    # page_mapping.py emits page_mappings as the complete matched-page set.
+    # high_risk_pages and medium_risk_pages are filtered subsets and must not
+    # short-circuit the full mapping list.
+    if isinstance(scan_data.get("page_mappings"), list):
+        yield from scan_data["page_mappings"]
+        return
+    # Older or partial mapping outputs may only have risk-specific lists.
+    yielded_mapping_subset = False
+    for key in ["high_risk_pages", "medium_risk_pages"]:
+        if isinstance(scan_data.get(key), list):
             yield from scan_data[key]
-            return
+            yielded_mapping_subset = True
+    if yielded_mapping_subset:
+        return
     yield {
         "source": scan_data.get("source", scan_data.get("root", "<unknown>")),
         "counts": scan_data.get("counts", {}),
@@ -305,12 +314,12 @@ def generate_cases(scan_data: Dict[str, Any]) -> List[TestCase]:
     cases: List[TestCase] = []
     for page in page_entries(scan_data):
         page_name = as_text(page.get("source") or page.get("page_id"), "<unknown>")
-        # elements may be inside 'missing_legacy_elements' or just 'elements'
+        # Mapping pages can carry both matched page elements and legacy-only
+        # missing elements; include both sources instead of treating them as
+        # alternatives.
         elements = list(page.get("elements", []))
-        if not elements:
-            # If coming from page_mapping, we might want to test the missing ones
-            elements.extend(page.get("missing_legacy_elements", []))
-            
+        elements.extend(page.get("missing_legacy_elements", []))
+
         for element in attach_related_fields(elements):
             kind = as_text(element.get("kind")).lower()
             if kind not in CASE_GENERATING_KINDS:

@@ -1,4 +1,4 @@
-from src.checklist_generator import generate_cases
+from src.checklist_generator import generate_cases, page_entries
 from src.jsp_scanner import scan_jsp_source
 
 
@@ -77,3 +77,80 @@ def test_field_elements_are_form_evidence_not_independent_cases():
     form_cases = [case for case in cases if case.kind == "form"]
     assert all("字段完整性校验" in case.evidence for case in form_cases)
     assert all("form:input `keyword`" in case.evidence for case in form_cases)
+
+
+def test_page_mapping_input_uses_full_mappings_and_missing_elements():
+    scan_data = {
+        "high_risk_pages": [
+            {
+                "page_id": "HighOnly.jsp",
+                "missing_legacy_elements": [
+                    {
+                        "kind": "button",
+                        "line": 10,
+                        "locator": "#high",
+                        "label": "high",
+                    }
+                ],
+            }
+        ],
+        "medium_risk_pages": [
+            {
+                "page_id": "MediumOnly.jsp",
+                "missing_legacy_elements": [
+                    {
+                        "kind": "button",
+                        "line": 20,
+                        "locator": "#medium",
+                        "label": "medium",
+                    }
+                ],
+            }
+        ],
+        "page_mappings": [
+            {
+                "page_id": "MatchedA.jsp",
+                "elements": [
+                    {
+                        "kind": "form",
+                        "tag": "form",
+                        "line": 1,
+                        "attributes": {"id": "matchedForm", "action": "/save"},
+                        "locator": "#matchedForm",
+                    }
+                ],
+                "missing_legacy_elements": [
+                    {
+                        "kind": "button",
+                        "line": 2,
+                        "locator": "#missing",
+                        "label": "missing",
+                    }
+                ],
+            },
+            {
+                "page_id": "MatchedB.jsp",
+                "missing_legacy_elements": [
+                    {
+                        "kind": "link",
+                        "line": 3,
+                        "locator": "a.details",
+                        "label": "details",
+                    }
+                ],
+            },
+            {
+                "page_id": "MatchedC.jsp",
+                "missing_legacy_elements": [],
+            },
+        ],
+    }
+
+    pages = list(page_entries(scan_data))
+    cases = generate_cases(scan_data)
+
+    assert [page["page_id"] for page in pages] == ["MatchedA.jsp", "MatchedB.jsp", "MatchedC.jsp"]
+    assert {case.page for case in cases} == {"MatchedA.jsp", "MatchedB.jsp"}
+    assert len([case for case in cases if case.page == "MatchedA.jsp" and case.kind == "form"]) == 4
+    assert len([case for case in cases if case.page == "MatchedA.jsp" and case.kind == "button"]) == 3
+    assert len([case for case in cases if case.page == "MatchedB.jsp" and case.kind == "link"]) == 3
