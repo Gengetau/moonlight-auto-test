@@ -10,6 +10,7 @@ def test_migration_regression(
     mapping_path,
     risk_only,
     regression_limit,
+    struts_config,
 ):
     """
     Legacy/New 全量或风险优先回归入口。
