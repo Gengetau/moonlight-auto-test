@@ -218,13 +218,13 @@ class RegressionEngine:
             
             # 手动模式直接调用抽取后的逻辑
             return self._run_captured_page_pair(
-                legacy_page, new_page, mapping, page_dir, browser_name, legacy_nav, new_nav
+                legacy_page, new_page, mapping, page_dir, browser_name, legacy_nav, new_nav, manual=True
             )
         else:
             legacy_nav = self._goto(legacy_page, legacy_url)
             new_nav = self._goto(new_page, new_url)
             return self._run_captured_page_pair(
-                legacy_page, new_page, mapping, page_dir, browser_name, legacy_nav, new_nav
+                legacy_page, new_page, mapping, page_dir, browser_name, legacy_nav, new_nav, manual=False
             )
 
     def _run_captured_page_pair(
@@ -236,9 +236,14 @@ class RegressionEngine:
         browser_name: str,
         legacy_nav: Dict[str, Any],
         new_nav: Dict[str, Any],
+        manual: bool = False, # 显式传递 manual 标志
     ) -> List[Dict[str, Any]]:
         page_id = mapping.get("page_id") or "unknown"
         results: List[Dict[str, Any]] = []
+        
+        # 获取初始 URL 用于状态隔离重置
+        legacy_url = legacy_page.url
+        new_url = new_page.url
         
         # 强制更新 Page 事件处理器以适配接管后的新上下文
         self._ensure_page_listeners(legacy_page)
@@ -318,6 +323,16 @@ class RegressionEngine:
                     }
                 )
                 continue
+
+            # [状态重置隔离] 每个 Action 执行前，确保页面回到初始测试状态
+            # 防止前一个动作导致的页面跳转、弹窗或 DOM 销毁影响后续测试
+            if not manual:
+                legacy_page.goto(legacy_url, wait_until="domcontentloaded", timeout=max(self.timeout, 30000))
+                new_page.goto(new_url, wait_until="domcontentloaded", timeout=max(self.timeout, 30000))
+            else:
+                # 在接管模式下，如果发生了跳转，引导主祭重置页面
+                # 为了自动化连贯性，这里也可以尝试自动 goBack()，但旧系统状态通常不可控
+                pass
 
             legacy_action = execute_action(
                 legacy_page,
