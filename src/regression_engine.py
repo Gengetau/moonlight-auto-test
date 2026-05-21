@@ -144,7 +144,6 @@ class RegressionEngine:
         page_id = mapping.get("page_id") or f"page_{page_index}"
         page_dir = self.output_dir / f"{page_index:04d}_{self._safe_name(page_id)}"
         page_dir.mkdir(parents=True, exist_ok=True)
-        results: List[Dict[str, Any]] = []
 
         legacy_url = self._page_url(self.legacy_base_url, page_id)
         new_url = self._page_url(self.new_base_url, page_id)
@@ -155,18 +154,48 @@ class RegressionEngine:
             print(f" - New:    {new_url}")
             input(f" >>> 请在浏览器中确认页面已完全渲染（包括处理新弹出的窗口）后，按下回车 [ENTER] ...")
             
-            # 自动探测并接管最新打开的页面（处理 window.open 场景）
-            legacy_page = legacy_page.context.pages[-1]
-            new_page = new_page.context.pages[-1]
+            def _get_active_page(p: Page) -> Page:
+                all_pages = p.context.pages
+                target = all_pages[-1]
+                try:
+                    target.bring_to_front()
+                    target.wait_for_load_state("domcontentloaded", timeout=3000)
+                except:
+                    pass
+                return target
+
+            legacy_page = _get_active_page(legacy_page)
+            new_page = _get_active_page(new_page)
             
-            print(f" [INFO] 已接管最新页面: Legacy({legacy_page.url}) | New({new_page.url})")
+            print(f" [INFO] 已重定向接管目标: Legacy({legacy_page.url}) | New({new_page.url})")
             
             legacy_nav = {"status": "PASS", "url": legacy_page.url, "manual": True}
             new_nav = {"status": "PASS", "url": new_page.url, "manual": True}
+            
+            # 手动模式直接调用抽取后的逻辑
+            return self._run_captured_page_pair(
+                legacy_page, new_page, mapping, page_dir, browser_name, legacy_nav, new_nav
+            )
         else:
             legacy_nav = self._goto(legacy_page, legacy_url)
             new_nav = self._goto(new_page, new_url)
+            return self._run_captured_page_pair(
+                legacy_page, new_page, mapping, page_dir, browser_name, legacy_nav, new_nav
+            )
 
+    def _run_captured_page_pair(
+        self,
+        legacy_page: Page,
+        new_page: Page,
+        mapping: Dict[str, Any],
+        page_dir: Path,
+        browser_name: str,
+        legacy_nav: Dict[str, Any],
+        new_nav: Dict[str, Any],
+    ) -> List[Dict[str, Any]]:
+        page_id = mapping.get("page_id") or "unknown"
+        results: List[Dict[str, Any]] = []
+        
         legacy_state = _capture_state(legacy_page, page_dir, "00_legacy_initial")
         new_state = _capture_state(new_page, page_dir, "00_new_initial")
         results.append(
