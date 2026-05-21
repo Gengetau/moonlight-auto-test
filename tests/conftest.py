@@ -89,7 +89,10 @@ def browser(browser_name):
             browser = p.chromium.launch(
                 executable_path=Config.CHROME_PORTABLE_PATH, 
                 headless=False,
-                args=["--incognito"] # 便携版强制无痕模式
+                args=[
+                    "--disable-popup-blocking",
+                    "--disable-features=IsolateOrigins,site-per-process", # 缓解旧系统跨域/跨窗口通信限制
+                ]
             )
         else:
             raise ValueError(f"不支持的浏览器类型: {browser_name}")
@@ -103,6 +106,14 @@ def _authenticated_page(browser, base_url):
         accept_downloads=True,
         user_agent="Moonlight-Automation-Agent"
     )
+    # 自动处理旧系统的 Alert/Confirm 弹窗，防止阻塞 UI
+    context.on("dialog", lambda dialog: dialog.accept())
+    
+    # 自动处理新页面打开，辅助 Playwright 及时挂载
+    def _on_page(new_page):
+        new_page.wait_for_load_state("domcontentloaded", timeout=10000).catch(lambda e: None)
+    context.on("page", _on_page)
+
     page = context.new_page()
     try:
         page.goto(base_url, wait_until="load", timeout=30000)

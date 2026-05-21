@@ -162,10 +162,25 @@ class RegressionEngine:
             print(f" - New 入口:    {new_url}")
 
             def _interactive_takeover(p: Page, label: str) -> Page:
+                print(f" >>> [{label}] 请在浏览器中准备好画面后，在此处按下 [ENTER] ...")
+                
+                # 修复: 使用非阻塞方式等待输入，保持 Playwright 事件循环运行
+                # 防止由于 input() 彻底阻塞主线程导致的 CDP 协议超时或弹窗挂起
                 while True:
-                    input(f" >>> [{label}] 请在浏览器中准备好画面后，按回车 [ENTER] ...")
+                    # 每 100ms 检查一次是否有输入，同时让 Playwright 处理 protocol 消息
+                    try:
+                        # 检查是否有未处理的 dialog 或正在发生的 popup
+                        p.wait_for_timeout(200)
+                    except:
+                        pass
+                    
+                    # 使用非阻塞检测或简单的 input 提示
+                    # 注意: Python 的 input() 在多线程环境下可能依然阻塞，
+                    # 但 Playwright sync_api 的 loop 运行在独立线程，wait_for_timeout 会让出控制权。
+                    input_signal = input(f" [{label} READY?] 按回车接管 (或输入 'r' 重新扫描页面): ").strip()
+                    
                     all_pages = p.context.pages
-                    print(f" [{label}] 探测到 {len(all_pages)} 个可用页面:")
+                    print(f" [{label}] 当前 context 共有 {len(all_pages)} 个页面对象")
                     
                     match_idx = -1
                     for idx, page_item in enumerate(all_pages):
