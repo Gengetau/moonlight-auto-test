@@ -8,6 +8,7 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence
 
 
 SEVERITY_ORDER = {"High": 0, "Medium": 1, "Low": 2}
+CASE_GENERATING_KINDS = {"form", "file", "button", "link"}
 
 
 @dataclass(frozen=True)
@@ -51,6 +52,7 @@ def element_label(element: Dict[str, Any]) -> str:
         "id",
         "name",
         "property",
+        "path",
         "value",
         "title",
         "href",
@@ -84,13 +86,57 @@ def page_entries(scan_data: Dict[str, Any]) -> Iterable[Dict[str, Any]]:
 
 
 def common_element_fields(page: str, element: Dict[str, Any]) -> Dict[str, str]:
+    evidence = element_evidence(element)
+    related_fields = element.get("related_fields", [])
+    if related_fields:
+        evidence = f"{evidence}\n字段完整性校验：{field_summary(related_fields)}"
     return {
         "page": page,
         "kind": as_text(element.get("kind"), "unknown"),
         "locator": as_text(element.get("locator"), "(locator missing)"),
         "line": as_text(element.get("line"), "-"),
-        "evidence": element_evidence(element),
+        "evidence": evidence,
     }
+
+
+def field_summary(fields: Sequence[Dict[str, Any]]) -> str:
+    summary = []
+    for field in fields[:20]:
+        label = element_label(field)
+        line = as_text(field.get("line"), "-")
+        locator = as_text(field.get("locator"), "(locator missing)")
+        summary.append(f"{as_text(field.get('tag'), 'field')} `{label}` line={line} locator={locator}")
+    if len(fields) > 20:
+        summary.append(f"... and {len(fields) - 20} more field(s)")
+    return "; ".join(summary)
+
+
+def attach_related_fields(elements: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Attach field records to the nearest preceding form while suppressing standalone field cases."""
+    output: List[Dict[str, Any]] = []
+    current_form: Optional[Dict[str, Any]] = None
+    unassigned_fields: List[Dict[str, Any]] = []
+
+    for element in elements:
+        kind = as_text(element.get("kind")).lower()
+        if kind == "field":
+            field = dict(element)
+            if current_form is None:
+                unassigned_fields.append(field)
+            else:
+                current_form.setdefault("related_fields", []).append(field)
+            continue
+
+        copied = dict(element)
+        if kind == "form":
+            copied["related_fields"] = []
+            if unassigned_fields:
+                copied["related_fields"].extend(unassigned_fields)
+                unassigned_fields = []
+            current_form = copied
+        output.append(copied)
+
+    return output
 
 
 def form_cases(page: str, element: Dict[str, Any]) -> List[TestCase]:
@@ -254,8 +300,10 @@ def generate_cases(scan_data: Dict[str, Any]) -> List[TestCase]:
     cases: List[TestCase] = []
     for page in page_entries(scan_data):
         page_name = as_text(page.get("source"), "<unknown>")
-        for element in page.get("elements", []):
+        for element in attach_related_fields(page.get("elements", [])):
             kind = as_text(element.get("kind")).lower()
+            if kind not in CASE_GENERATING_KINDS:
+                continue
             builder = CASE_BUILDERS.get(kind)
             if builder is None:
                 continue

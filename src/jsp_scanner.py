@@ -12,9 +12,34 @@ except ImportError as exc:  # pragma: no cover - exercised only when dependency 
     ) from exc
 
 
-TARGET_TAGS = {"form", "html:form", "html:file", "input", "html:link"}
+FORM_CONTAINER_TAGS = {"form", "html:form", "form:form"}
+FORM_FIELD_TAGS = {
+    "form:checkbox",
+    "form:checkboxes",
+    "form:hidden",
+    "form:input",
+    "form:option",
+    "form:options",
+    "form:password",
+    "form:radiobutton",
+    "form:radiobuttons",
+    "form:select",
+    "form:textarea",
+    "html:checkbox",
+    "html:hidden",
+    "html:multibox",
+    "html:option",
+    "html:options",
+    "html:password",
+    "html:radio",
+    "html:select",
+    "html:text",
+    "html:textarea",
+}
+ACTION_TAGS = {"html:file", "html:link", "input"}
+TARGET_TAGS = FORM_CONTAINER_TAGS | FORM_FIELD_TAGS | ACTION_TAGS
 TAG_RE = re.compile(
-    r"<\s*(?P<tag>html:form|form|html:file|input|html:link)\b"
+    r"<\s*(?P<tag>form:[\w.-]+|html:[\w.-]+|form|input)\b"
     r"(?P<attrs>(?:[^>\"']+|\"[^\"]*\"|'[^']*')*)"
     r"(?P<selfclose>/?)>",
     re.IGNORECASE | re.DOTALL,
@@ -46,7 +71,7 @@ def line_number(source: str, offset: int) -> int:
 
 def classify_tag(tag: str, attributes: Dict[str, Any]) -> Optional[str]:
     normalized = tag.lower()
-    if normalized in {"form", "html:form"}:
+    if normalized in FORM_CONTAINER_TAGS:
         return "form"
     if normalized == "html:file":
         return "file"
@@ -54,6 +79,10 @@ def classify_tag(tag: str, attributes: Dict[str, Any]) -> Optional[str]:
         return "link"
     if normalized == "input" and str(attributes.get("type", "")).lower() == "button":
         return "button"
+    if normalized.startswith("form:") and normalized != "form:form":
+        return "field"
+    if normalized in FORM_FIELD_TAGS:
+        return "field"
     return None
 
 
@@ -63,7 +92,7 @@ def build_locator(attributes: Dict[str, Any]) -> Optional[str]:
     if element_id:
         return f"#{element_id}"
 
-    name = attributes.get("name") or attributes.get("property")
+    name = attributes.get("name") or attributes.get("property") or attributes.get("path")
     if name:
         return f"[name='{name}']"
 
