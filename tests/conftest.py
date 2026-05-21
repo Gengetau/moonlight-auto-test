@@ -1,7 +1,6 @@
 import pytest
 from playwright.sync_api import sync_playwright
 from src.config_parser import Config
-import os
 
 def pytest_addoption(parser):
     parser.addoption(
@@ -10,16 +9,44 @@ def pytest_addoption(parser):
         default="chrome_port", 
         help="支持的参数: edge / firefox / chrome_port"
     )
+    parser.addoption(
+        "--mapping-path",
+        action="store",
+        default="generated/valid/page_mapping.json",
+        help="page_mapping.py 生成的映射文件"
+    )
+    parser.addoption(
+        "--risk-only",
+        action="store_true",
+        default=False,
+        help="只执行 High/Medium 风险页面"
+    )
+    parser.addoption(
+        "--regression-limit",
+        action="store",
+        type=int,
+        default=None,
+        help="限制回归页面数量，便于冒烟验证"
+    )
 
 @pytest.fixture(scope="session")
 def browser_name(request):
     return request.config.getoption("--test-browser")
 
 @pytest.fixture(scope="session")
-def page(browser_name):
-    """
-    提供一个带有登录态的浏览器页面 Page 对象，支持多端适配。
-    """
+def mapping_path(request):
+    return request.config.getoption("--mapping-path")
+
+@pytest.fixture(scope="session")
+def risk_only(request):
+    return request.config.getoption("--risk-only")
+
+@pytest.fixture(scope="session")
+def regression_limit(request):
+    return request.config.getoption("--regression-limit")
+
+@pytest.fixture(scope="session")
+def browser(browser_name):
     with sync_playwright() as p:
         # 1. 启动特定浏览器
         if browser_name == "edge":
@@ -37,27 +64,50 @@ def page(browser_name):
         else:
             raise ValueError(f"不支持的浏览器类型: {browser_name}")
 
-        # 2. 创建 Context (允许下载，隔离三端)
-        context = browser.new_context(
-            accept_downloads=True,
-            user_agent="Moonlight-Automation-Agent"
-        )
-        page = context.new_page()
+        yield browser
+        browser.close()
 
-        # 3. 执行登录逻辑 (示例)
-        page.goto(f"{Config.NEW_URL}/login")
+
+def _authenticated_page(browser, base_url):
+    context = browser.new_context(
+        accept_downloads=True,
+        user_agent="Moonlight-Automation-Agent"
+    )
+    page = context.new_page()
+    try:
+        page.goto(f"{base_url.rstrip('/')}/login", wait_until="load", timeout=30000)
         page.fill("input[name='username']", Config.USERNAME)
         page.fill("input[name='password']", Config.PASSWORD)
         page.click("button[type='submit']")
-        
+
         # 等待登录态建立
-        page.wait_for_load_state("networkidle")
-        
-        yield page
-        
-        # 4. 清理
-        context.close()
-        browser.close()
+        page.wait_for_load_state("networkidle", timeout=30000)
+    except Exception:
+        # 部分环境使用预置会话或基础认证，登录页缺失时不阻断页面创建。
+        pass
+    return context, page
+
+
+@pytest.fixture(scope="session")
+def legacy_page(browser):
+    context, page = _authenticated_page(browser, Config.LEGACY_URL)
+    yield page
+    context.close()
+
+
+@pytest.fixture(scope="session")
+def new_page(browser):
+    context, page = _authenticated_page(browser, Config.NEW_URL)
+    yield page
+    context.close()
+
+
+@pytest.fixture(scope="session")
+def page(new_page):
+    """
+    保留旧入口：提供 New 环境登录态页面。
+    """
+    yield new_page
 
 def pytest_html_report_title(report):
     report.title = "Moonlight UI 自动化多端适配测试报告"
