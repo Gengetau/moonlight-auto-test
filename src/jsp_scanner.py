@@ -75,6 +75,9 @@ def classify_tag(tag: str, attributes: Dict[str, Any]) -> Optional[str]:
         return "form"
     if normalized == "html:file":
         return "file"
+    # 针对 Spring 标签或原生 input，检查 type=file
+    if (normalized == "input" or normalized == "form:input") and str(attributes.get("type", "")).lower() == "file":
+        return "file"
     if normalized == "html:link":
         return "link"
     if normalized == "input" and str(attributes.get("type", "")).lower() == "button":
@@ -95,6 +98,10 @@ def build_locator(attributes: Dict[str, Any]) -> Optional[str]:
     name = attributes.get("name") or attributes.get("property") or attributes.get("path")
     if name:
         return f"[name='{name}']"
+
+    model_attr = attributes.get("modelAttribute") or attributes.get("commandName")
+    if model_attr:
+        return f"[modelAttribute='{model_attr}']"
 
     href = attributes.get("href")
     if href:

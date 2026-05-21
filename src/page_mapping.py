@@ -53,6 +53,7 @@ def element_label(element: Element) -> str:
     return (
         attr(element, "id", "styleId")
         or attr(element, "name", "property", "path")
+        or attr(element, "modelAttribute", "commandName")
         or action_name(attr(element, "action", "href", "onClick", "onclick"))
         or attr(element, "value", "title")
         or element.get("locator")
@@ -83,7 +84,7 @@ def element_key(element: Element) -> Tuple[str, str]:
     if locator:
         return kind, f"locator:{locator}"
 
-    id_or_name = attr(element, "id", "styleId", "name", "property", "path")
+    id_or_name = attr(element, "id", "styleId", "name", "property", "path", "modelAttribute", "commandName")
     if id_or_name:
         return kind, f"name:{id_or_name}"
 
@@ -101,7 +102,7 @@ def semantic_key(element: Element) -> Tuple[str, str]:
     if target:
         return kind, f"action:{target}"
 
-    label = attr(element, "id", "styleId", "name", "property", "path", "value", "title")
+    label = attr(element, "id", "styleId", "name", "property", "path", "modelAttribute", "commandName", "value", "title")
     if label:
         return kind, f"label:{label}"
 
