@@ -8,94 +8,592 @@
     header { padding: 24px 32px; background: #17202a; color: white; }
     h1 { margin: 0 0 12px; font-size: 26px; letter-spacing: 0; }
     .summary { display: flex; gap: 12px; flex-wrap: wrap; }
+    .summary-details { margin-top: 16px; display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; }
+    .summary-card { background: #273746; border-radius: 8px; padding: 12px; }
+    .summary-card h2 { margin: 0 0 8px; font-size: 13px; color: #d6eaf8; }
+    .summary-card p { margin: 4px 0; font-size: 12px; color: #f8f9f9; overflow-wrap: anywhere; }
+    .summary-card .num { font-size: 20px; font-weight: 800; }
     .pill { padding: 8px 12px; border-radius: 6px; background: #273746; font-weight: 700; }
     main { padding: 24px 32px; }
     .case { margin-bottom: 20px; border: 1px solid #d9e0ea; border-radius: 8px; background: white; overflow: hidden; }
     .case-head { display: flex; align-items: center; gap: 12px; padding: 12px 16px; border-bottom: 1px solid #e7ecf3; }
     .status { padding: 4px 8px; border-radius: 4px; color: white; font-weight: 700; font-size: 12px; }
-    .PASS { background: #1e8449; } .DIFF { background: #b7950b; } .BLOCKED { background: #922b21; }
+    .PASS { background: #1e8449; } .WARN { background: #b7950b; } .DIFF { background: #b7950b; } .BLOCKED { background: #922b21; } .ERROR { background: #7b241c; }
     .meta { color: #52616f; font-size: 13px; overflow-wrap: anywhere; }
     .grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; padding: 16px; }
     figure { margin: 0; }
     figcaption { margin-bottom: 6px; font-size: 12px; color: #52616f; font-weight: 700; }
     img { width: 100%; max-height: 520px; object-fit: contain; border: 1px solid #d9e0ea; background: #fff; }
     .details { padding: 0 16px 16px; font-size: 13px; color: #34495e; }
-    .diag { margin-top: 10px; padding: 10px; border: 1px solid #e7ecf3; border-radius: 6px; background: #f8fafc; overflow-wrap: anywhere; }
     code { font-family: Consolas, monospace; font-size: 12px; white-space: pre-wrap; }
-    @media (max-width: 900px) { .grid { grid-template-columns: 1fr; } }
+    @media (max-width: 900px) { .grid, .summary-details { grid-template-columns: 1fr; } }
   </style>
 </head>
 <body>
   <header>
     <h1>Moonlight Legacy/New Regression Report</h1>
     <div class="summary">
-      <span class="pill">Total: 1</span>
-      <span class="pill">PASS: 0</span>
-      <span class="pill">DIFF: 1</span>
-      <span class="pill">BLOCKED: 0</span>
+      <span class="pill">Total: 28</span>
+      <span class="pill">PASS: 8</span>
+      <span class="pill">DIFF: 0</span>
+      <span class="pill">BLOCKED: 20</span>
+      <span class="pill">ERROR: 0</span>
+    </div>
+    
+    <div class="summary-details">
+      <div class="summary-card">
+        <h2>Execution</h2>
+        <p><span class="num">28</span> results / 1 page(s)</p>
+        <p>Risk: Medium:28</p>
+      </div>
+      <div class="summary-card">
+        <h2>Status</h2>
+        <p>PASS: 8 / WARN: 0</p>
+        <p>DIFF: 0 / BLOCKED: 20 / ERROR: 0</p>
+      </div>
+      <div class="summary-card">
+        <h2>Comparison</h2>
+        <p>URL match: 28 true / 0 false</p>
+        <p>Visual: PASS:21, SKIPPED:7</p>
+        <p>Visual diff avg/max: 0.0000% / 0.0000%</p>
+      </div>
+      <div class="summary-card">
+        <h2>Actions / Hotspots</h2>
+        <p>Actions: submit:14, close_window:7, snapshot:6, -:1</p>
+        <p>Problem pages: ProjectMemberUploadUpdate.jsp:20</p>
+      </div>
     </div>
   </header>
   <main>
 <section class="case">
   <div class="case-head">
-    <span class="status DIFF">DIFF</span>
-    <strong>ProjectMemberUploadDisp.jsp</strong>
-    <span class="meta">risk=Low action=page_snapshot diff=0.0000%</span>
+    <span class="status PASS">PASS</span>
+    <strong>ProjectMemberUploadUpdate.jsp</strong>
+    <span class="meta">risk=Medium action=page_snapshot diff=0.0000%</span>
   </div>
   <div class="grid">
-    <figure><figcaption>Legacy</figcaption><img src="0001_ProjectMemberUploadDisp.jsp\00_legacy_initial.png" alt="Legacy"></figure>
-    <figure><figcaption>New</figcaption><img src="0001_ProjectMemberUploadDisp.jsp\00_new_initial.png" alt="New"></figure>
-    <figure><figcaption>Diff</figcaption><img src="0001_ProjectMemberUploadDisp.jsp\00_diff.png" alt="Diff"></figure>
+    <figure><figcaption>Legacy</figcaption><img src="0001_ProjectMemberUploadUpdate.jsp\00_legacy_initial.png" alt="Legacy"></figure>
+    <figure><figcaption>New</figcaption><img src="0001_ProjectMemberUploadUpdate.jsp\00_new_initial.png" alt="New"></figure>
+    <figure><figcaption>Diff</figcaption><img src="0001_ProjectMemberUploadUpdate.jsp\00_diff.png" alt="Diff"></figure>
   </div>
   <div class="details">
-    URL match: True | DOM match: False | Action type: -<br>
-    Legacy: http://192.168.167.47/patlics/ProjectMemberUploadDisp.do<br>
-    New: http://192.168.167.192/patlics/ProjectMemberUploadDisp.do<br>
+    URL match: True | Action type: -<br>
+    Legacy: http://192.168.167.47/patlics/ProjectMemberUploadFileUpdateList.do<br>
+    New: http://192.168.167.192/patlics/ProjectMemberUploadFileUpdateList.do<br>
     Reason: -<br>
-    <div class="diag"><code>{
-  &quot;legacy_locator&quot;: null,
-  &quot;new_locator&quot;: null,
-  &quot;legacy_frame&quot;: {
-    &quot;name&quot;: &quot;&quot;,
-    &quot;url&quot;: &quot;http://192.168.167.47/patlics/ProjectMemberUploadDisp.do&quot;
-  },
-  &quot;new_frame&quot;: {
-    &quot;name&quot;: &quot;&quot;,
-    &quot;url&quot;: &quot;http://192.168.167.192/patlics/ProjectMemberUploadDisp.do&quot;
-  },
-  &quot;legacy_wait&quot;: null,
-  &quot;new_wait&quot;: null,
-  &quot;legacy_selector_found&quot;: null,
-  &quot;new_selector_found&quot;: null,
-  &quot;legacy_blocked_reason&quot;: null,
-  &quot;new_blocked_reason&quot;: null,
-  &quot;frame_candidates&quot;: {
-    &quot;legacy&quot;: [
-      {
-        &quot;name&quot;: &quot;&quot;,
-        &quot;url&quot;: &quot;http://192.168.167.47/patlics/ProjectMemberUploadDisp.do&quot;,
-        &quot;score&quot;: 168,
-        &quot;forms&quot;: 1,
-        &quot;tables&quot;: 7,
-        &quot;controls&quot;: 11,
-        &quot;body_visible&quot;: true,
-        &quot;text_len&quot;: 136
-      }
-    ],
-    &quot;new&quot;: [
-      {
-        &quot;name&quot;: &quot;&quot;,
-        &quot;url&quot;: &quot;http://192.168.167.192/patlics/ProjectMemberUploadDisp.do&quot;,
-        &quot;score&quot;: 168,
-        &quot;forms&quot;: 1,
-        &quot;tables&quot;: 7,
-        &quot;controls&quot;: 11,
-        &quot;body_visible&quot;: true,
-        &quot;text_len&quot;: 136
-      }
-    ]
-  }
-}</code></div>
+  </div>
+</section>
+
+<section class="case">
+  <div class="case-head">
+    <span class="status PASS">PASS</span>
+    <strong>ProjectMemberUploadUpdate.jsp</strong>
+    <span class="meta">risk=Medium action=ProjectMemberUploadUpdate-40527 diff=-</span>
+  </div>
+  <div class="grid">
+    <figure><figcaption>Legacy</figcaption><img src="0001_ProjectMemberUploadUpdate.jsp\01_ProjectMemberUploadUpdate-40527_legacy_step1.png" alt="Legacy"></figure>
+    <figure><figcaption>New</figcaption><img src="0001_ProjectMemberUploadUpdate.jsp\01_ProjectMemberUploadUpdate-40527_new_step1.png" alt="New"></figure>
+    <figure><figcaption>Diff</figcaption><div class="meta">No screenshot</div></figure>
+  </div>
+  <div class="details">
+    URL match: True | Action type: close_window<br>
+    Legacy: about:closed<br>
+    New: about:closed<br>
+    Reason: -<br>
+  </div>
+</section>
+
+<section class="case">
+  <div class="case-head">
+    <span class="status BLOCKED">BLOCKED</span>
+    <strong>ProjectMemberUploadUpdate.jsp</strong>
+    <span class="meta">risk=Medium action=ProjectMemberUploadUpdate-40528 diff=-</span>
+  </div>
+  <div class="grid">
+    <figure><figcaption>Legacy</figcaption><img src="0001_ProjectMemberUploadUpdate.jsp\02_ProjectMemberUploadUpdate-40528_legacy_step1.png" alt="Legacy"></figure>
+    <figure><figcaption>New</figcaption><img src="0001_ProjectMemberUploadUpdate.jsp\02_ProjectMemberUploadUpdate-40528_new_step1.png" alt="New"></figure>
+    <figure><figcaption>Diff</figcaption><div class="meta">No screenshot</div></figure>
+  </div>
+  <div class="details">
+    URL match: True | Action type: close_window<br>
+    Legacy: about:closed<br>
+    New: about:closed<br>
+    Reason: Page is closed before action<br>
+  </div>
+</section>
+
+<section class="case">
+  <div class="case-head">
+    <span class="status BLOCKED">BLOCKED</span>
+    <strong>ProjectMemberUploadUpdate.jsp</strong>
+    <span class="meta">risk=Medium action=ProjectMemberUploadUpdate-40529 diff=-</span>
+  </div>
+  <div class="grid">
+    <figure><figcaption>Legacy</figcaption><img src="0001_ProjectMemberUploadUpdate.jsp\03_ProjectMemberUploadUpdate-40529_legacy_step1.png" alt="Legacy"></figure>
+    <figure><figcaption>New</figcaption><img src="0001_ProjectMemberUploadUpdate.jsp\03_ProjectMemberUploadUpdate-40529_new_step1.png" alt="New"></figure>
+    <figure><figcaption>Diff</figcaption><div class="meta">No screenshot</div></figure>
+  </div>
+  <div class="details">
+    URL match: True | Action type: close_window<br>
+    Legacy: about:closed<br>
+    New: about:closed<br>
+    Reason: Page is closed before action<br>
+  </div>
+</section>
+
+<section class="case">
+  <div class="case-head">
+    <span class="status BLOCKED">BLOCKED</span>
+    <strong>ProjectMemberUploadUpdate.jsp</strong>
+    <span class="meta">risk=Medium action=ProjectMemberUploadUpdate-40530 diff=-</span>
+  </div>
+  <div class="grid">
+    <figure><figcaption>Legacy</figcaption><img src="0001_ProjectMemberUploadUpdate.jsp\04_ProjectMemberUploadUpdate-40530_legacy_step1.png" alt="Legacy"></figure>
+    <figure><figcaption>New</figcaption><img src="0001_ProjectMemberUploadUpdate.jsp\04_ProjectMemberUploadUpdate-40530_new_step1.png" alt="New"></figure>
+    <figure><figcaption>Diff</figcaption><div class="meta">No screenshot</div></figure>
+  </div>
+  <div class="details">
+    URL match: True | Action type: close_window<br>
+    Legacy: about:closed<br>
+    New: about:closed<br>
+    Reason: Page is closed before action<br>
+  </div>
+</section>
+
+<section class="case">
+  <div class="case-head">
+    <span class="status BLOCKED">BLOCKED</span>
+    <strong>ProjectMemberUploadUpdate.jsp</strong>
+    <span class="meta">risk=Medium action=ProjectMemberUploadUpdate-40531 diff=-</span>
+  </div>
+  <div class="grid">
+    <figure><figcaption>Legacy</figcaption><img src="0001_ProjectMemberUploadUpdate.jsp\05_ProjectMemberUploadUpdate-40531_legacy_step1.png" alt="Legacy"></figure>
+    <figure><figcaption>New</figcaption><img src="0001_ProjectMemberUploadUpdate.jsp\05_ProjectMemberUploadUpdate-40531_new_step1.png" alt="New"></figure>
+    <figure><figcaption>Diff</figcaption><div class="meta">No screenshot</div></figure>
+  </div>
+  <div class="details">
+    URL match: True | Action type: close_window<br>
+    Legacy: about:closed<br>
+    New: about:closed<br>
+    Reason: Page is closed before action<br>
+  </div>
+</section>
+
+<section class="case">
+  <div class="case-head">
+    <span class="status BLOCKED">BLOCKED</span>
+    <strong>ProjectMemberUploadUpdate.jsp</strong>
+    <span class="meta">risk=Medium action=ProjectMemberUploadUpdate-40532 diff=0.0000%</span>
+  </div>
+  <div class="grid">
+    <figure><figcaption>Legacy</figcaption><img src="0001_ProjectMemberUploadUpdate.jsp\06_ProjectMemberUploadUpdate-40532_legacy_step1.png" alt="Legacy"></figure>
+    <figure><figcaption>New</figcaption><img src="0001_ProjectMemberUploadUpdate.jsp\06_ProjectMemberUploadUpdate-40532_new_step1.png" alt="New"></figure>
+    <figure><figcaption>Diff</figcaption><img src="0001_ProjectMemberUploadUpdate.jsp\06_diff.png" alt="Diff"></figure>
+  </div>
+  <div class="details">
+    URL match: True | Action type: submit<br>
+    Legacy: about:closed<br>
+    New: about:closed<br>
+    Reason: Page is closed before action<br>
+  </div>
+</section>
+
+<section class="case">
+  <div class="case-head">
+    <span class="status BLOCKED">BLOCKED</span>
+    <strong>ProjectMemberUploadUpdate.jsp</strong>
+    <span class="meta">risk=Medium action=ProjectMemberUploadUpdate-40533 diff=0.0000%</span>
+  </div>
+  <div class="grid">
+    <figure><figcaption>Legacy</figcaption><img src="0001_ProjectMemberUploadUpdate.jsp\07_ProjectMemberUploadUpdate-40533_legacy_step1.png" alt="Legacy"></figure>
+    <figure><figcaption>New</figcaption><img src="0001_ProjectMemberUploadUpdate.jsp\07_ProjectMemberUploadUpdate-40533_new_step1.png" alt="New"></figure>
+    <figure><figcaption>Diff</figcaption><img src="0001_ProjectMemberUploadUpdate.jsp\07_diff.png" alt="Diff"></figure>
+  </div>
+  <div class="details">
+    URL match: True | Action type: submit<br>
+    Legacy: about:closed<br>
+    New: about:closed<br>
+    Reason: Page is closed before action<br>
+  </div>
+</section>
+
+<section class="case">
+  <div class="case-head">
+    <span class="status BLOCKED">BLOCKED</span>
+    <strong>ProjectMemberUploadUpdate.jsp</strong>
+    <span class="meta">risk=Medium action=ProjectMemberUploadUpdate-40534 diff=0.0000%</span>
+  </div>
+  <div class="grid">
+    <figure><figcaption>Legacy</figcaption><img src="0001_ProjectMemberUploadUpdate.jsp\08_ProjectMemberUploadUpdate-40534_legacy_step1.png" alt="Legacy"></figure>
+    <figure><figcaption>New</figcaption><img src="0001_ProjectMemberUploadUpdate.jsp\08_ProjectMemberUploadUpdate-40534_new_step1.png" alt="New"></figure>
+    <figure><figcaption>Diff</figcaption><img src="0001_ProjectMemberUploadUpdate.jsp\08_diff.png" alt="Diff"></figure>
+  </div>
+  <div class="details">
+    URL match: True | Action type: submit<br>
+    Legacy: about:closed<br>
+    New: about:closed<br>
+    Reason: Page is closed before action<br>
+  </div>
+</section>
+
+<section class="case">
+  <div class="case-head">
+    <span class="status BLOCKED">BLOCKED</span>
+    <strong>ProjectMemberUploadUpdate.jsp</strong>
+    <span class="meta">risk=Medium action=ProjectMemberUploadUpdate-40535 diff=0.0000%</span>
+  </div>
+  <div class="grid">
+    <figure><figcaption>Legacy</figcaption><img src="0001_ProjectMemberUploadUpdate.jsp\09_ProjectMemberUploadUpdate-40535_legacy_step1.png" alt="Legacy"></figure>
+    <figure><figcaption>New</figcaption><img src="0001_ProjectMemberUploadUpdate.jsp\09_ProjectMemberUploadUpdate-40535_new_step1.png" alt="New"></figure>
+    <figure><figcaption>Diff</figcaption><img src="0001_ProjectMemberUploadUpdate.jsp\09_diff.png" alt="Diff"></figure>
+  </div>
+  <div class="details">
+    URL match: True | Action type: submit<br>
+    Legacy: about:closed<br>
+    New: about:closed<br>
+    Reason: Page is closed before action<br>
+  </div>
+</section>
+
+<section class="case">
+  <div class="case-head">
+    <span class="status BLOCKED">BLOCKED</span>
+    <strong>ProjectMemberUploadUpdate.jsp</strong>
+    <span class="meta">risk=Medium action=ProjectMemberUploadUpdate-40536 diff=0.0000%</span>
+  </div>
+  <div class="grid">
+    <figure><figcaption>Legacy</figcaption><img src="0001_ProjectMemberUploadUpdate.jsp\10_ProjectMemberUploadUpdate-40536_legacy_step1.png" alt="Legacy"></figure>
+    <figure><figcaption>New</figcaption><img src="0001_ProjectMemberUploadUpdate.jsp\10_ProjectMemberUploadUpdate-40536_new_step1.png" alt="New"></figure>
+    <figure><figcaption>Diff</figcaption><img src="0001_ProjectMemberUploadUpdate.jsp\10_diff.png" alt="Diff"></figure>
+  </div>
+  <div class="details">
+    URL match: True | Action type: submit<br>
+    Legacy: about:closed<br>
+    New: about:closed<br>
+    Reason: Page is closed before action<br>
+  </div>
+</section>
+
+<section class="case">
+  <div class="case-head">
+    <span class="status BLOCKED">BLOCKED</span>
+    <strong>ProjectMemberUploadUpdate.jsp</strong>
+    <span class="meta">risk=Medium action=ProjectMemberUploadUpdate-40537 diff=0.0000%</span>
+  </div>
+  <div class="grid">
+    <figure><figcaption>Legacy</figcaption><img src="0001_ProjectMemberUploadUpdate.jsp\11_ProjectMemberUploadUpdate-40537_legacy_step1.png" alt="Legacy"></figure>
+    <figure><figcaption>New</figcaption><img src="0001_ProjectMemberUploadUpdate.jsp\11_ProjectMemberUploadUpdate-40537_new_step1.png" alt="New"></figure>
+    <figure><figcaption>Diff</figcaption><img src="0001_ProjectMemberUploadUpdate.jsp\11_diff.png" alt="Diff"></figure>
+  </div>
+  <div class="details">
+    URL match: True | Action type: submit<br>
+    Legacy: about:closed<br>
+    New: about:closed<br>
+    Reason: Page is closed before action<br>
+  </div>
+</section>
+
+<section class="case">
+  <div class="case-head">
+    <span class="status BLOCKED">BLOCKED</span>
+    <strong>ProjectMemberUploadUpdate.jsp</strong>
+    <span class="meta">risk=Medium action=ProjectMemberUploadUpdate-40538 diff=0.0000%</span>
+  </div>
+  <div class="grid">
+    <figure><figcaption>Legacy</figcaption><img src="0001_ProjectMemberUploadUpdate.jsp\12_ProjectMemberUploadUpdate-40538_legacy_step1.png" alt="Legacy"></figure>
+    <figure><figcaption>New</figcaption><img src="0001_ProjectMemberUploadUpdate.jsp\12_ProjectMemberUploadUpdate-40538_new_step1.png" alt="New"></figure>
+    <figure><figcaption>Diff</figcaption><img src="0001_ProjectMemberUploadUpdate.jsp\12_diff.png" alt="Diff"></figure>
+  </div>
+  <div class="details">
+    URL match: True | Action type: submit<br>
+    Legacy: about:closed<br>
+    New: about:closed<br>
+    Reason: Page is closed before action<br>
+  </div>
+</section>
+
+<section class="case">
+  <div class="case-head">
+    <span class="status BLOCKED">BLOCKED</span>
+    <strong>ProjectMemberUploadUpdate.jsp</strong>
+    <span class="meta">risk=Medium action=ProjectMemberUploadUpdate-40539 diff=0.0000%</span>
+  </div>
+  <div class="grid">
+    <figure><figcaption>Legacy</figcaption><img src="0001_ProjectMemberUploadUpdate.jsp\13_ProjectMemberUploadUpdate-40539_legacy_step1.png" alt="Legacy"></figure>
+    <figure><figcaption>New</figcaption><img src="0001_ProjectMemberUploadUpdate.jsp\13_ProjectMemberUploadUpdate-40539_new_step1.png" alt="New"></figure>
+    <figure><figcaption>Diff</figcaption><img src="0001_ProjectMemberUploadUpdate.jsp\13_diff.png" alt="Diff"></figure>
+  </div>
+  <div class="details">
+    URL match: True | Action type: submit<br>
+    Legacy: about:closed<br>
+    New: about:closed<br>
+    Reason: Page is closed before action<br>
+  </div>
+</section>
+
+<section class="case">
+  <div class="case-head">
+    <span class="status BLOCKED">BLOCKED</span>
+    <strong>ProjectMemberUploadUpdate.jsp</strong>
+    <span class="meta">risk=Medium action=ProjectMemberUploadUpdate-40540 diff=0.0000%</span>
+  </div>
+  <div class="grid">
+    <figure><figcaption>Legacy</figcaption><img src="0001_ProjectMemberUploadUpdate.jsp\14_ProjectMemberUploadUpdate-40540_legacy_step1.png" alt="Legacy"></figure>
+    <figure><figcaption>New</figcaption><img src="0001_ProjectMemberUploadUpdate.jsp\14_ProjectMemberUploadUpdate-40540_new_step1.png" alt="New"></figure>
+    <figure><figcaption>Diff</figcaption><img src="0001_ProjectMemberUploadUpdate.jsp\14_diff.png" alt="Diff"></figure>
+  </div>
+  <div class="details">
+    URL match: True | Action type: submit<br>
+    Legacy: about:closed<br>
+    New: about:closed<br>
+    Reason: Page is closed before action<br>
+  </div>
+</section>
+
+<section class="case">
+  <div class="case-head">
+    <span class="status BLOCKED">BLOCKED</span>
+    <strong>ProjectMemberUploadUpdate.jsp</strong>
+    <span class="meta">risk=Medium action=ProjectMemberUploadUpdate-40541 diff=0.0000%</span>
+  </div>
+  <div class="grid">
+    <figure><figcaption>Legacy</figcaption><img src="0001_ProjectMemberUploadUpdate.jsp\15_ProjectMemberUploadUpdate-40541_legacy_step1.png" alt="Legacy"></figure>
+    <figure><figcaption>New</figcaption><img src="0001_ProjectMemberUploadUpdate.jsp\15_ProjectMemberUploadUpdate-40541_new_step1.png" alt="New"></figure>
+    <figure><figcaption>Diff</figcaption><img src="0001_ProjectMemberUploadUpdate.jsp\15_diff.png" alt="Diff"></figure>
+  </div>
+  <div class="details">
+    URL match: True | Action type: submit<br>
+    Legacy: about:closed<br>
+    New: about:closed<br>
+    Reason: Page is closed before action<br>
+  </div>
+</section>
+
+<section class="case">
+  <div class="case-head">
+    <span class="status PASS">PASS</span>
+    <strong>ProjectMemberUploadUpdate.jsp</strong>
+    <span class="meta">risk=Medium action=ProjectMemberUploadUpdate-40542 diff=0.0000%</span>
+  </div>
+  <div class="grid">
+    <figure><figcaption>Legacy</figcaption><img src="0001_ProjectMemberUploadUpdate.jsp\16_ProjectMemberUploadUpdate-40542_legacy_step1.png" alt="Legacy"></figure>
+    <figure><figcaption>New</figcaption><img src="0001_ProjectMemberUploadUpdate.jsp\16_ProjectMemberUploadUpdate-40542_new_step1.png" alt="New"></figure>
+    <figure><figcaption>Diff</figcaption><img src="0001_ProjectMemberUploadUpdate.jsp\16_diff.png" alt="Diff"></figure>
+  </div>
+  <div class="details">
+    URL match: True | Action type: snapshot<br>
+    Legacy: about:closed<br>
+    New: about:closed<br>
+    Reason: -<br>
+  </div>
+</section>
+
+<section class="case">
+  <div class="case-head">
+    <span class="status PASS">PASS</span>
+    <strong>ProjectMemberUploadUpdate.jsp</strong>
+    <span class="meta">risk=Medium action=ProjectMemberUploadUpdate-40543 diff=0.0000%</span>
+  </div>
+  <div class="grid">
+    <figure><figcaption>Legacy</figcaption><img src="0001_ProjectMemberUploadUpdate.jsp\17_ProjectMemberUploadUpdate-40543_legacy_step1.png" alt="Legacy"></figure>
+    <figure><figcaption>New</figcaption><img src="0001_ProjectMemberUploadUpdate.jsp\17_ProjectMemberUploadUpdate-40543_new_step1.png" alt="New"></figure>
+    <figure><figcaption>Diff</figcaption><img src="0001_ProjectMemberUploadUpdate.jsp\17_diff.png" alt="Diff"></figure>
+  </div>
+  <div class="details">
+    URL match: True | Action type: snapshot<br>
+    Legacy: about:closed<br>
+    New: about:closed<br>
+    Reason: -<br>
+  </div>
+</section>
+
+<section class="case">
+  <div class="case-head">
+    <span class="status PASS">PASS</span>
+    <strong>ProjectMemberUploadUpdate.jsp</strong>
+    <span class="meta">risk=Medium action=ProjectMemberUploadUpdate-40544 diff=0.0000%</span>
+  </div>
+  <div class="grid">
+    <figure><figcaption>Legacy</figcaption><img src="0001_ProjectMemberUploadUpdate.jsp\18_ProjectMemberUploadUpdate-40544_legacy_step1.png" alt="Legacy"></figure>
+    <figure><figcaption>New</figcaption><img src="0001_ProjectMemberUploadUpdate.jsp\18_ProjectMemberUploadUpdate-40544_new_step1.png" alt="New"></figure>
+    <figure><figcaption>Diff</figcaption><img src="0001_ProjectMemberUploadUpdate.jsp\18_diff.png" alt="Diff"></figure>
+  </div>
+  <div class="details">
+    URL match: True | Action type: snapshot<br>
+    Legacy: about:closed<br>
+    New: about:closed<br>
+    Reason: -<br>
+  </div>
+</section>
+
+<section class="case">
+  <div class="case-head">
+    <span class="status PASS">PASS</span>
+    <strong>ProjectMemberUploadUpdate.jsp</strong>
+    <span class="meta">risk=Medium action=ProjectMemberUploadUpdate-40545 diff=0.0000%</span>
+  </div>
+  <div class="grid">
+    <figure><figcaption>Legacy</figcaption><img src="0001_ProjectMemberUploadUpdate.jsp\19_ProjectMemberUploadUpdate-40545_legacy_step1.png" alt="Legacy"></figure>
+    <figure><figcaption>New</figcaption><img src="0001_ProjectMemberUploadUpdate.jsp\19_ProjectMemberUploadUpdate-40545_new_step1.png" alt="New"></figure>
+    <figure><figcaption>Diff</figcaption><img src="0001_ProjectMemberUploadUpdate.jsp\19_diff.png" alt="Diff"></figure>
+  </div>
+  <div class="details">
+    URL match: True | Action type: snapshot<br>
+    Legacy: about:closed<br>
+    New: about:closed<br>
+    Reason: -<br>
+  </div>
+</section>
+
+<section class="case">
+  <div class="case-head">
+    <span class="status BLOCKED">BLOCKED</span>
+    <strong>ProjectMemberUploadUpdate.jsp</strong>
+    <span class="meta">risk=Medium action=ProjectMemberUploadUpdate-40546 diff=-</span>
+  </div>
+  <div class="grid">
+    <figure><figcaption>Legacy</figcaption><img src="0001_ProjectMemberUploadUpdate.jsp\20_ProjectMemberUploadUpdate-40546_legacy_step1.png" alt="Legacy"></figure>
+    <figure><figcaption>New</figcaption><img src="0001_ProjectMemberUploadUpdate.jsp\20_ProjectMemberUploadUpdate-40546_new_step1.png" alt="New"></figure>
+    <figure><figcaption>Diff</figcaption><div class="meta">No screenshot</div></figure>
+  </div>
+  <div class="details">
+    URL match: True | Action type: close_window<br>
+    Legacy: about:closed<br>
+    New: about:closed<br>
+    Reason: Page is closed before action<br>
+  </div>
+</section>
+
+<section class="case">
+  <div class="case-head">
+    <span class="status BLOCKED">BLOCKED</span>
+    <strong>ProjectMemberUploadUpdate.jsp</strong>
+    <span class="meta">risk=Medium action=ProjectMemberUploadUpdate-40547 diff=-</span>
+  </div>
+  <div class="grid">
+    <figure><figcaption>Legacy</figcaption><img src="0001_ProjectMemberUploadUpdate.jsp\21_ProjectMemberUploadUpdate-40547_legacy_step1.png" alt="Legacy"></figure>
+    <figure><figcaption>New</figcaption><img src="0001_ProjectMemberUploadUpdate.jsp\21_ProjectMemberUploadUpdate-40547_new_step1.png" alt="New"></figure>
+    <figure><figcaption>Diff</figcaption><div class="meta">No screenshot</div></figure>
+  </div>
+  <div class="details">
+    URL match: True | Action type: close_window<br>
+    Legacy: about:closed<br>
+    New: about:closed<br>
+    Reason: Page is closed before action<br>
+  </div>
+</section>
+
+<section class="case">
+  <div class="case-head">
+    <span class="status BLOCKED">BLOCKED</span>
+    <strong>ProjectMemberUploadUpdate.jsp</strong>
+    <span class="meta">risk=Medium action=ProjectMemberUploadUpdate-40548 diff=0.0000%</span>
+  </div>
+  <div class="grid">
+    <figure><figcaption>Legacy</figcaption><img src="0001_ProjectMemberUploadUpdate.jsp\22_ProjectMemberUploadUpdate-40548_legacy_step1.png" alt="Legacy"></figure>
+    <figure><figcaption>New</figcaption><img src="0001_ProjectMemberUploadUpdate.jsp\22_ProjectMemberUploadUpdate-40548_new_step1.png" alt="New"></figure>
+    <figure><figcaption>Diff</figcaption><img src="0001_ProjectMemberUploadUpdate.jsp\22_diff.png" alt="Diff"></figure>
+  </div>
+  <div class="details">
+    URL match: True | Action type: submit<br>
+    Legacy: about:closed<br>
+    New: about:closed<br>
+    Reason: Page is closed before action<br>
+  </div>
+</section>
+
+<section class="case">
+  <div class="case-head">
+    <span class="status BLOCKED">BLOCKED</span>
+    <strong>ProjectMemberUploadUpdate.jsp</strong>
+    <span class="meta">risk=Medium action=ProjectMemberUploadUpdate-40549 diff=0.0000%</span>
+  </div>
+  <div class="grid">
+    <figure><figcaption>Legacy</figcaption><img src="0001_ProjectMemberUploadUpdate.jsp\23_ProjectMemberUploadUpdate-40549_legacy_step1.png" alt="Legacy"></figure>
+    <figure><figcaption>New</figcaption><img src="0001_ProjectMemberUploadUpdate.jsp\23_ProjectMemberUploadUpdate-40549_new_step1.png" alt="New"></figure>
+    <figure><figcaption>Diff</figcaption><img src="0001_ProjectMemberUploadUpdate.jsp\23_diff.png" alt="Diff"></figure>
+  </div>
+  <div class="details">
+    URL match: True | Action type: submit<br>
+    Legacy: about:closed<br>
+    New: about:closed<br>
+    Reason: Page is closed before action<br>
+  </div>
+</section>
+
+<section class="case">
+  <div class="case-head">
+    <span class="status BLOCKED">BLOCKED</span>
+    <strong>ProjectMemberUploadUpdate.jsp</strong>
+    <span class="meta">risk=Medium action=ProjectMemberUploadUpdate-40550 diff=0.0000%</span>
+  </div>
+  <div class="grid">
+    <figure><figcaption>Legacy</figcaption><img src="0001_ProjectMemberUploadUpdate.jsp\24_ProjectMemberUploadUpdate-40550_legacy_step1.png" alt="Legacy"></figure>
+    <figure><figcaption>New</figcaption><img src="0001_ProjectMemberUploadUpdate.jsp\24_ProjectMemberUploadUpdate-40550_new_step1.png" alt="New"></figure>
+    <figure><figcaption>Diff</figcaption><img src="0001_ProjectMemberUploadUpdate.jsp\24_diff.png" alt="Diff"></figure>
+  </div>
+  <div class="details">
+    URL match: True | Action type: submit<br>
+    Legacy: about:closed<br>
+    New: about:closed<br>
+    Reason: Page is closed before action<br>
+  </div>
+</section>
+
+<section class="case">
+  <div class="case-head">
+    <span class="status BLOCKED">BLOCKED</span>
+    <strong>ProjectMemberUploadUpdate.jsp</strong>
+    <span class="meta">risk=Medium action=ProjectMemberUploadUpdate-40551 diff=0.0000%</span>
+  </div>
+  <div class="grid">
+    <figure><figcaption>Legacy</figcaption><img src="0001_ProjectMemberUploadUpdate.jsp\25_ProjectMemberUploadUpdate-40551_legacy_step1.png" alt="Legacy"></figure>
+    <figure><figcaption>New</figcaption><img src="0001_ProjectMemberUploadUpdate.jsp\25_ProjectMemberUploadUpdate-40551_new_step1.png" alt="New"></figure>
+    <figure><figcaption>Diff</figcaption><img src="0001_ProjectMemberUploadUpdate.jsp\25_diff.png" alt="Diff"></figure>
+  </div>
+  <div class="details">
+    URL match: True | Action type: submit<br>
+    Legacy: about:closed<br>
+    New: about:closed<br>
+    Reason: Page is closed before action<br>
+  </div>
+</section>
+
+<section class="case">
+  <div class="case-head">
+    <span class="status PASS">PASS</span>
+    <strong>ProjectMemberUploadUpdate.jsp</strong>
+    <span class="meta">risk=Medium action=ProjectMemberUploadUpdate-40552 diff=0.0000%</span>
+  </div>
+  <div class="grid">
+    <figure><figcaption>Legacy</figcaption><img src="0001_ProjectMemberUploadUpdate.jsp\26_ProjectMemberUploadUpdate-40552_legacy_step1.png" alt="Legacy"></figure>
+    <figure><figcaption>New</figcaption><img src="0001_ProjectMemberUploadUpdate.jsp\26_ProjectMemberUploadUpdate-40552_new_step1.png" alt="New"></figure>
+    <figure><figcaption>Diff</figcaption><img src="0001_ProjectMemberUploadUpdate.jsp\26_diff.png" alt="Diff"></figure>
+  </div>
+  <div class="details">
+    URL match: True | Action type: snapshot<br>
+    Legacy: about:closed<br>
+    New: about:closed<br>
+    Reason: -<br>
+  </div>
+</section>
+
+<section class="case">
+  <div class="case-head">
+    <span class="status PASS">PASS</span>
+    <strong>ProjectMemberUploadUpdate.jsp</strong>
+    <span class="meta">risk=Medium action=ProjectMemberUploadUpdate-40553 diff=0.0000%</span>
+  </div>
+  <div class="grid">
+    <figure><figcaption>Legacy</figcaption><img src="0001_ProjectMemberUploadUpdate.jsp\27_ProjectMemberUploadUpdate-40553_legacy_step1.png" alt="Legacy"></figure>
+    <figure><figcaption>New</figcaption><img src="0001_ProjectMemberUploadUpdate.jsp\27_ProjectMemberUploadUpdate-40553_new_step1.png" alt="New"></figure>
+    <figure><figcaption>Diff</figcaption><img src="0001_ProjectMemberUploadUpdate.jsp\27_diff.png" alt="Diff"></figure>
+  </div>
+  <div class="details">
+    URL match: True | Action type: snapshot<br>
+    Legacy: about:closed<br>
+    New: about:closed<br>
+    Reason: -<br>
   </div>
 </section></main>
 </body>

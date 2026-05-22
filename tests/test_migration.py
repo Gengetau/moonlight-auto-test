@@ -11,6 +11,8 @@ def test_migration_regression(
     risk_only,
     regression_limit,
     struts_config,
+    login_entry,
+    checklist_path,
 ):
     """
     Legacy/New 全量或风险优先回归入口。
@@ -18,7 +20,9 @@ def test_migration_regression(
     默认执行全量页面；传入 --risk-only 时只执行 High/Medium 风险页面。
     传入 --target-page 时只执行指定 JSP，且无视风险等级。
     """
-    engine = RegressionEngine(mapping_path=mapping_path, struts_config_path=struts_config)
+    engine = RegressionEngine(mapping_path=mapping_path, checklist_path=checklist_path, legacy_base_url=login_entry["legacy_url"],
+        new_base_url=login_entry["new_url"],
+                              )
     result = engine.run(
         legacy_page,
         new_page,
@@ -27,7 +31,7 @@ def test_migration_regression(
         limit=regression_limit,
         target_page=target_page,
         manual=manual,
-    )
+        )
 
     assert result["summary"].get("BLOCKED", 0) == 0, f"Blocked regression steps. Report: {result['report_path']}"
     assert result["summary"].get("DIFF", 0) == 0, f"Regression diffs found. Report: {result['report_path']}"

@@ -54,9 +54,17 @@ playwright install --with-deps
 LEGACY_URL=https://old-world.example.com
 NEW_URL=https://new-world.example.com
 
+# 可选：配置多个登录入口，启动时人工选择
+# 序号一一对应：第 1 个 Legacy URL 对第 1 个 New URL。
+LOGIN_ENTRY_NAMES=dev-a,dev-b
+LEGACY_URLS=https://old-a.example.com,https://old-b.example.com
+NEW_URLS=https://new-a.example.com,https://new-b.example.com
+# 可选：无人值守时预选入口，支持名称或序号
+# LOGIN_ENTRY=dev-a
+
 # 侦察兵凭证
-USERNAME=your_username
-PASSWORD=your_password
+TEST_USERNAME=your_username
+TEST_PASSWORD=your_password
 
 # 浏览器阵地 (便携版路径，若使用系统浏览器可留空)
 CHROME_PORTABLE_PATH=/path/to/chrome_portable/chrome.exe
@@ -100,6 +108,7 @@ pytest --test-browser=chrome_port --html=output/report.html
 pytest tests/test_migration.py \
   --test-browser=chrome_port \
   --target-page=AbstListEdit.jsp \
+  --login-entry=dev-a \
   --html=output/AbstListEdit_report.html
 ```
 
@@ -112,6 +121,57 @@ pytest tests/test_migration.py \
   --html=output/manual_report.html
 ```
 *注：此模式下，引擎会暂停执行并等待你在终端按下回车，请在接管前确保浏览器已停留在正确的 JSP 画面。*
+
+### 5. 单页面路径建图
+全量路径建图会枚举大量静态候选路径，实际排查时建议按目标 JSP 单独生成、单独验证。
+
+先只为一个页面生成候选路径：
+```powershell
+.\venv\Scripts\python.exe -m src.route_catalog `
+  --target AbstListEdit.jsp `
+  --output generated\valid\route_candidates_AbstListEdit.json `
+  --limit-per-target 5 `
+  --max-sources 8 `
+  --target-timeout-seconds 5
+```
+
+如果你已经知道路径应从菜单页开始，可以显式指定入口 JSP，避免默认源点集合漏掉中间入口：
+```powershell
+.\venv\Scripts\python.exe -m src.route_catalog `
+  --target ProjectMemberUploadDisp.jsp `
+  --entry PatlicsMenu.jsp `
+  --output generated\valid\route_candidates_ProjectMemberUploadDisp.json `
+  --limit-per-target 5
+```
+
+再只验证这个页面的候选路径。默认关闭自动登录；如入口页出现登录表单，工具会暂停等待人工登录或准备入口。
+```powershell
+.\venv\Scripts\python.exe -m src.route_map_runner `
+  --candidates generated\valid\route_candidates_AbstListEdit.json `
+  --target AbstListEdit.jsp `
+  --output generated\valid\usable_route_map_legacy_AbstListEdit.json `
+  --capture-dir output\route_map\AbstListEdit_legacy `
+  --side legacy `
+  --manual-data
+```
+
+常用缩小范围参数：
+- `--limit 1`: 只验证第 1 条候选路径。
+- `--start-index 3`: 从第 3 条候选路径开始验证。
+- `--login-entry dev-a`: 多入口环境下直接指定入口，避免启动时交互选择。
+- `--side new`: 只验证新系统路径；一次只打开一个环境。
+- `--auto-login`: 启用自动填账号密码并点击登录；默认不启用。
+
+如果已经有全量 `generated\valid\route_candidates.json`，也可以不重新生成候选，直接按目标页面过滤验证：
+```powershell
+.\venv\Scripts\python.exe -m src.route_map_runner `
+  --candidates generated\valid\route_candidates.json `
+  --target AbstListEdit.jsp `
+  --output generated\valid\usable_route_map_legacy_AbstListEdit.json `
+  --side legacy `
+  --limit 3 `
+  --manual-data
+```
 
 ---
 

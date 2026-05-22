@@ -8,6 +8,7 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 Element = Dict[str, Any]
 Page = Dict[str, Any]
+EXECUTABLE_ACTION_KINDS = {"form", "button", "link", "file"}
 
 
 def page_id(source: str) -> str:
@@ -51,36 +52,75 @@ def attr(element: Element, *names: str) -> Optional[str]:
 
 
 def normalize_locator(element: Element) -> Optional[str]:
-    """
-    実行用 locator を正規化する。
+    """Return an executable locator.
 
-    Struts の html:file では name は Form Bean 名、property が実際の input 名。
-    mapping には実行可能な input[type=file] locator を出す。
+    - Struts html:file: name is Form Bean, property is real input name.
+    - form elements may not have an explicit name, so fall back to action.
     """
     kind = str(element.get("kind") or "")
     tag = str(element.get("tag") or "").lower()
     attrs = element.get("attributes") or {}
 
     if kind == "file" or tag == "html:file":
-        field_name = (
-            attrs.get("property")
-            or attrs.get("path")
-            or attrs.get("name")
-            or attrs.get("id")
-        )
+        field_name = attrs.get("property") or attrs.get("path") or attrs.get("name") or attrs.get("id")
         if field_name:
             return f"input[name='{field_name}']"
 
-    return element.get("locator")
+    if kind == "form" or tag in {"html:form", "form:form"}:
+        form_name = attrs.get("name") or attrs.get("id")
+        if form_name:
+            return f"form[name='{form_name}']"
+        action = attrs.get("action")
+        if action:
+            action_name_part = str(action).rstrip("/").rsplit("/", 1)[-1].removesuffix(".do")
+            if action_name_part:
+                return f"form[action*='{action_name_part}']"
+
+    locator = element.get("locator")
+    if locator:
+        return str(locator)
+
+    return None
+
+def element_field_name(element: Element) -> Optional[str]:
+    """Return the business field name for semantic matching.
+
+    Struts html:file is special: name is the Form Bean name, while property is
+    the generated input name. For normal Struts tags, property is also preferred.
+    """
+    kind = str(element.get("kind") or "")
+    tag = str(element.get("tag") or "").lower()
+
+    if element.get("field_name"):
+        return str(element.get("field_name"))
+
+    if kind == "file" or tag == "html:file":
+        return attr(element, "property", "path", "name", "id", "styleId")
+
+    if tag.startswith("html:"):
+        return attr(element, "property", "name", "id", "styleId")
+
+    if tag.startswith("form:"):
+        return attr(element, "path", "name", "id", "modelAttribute", "commandName")
+
+    return attr(
+        element,
+        "id",
+        "styleId",
+        "name",
+        "property",
+        "path",
+        "modelAttribute",
+        "commandName",
+    )
+
 
 def element_label(element: Element) -> str:
     return (
-        attr(element, "id", "styleId")
-        or attr(element, "name", "property", "path")
-        or attr(element, "modelAttribute", "commandName")
+        element_field_name(element)
         or action_name(attr(element, "action", "href", "onClick", "onclick"))
         or attr(element, "value", "title")
-        or element.get("locator")
+        or normalize_locator(element)
         or element.get("tag")
         or "unknown"
     )
@@ -122,17 +162,27 @@ def element_key(element: Element) -> Tuple[str, str]:
 
 def semantic_key(element: Element) -> Tuple[str, str]:
     kind = str(element.get("kind") or "unknown")
+
+    # Forms, buttons and links are primarily business actions.
+    if kind in {"form", "button", "link"}:
+        target = action_target(element)
+        if target:
+            return kind, f"action:{target}"
+
+    # Input-like controls are primarily fields. This fixes Struts html:file
+    # matching against Spring/native input[type=file].
+    field_name = element_field_name(element)
+    if field_name:
+        return kind, f"field:{field_name}"
+
     target = action_target(element)
     if target:
         return kind, f"action:{target}"
 
-    label = attr(element, "id", "styleId", "name", "property", "path", "modelAttribute", "commandName", "value", "title")
-    if label:
-        return kind, f"label:{label}"
-
-    locator = element.get("locator")
+    locator = normalize_locator(element)
     if locator:
         return kind, f"locator:{locator}"
+
     return element_key(element)
 
 
@@ -195,25 +245,51 @@ def classify_risk(missing_count: int, locator_change_count: int, legacy_count: i
 
 
 def normalized_locator(element: Element) -> Optional[str]:
+    return normalize_locator(element)
+
+
+def action_hint_for_step(element: Element) -> Optional[str]:
     kind = str(element.get("kind") or "")
-    tag = str(element.get("tag") or "").lower()
     attrs = element.get("attributes") or {}
+    onclick = str(attrs.get("onclick") or attrs.get("onClick") or "").lower()
+    href = str(attrs.get("href") or "").lower()
 
-    if kind == "file" or tag == "html:file":
-        field_name = (
-            attrs.get("property")
-            or attrs.get("path")
-            or attrs.get("name")
-            or attrs.get("id")
-        )
-        if field_name:
-            return f"input[name='{field_name}']"
+    if kind == "file":
+        return "upload"
+    if kind == "form":
+        return "submit"
+    if "window.close" in onclick:
+        return "close_window"
+    if "download" in onclick or "templatedownload" in onclick:
+        return "download"
+    if "fnsubmit" in onclick or ".submit" in onclick:
+        return "submit"
+    if kind == "link" and href and href not in {"#", "javascript:void(0)"}:
+        return "navigate"
+    return element.get("action_hint") or ("click" if kind in {"button", "link"} else None)
 
-    locator = element.get("locator")
-    if locator:
-        return str(locator)
 
-    return None
+def executable_action_step(element: Element) -> Optional[Dict[str, Any]]:
+    kind = str(element.get("kind") or "")
+    if kind not in EXECUTABLE_ACTION_KINDS:
+        return None
+
+    locator = normalized_locator(element)
+    if not locator:
+        return None
+
+    step = {
+        "kind": kind,
+        "label": element_label(element),
+        "legacy_locator": locator,
+        "semantic_key": semantic_key(element)[1],
+        "action_hint": action_hint_for_step(element),
+        "line": element.get("line"),
+        "attributes": element.get("attributes", {}),
+    }
+    if element.get("raw"):
+        step["raw"] = element.get("raw")
+    return step
 
 
 def compare_page(page: str, legacy_pages: List[Page], new_pages: List[Page]) -> Dict[str, Any]:
@@ -224,13 +300,9 @@ def compare_page(page: str, legacy_pages: List[Page], new_pages: List[Page]) -> 
     # 这将显著增加回归测试的项目数量，涵盖所有识别到的按钮、链接和输入框
     full_action_steps = []
     for element in legacy_elements:
-        if element.get("kind") in ("button", "link", "file", "field"):
-            full_action_steps.append({
-                "kind": element.get("kind"),
-                "label": element_label(element),
-                "legacy_locator": element.get("locator"),
-                "semantic_key": semantic_key(element)[1]
-            })
+        step = executable_action_step(element)
+        if step:
+            full_action_steps.append(step)
 
     legacy_counts = count_by_key(legacy_elements, semantic_key)
     new_counts = count_by_key(new_elements, semantic_key)

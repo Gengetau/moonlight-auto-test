@@ -7,8 +7,8 @@
 - 同名页面匹配数：1659
 - Legacy 独有页面数：0
 - New 独有页面数：11
-- 高风险页面数：377
-- 中风险页面数：466
+- 高风险页面数：288
+- 中风险页面数：581
 - 公共导航路径数：588
 - Action 映射数：861
 
@@ -57,91 +57,104 @@
 
 | 页面 | Legacy元素 | New元素 | 缺失 | 定位器变更 | 公共导航 |
 |---|---:|---:|---:|---:|---|
-| AbstListEdit.jsp | 352 | 158 | 33 | 0 | `AbstListViewEntry` |
-| AbstPDFDownload.jsp | 86 | 86 | 5 | 2 | `JpAbstPDFDownload` |
-| AiAutoClsSettingClass.jsp | 3 | 3 | 1 | 0 | - |
-| AiAutoClsSettingEvalRank.jsp | 3 | 3 | 1 | 0 | - |
-| AzureADUserListUpload.jsp | 3 | 2 | 1 | 0 | `AzureADUserUpAdminUpload`, `UserUpUserListCtrl` |
-| BiblioComplexSelectList.jsp | 3 | 3 | 1 | 0 | `BiblioSetSearch` |
-| BiblioFileDownloadDisp.jsp | 60 | 60 | 5 | 0 | `JpBiblioFileDownload` |
-| BookmarkWord.jsp | 2 | 2 | 1 | 1 | - |
-| ClassificationCodeToolTip.jsp | 7 | 7 | 0 | 7 | - |
-| ClassificationMatrix.jsp | 12 | 12 | 0 | 12 | - |
-| ClassificationMatrixFrame.jsp | 24 | 24 | 6 | 0 | `CnClassificationMatrixHeader`, `EuClassificationMatrixHeader`, `JpClassificationMatrixHeader` |
-| ClassificationMatrixHeader.jsp | 8 | 10 | 0 | 6 | - |
-| ClsCopy.jsp | 17 | 18 | 3 | 0 | `ClsCopy` |
-| ClsDeleteForClsSystem.jsp | 3 | 3 | 1 | 0 | `ClsDeleteFromContext` |
-| ClsDeleteForClsSystemMg.jsp | 3 | 3 | 1 | 0 | `ClsDeleteFromContext` |
-| ClsDtlForClsSystem.jsp | 5 | 5 | 2 | 0 | `ClsUpdateFromContext` |
-| ClsNewEntryForClsSystem.jsp | 5 | 5 | 2 | 0 | `ClsNewEntryFromContext` |
-| CnAbstList.jsp | 158 | 148 | 15 | 1 | `CnAbstListPaging` |
-| CnAbstList0.jsp | 103 | 95 | 4 | 0 | `CnAbstListPaging` |
-| CnAbstPDFDownload.jsp | 86 | 86 | 6 | 0 | `CnAbstPDFDownload` |
-| CnAnalyzeRankingHeader.jsp | 23 | 23 | 1 | 5 | - |
-| CnBiblioFileDownloadDisp.jsp | 58 | 58 | 5 | 0 | `CnBiblioFileDownload` |
-| CnBiblioList.jsp | 63 | 57 | 4 | 1 | `CnAbstListForBiblioList` |
-| CnBiblioList0.jsp | 102 | 94 | 4 | 0 | `CnAbstListForBiblioList` |
-| CnBiblioListHeader.jsp | 92 | 84 | 7 | 0 | - |
-| CnBiblioListTableBody.jsp | 9 | 9 | 4 | 0 | - |
-| CnClassCodeDetail.jsp | 3 | 3 | 1 | 1 | - |
-| CnClsAid.jsp | 11 | 12 | 4 | 0 | `CnClsAidSearch` |
-| CnCpcAidResult.jsp | 3 | 3 | 1 | 0 | - |
-| CnEpcAidResult.jsp | 3 | 3 | 1 | 0 | - |
+| AbstListEdit.jsp | 352 | 158 | 30 | 1 | `AbstListViewEntry` |
+| AbstPDFDownload.jsp | 86 | 86 | 10 | 1 | `JpAbstPDFDownload` |
+| AiAutoClsEntry.jsp | 17 | 24 | 3 | 1 | `AiAutoClsEntry` |
+| AiAutoClsEntryList.jsp | 17 | 23 | 3 | 1 | `AiAutoClsEntryList` |
+| AiEvalBlocEntry.jsp | 13 | 14 | 3 | 1 | `AiEvalEntry` |
+| AiEvalEntry.jsp | 15 | 16 | 3 | 1 | `AiEvalEntry` |
+| BiblioComplexSelectList.jsp | 3 | 3 | 1 | 1 | `BiblioSetSearch` |
+| BiblioFileDownloadDisp.jsp | 60 | 60 | 12 | 1 | `JpBiblioFileDownload` |
+| ClassificationMatrixFrame.jsp | 24 | 24 | 0 | 6 | `CnClassificationMatrixHeader`, `EuClassificationMatrixHeader`, `JpClassificationMatrixHeader` |
+| ClsCopy.jsp | 17 | 18 | 4 | 1 | `ClsCopy` |
+| ClsFileUploadConf.jsp | 18 | 18 | 0 | 4 | `ClsFileUploadEntry` |
+| CnAbstList.jsp | 158 | 148 | 53 | 3 | `CnAbstListPaging` |
+| CnAbstList0.jsp | 103 | 95 | 46 | 1 | `CnAbstListPaging` |
+| CnAbstPDFDownload.jsp | 86 | 86 | 11 | 1 | `CnAbstPDFDownload` |
+| CnAnalyzeRankingHeader.jsp | 23 | 23 | 3 | 0 | - |
+| CnBiblioFileDownloadDisp.jsp | 58 | 58 | 12 | 1 | `CnBiblioFileDownload` |
+| CnBiblioList.jsp | 63 | 57 | 2 | 3 | `CnAbstListForBiblioList` |
+| CnBiblioList0.jsp | 102 | 94 | 45 | 1 | `CnAbstListForBiblioList` |
+| CnBiblioListHeader.jsp | 92 | 84 | 48 | 0 | - |
+| CnBiblioListTableBody.jsp | 9 | 9 | 3 | 0 | - |
+| CnClsAid.jsp | 11 | 12 | 4 | 1 | `CnClsAidSearch` |
+| CnEvalDataFileDownloadDisp.jsp | 46 | 46 | 8 | 1 | `CnEvalDataFileDownload` |
+| CnEvalFileDownloadDisp.jsp | 49 | 49 | 10 | 1 | `CnEvalFileDownload` |
+| CnEvalFreeAid.jsp | 9 | 10 | 4 | 1 | `CnRankAxisAidSearch` |
+| CnExternalMapFileDownloadDisp.jsp | 28 | 28 | 5 | 1 | `CnExternalMapFileDownload` |
+| CnListFocusSet.jsp | 46 | 88 | 3 | 1 | `CnListFocus` |
+| CnRankAxisAid.jsp | 15 | 16 | 3 | 1 | `CnRankAxisAidSearch` |
+| CnRankEleAid.jsp | 18 | 18 | 4 | 1 | `CnRankEleAidSearch` |
+| CnSearchAid.jsp | 13 | 17 | 3 | 1 | `CnSearchAidSearch` |
+| CntChargeAddUserSearchList.jsp | 3 | 3 | 1 | 1 | `CntChargeAddUserSearch` |
 
 ## 代表性缺失/定位器变更
 
 ### AbstListEdit.jsp
-- 缺失：field `AbstListViewEditForm` locator=[name='AbstListViewEditForm'] action=-
+- 缺失：field `<%= slctItemIds[index].toString()%>` locator=- action=-
 - 缺失：field `<%= slctItemIds[index].toString()%>` locator=- action=-
 - 缺失：field `SET_ID` locator=[name='SET_ID'] action=-
-- 缺失：field `zumen` locator=[name='zumen'] action=-
 - 缺失：field `1` locator=- action=-
+- 缺失：field `2` locator=- action=-
+- 定位器变更：form `AbstListViewEntry` form[action*='AbstListViewEntry'] -> form[name='AbstListViewEditForm']
 
 ### AbstPDFDownload.jsp
+- 缺失：field `1` locator=- action=-
+- 缺失：field `0` locator=- action=-
 - 缺失：field `<%= entSecItemIds[index].toString()%>` locator=- action=-
-- 缺失：field `JpAbstListForm` locator=[name='JpAbstListForm'] action=-
-- 缺失：field `<%= slctItemIds[index].toString()%>` locator=- action=-
-- 缺失：field `SLCT_ITEM_ID` locator=[name='SLCT_ITEM_ID'] action=-
-- 缺失：field `INIT_ITEM_ID` locator=[name='INIT_ITEM_ID'] action=-
-- 定位器变更：field `JpAbstListForm` [name='JpAbstListForm'] -> [name='standardFlag']
-- 定位器变更：field `JpAbstListForm` [name='JpAbstListForm'] -> [name='standardFlag']
+- 缺失：field `<%= key_value %>` locator=- action=-
+- 缺失：field `2` locator=- action=-
+- 定位器变更：form `JpAbstPDFDownload` form[action*='JpAbstPDFDownload'] -> form[name='JpAbstPDFDownloaForm']
 
-### AiAutoClsSettingClass.jsp
-- 缺失：button `<bean:message bundle='PATLICS_MESSAGE' key='btn.close'/>` locator=- action=-
+### AiAutoClsEntry.jsp
+- 缺失：field `0` locator=- action=-
+- 缺失：field `1` locator=- action=-
+- 缺失：field `clsGroupId` locator=[name='clsGroupId'] action=-
+- 定位器变更：form `AiAutoClsEntry` form[action*='AiAutoClsEntry'] -> form[name='AiAutoClsEntryForm']
 
-### AiAutoClsSettingEvalRank.jsp
-- 缺失：button `<bean:message bundle='PATLICS_MESSAGE' key='btn.close'/>` locator=- action=-
+### AiAutoClsEntryList.jsp
+- 缺失：field `0` locator=- action=-
+- 缺失：field `1` locator=- action=-
+- 缺失：field `clsGroupId` locator=[name='clsGroupId'] action=-
+- 定位器变更：form `AiAutoClsEntryList` form[action*='AiAutoClsEntryList'] -> form[name='AiAutoClsEntryForm']
 
-### AzureADUserListUpload.jsp
-- 缺失：file `UserUpUploadForm` locator=[name='UserUpUploadForm'] action=-
+### AiEvalBlocEntry.jsp
+- 缺失：field `0` locator=- action=-
+- 缺失：field `1` locator=- action=-
+- 缺失：field `2` locator=- action=-
+- 定位器变更：form `AiEvalEntry` form[action*='AiEvalEntry'] -> form[name='AiEvalEntryForm']
+
+### AiEvalEntry.jsp
+- 缺失：field `0` locator=- action=-
+- 缺失：field `1` locator=- action=-
+- 缺失：field `2` locator=- action=-
+- 定位器变更：form `AiEvalEntry` form[action*='AiEvalEntry'] -> form[name='AiEvalEntryForm']
 
 ### BiblioComplexSelectList.jsp
 - 缺失：field `INIT_ITEM_ID` locator=[name='INIT_ITEM_ID'] action=-
+- 定位器变更：form `BiblioSetSearch` form[action*='BiblioSetSearch'] -> form[name='BiblioListViewEntryForm']
 
 ### BiblioFileDownloadDisp.jsp
-- 缺失：field `JpBiblioFileDownloadForm` locator=[name='JpBiblioFileDownloadForm'] action=-
-- 缺失：field `<%= entSecItemIds[index].toString()%>` locator=- action=-
-- 缺失：field `<%= slctItemIds[index].toString()%>` locator=- action=-
-- 缺失：field `SLCT_ITEM_ID` locator=[name='SLCT_ITEM_ID'] action=-
-- 缺失：field `INIT_ITEM_ID` locator=[name='INIT_ITEM_ID'] action=-
+- 缺失：field `tsv` locator=- action=-
+- 缺失：field `csv` locator=- action=-
+- 缺失：field `0` locator=- action=-
+- 缺失：field `1` locator=- action=-
+- 缺失：field `2` locator=- action=-
+- 定位器变更：form `JpBiblioFileDownload` form[action*='JpBiblioFileDownload'] -> form[name='JpBiblioFileDownloadForm']
 
-### BookmarkWord.jsp
-- 缺失：button `<bean:message bundle='PATLICS_MESSAGE' key='btn.close'/>` locator=- action=-
-- 定位器变更：form `fmMain` [name='fmMain'] -> #fmMain
+### ClassificationMatrixFrame.jsp
+- 定位器变更：form `classMatrixForm` form[action*='CnClassificationMatrixHeader'] -> form[name='CnClassificationMatrixForm']
+- 定位器变更：form `classMatrixForm` form[action*='EuClassificationMatrixHeader'] -> form[name='EuClassificationMatrixForm']
+- 定位器变更：form `classMatrixForm` form[action*='JpClassificationMatrixHeader'] -> form[name='JpClassificationMatrixForm']
+- 定位器变更：form `classMatrixForm` form[action*='PctClassificationMatrixHeader'] -> form[name='PctClassificationMatrixForm']
+- 定位器变更：form `classMatrixForm` form[action*='UsClassificationMatrixHeader'] -> form[name='UsClassificationMatrixForm']
 
-### ClassificationCodeToolTip.jsp
-- 定位器变更：form `CnClassCodeDetailForm` [name='CnClassCodeDetailForm'] -> #CnClassCodeDetailForm
-- 定位器变更：form `EpClassCodeDetailForm` [name='EpClassCodeDetailForm'] -> #EpClassCodeDetailForm
-- 定位器变更：form `EuClassCodeDetailForm` [name='EuClassCodeDetailForm'] -> #EuClassCodeDetailForm
-- 定位器变更：form `JpClassCodeDetailForm` [name='JpClassCodeDetailForm'] -> #JpClassCodeDetailForm
-- 定位器变更：form `PctClassCodeDetailForm` [name='PctClassCodeDetailForm'] -> #PctClassCodeDetailForm
-
-### ClassificationMatrix.jsp
-- 定位器变更：form `CnClassificationMatrixForm` [name='CnClassificationMatrixForm'] -> #CnClassificationMatrixForm
-- 定位器变更：form `CnClassificationMatrixForm` [name='CnClassificationMatrixForm'] -> #CnClassificationMatrixForm
-- 定位器变更：form `EuClassificationMatrixForm` [name='EuClassificationMatrixForm'] -> #EuClassificationMatrixForm
-- 定位器变更：form `EuClassificationMatrixForm` [name='EuClassificationMatrixForm'] -> #EuClassificationMatrixForm
-- 定位器变更：form `JpClassificationMatrixForm` [name='JpClassificationMatrixForm'] -> #JpClassificationMatrixForm
+### ClsCopy.jsp
+- 缺失：field `html:option` locator=- action=-
+- 缺失：field `<%= key_value %>` locator=- action=-
+- 缺失：field `<%= key_value %>` locator=- action=-
+- 缺失：field `clsGroupId` locator=[name='clsGroupId'] action=-
+- 定位器变更：form `ClsCopy` form[action*='ClsCopy'] -> form[name='ClsCopyForm']
 
 ## Action -> 页面 Top 50
 

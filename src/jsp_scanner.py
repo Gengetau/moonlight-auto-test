@@ -89,15 +89,79 @@ def classify_tag(tag: str, attributes: Dict[str, Any]) -> Optional[str]:
     return None
 
 
-def build_locator(attributes: Dict[str, Any]) -> Optional[str]:
+def _css_attr(value: Any) -> str:
+    """Escape an attribute value for a double-quoted CSS selector."""
+    return str(value).replace("\\", "\\\\").replace('"', '\\"')
+
+
+def build_locator(
+    tag: str,
+    kind: str,
+    attributes: Dict[str, Any],
+) -> Optional[str]:
+    """
+    Build a Playwright/CSS locator using the real element tag.
+
+    Important:
+    - Struts html:file uses name=FormBean and property=actual input name.
+    - onclick fallback must keep the original tag. Do not turn input/button into a[onclick].
+    """
+    normalized_tag = str(tag or "").lower()
+    normalized_kind = str(kind or "").lower()
+
     style_id = attributes.get("styleId") or attributes.get("styleid")
     element_id = attributes.get("id") or style_id
     if element_id:
         return f"#{element_id}"
 
-    name = attributes.get("name") or attributes.get("property") or attributes.get("path")
+    # Struts file tag:
+    # <html:file name="ProjectListUploadForm" property="uploadFile" />
+    # renders as <input type="file" name="uploadFile">
+    if normalized_tag == "html:file":
+        field_name = attributes.get("property") or attributes.get("name")
+        if field_name:
+            return f"input[name='{field_name}']"
+
+    # Native/Spring file input.
+    if normalized_kind == "file":
+        field_name = (
+            attributes.get("name")
+            or attributes.get("property")
+            or attributes.get("path")
+        )
+        if field_name:
+            return f"input[name='{field_name}']"
+
+    # Form locator.
+    if normalized_kind == "form":
+        name = attributes.get("name")
+        if name:
+            return f"form[name='{name}']"
+
+        action = attributes.get("action")
+        if action:
+            action_name = str(action).rstrip("/").split("/")[-1]
+            if action_name:
+                return f"form[action*='{action_name}']"
+
+    # Struts/Spring field tags.
+    if normalized_tag.startswith("html:"):
+        field_name = attributes.get("property") or attributes.get("name")
+        if field_name:
+            return f"[name='{field_name}']"
+
+    if normalized_tag.startswith("form:"):
+        field_name = attributes.get("path") or attributes.get("name")
+        if field_name:
+            return f"[name='{field_name}']"
+
+    # Native HTML controls.
+    name = attributes.get("name")
     if name:
-        # 兼容处理：Playwright 属性定位器
+        if normalized_tag == "input":
+            return f"input[name='{name}']"
+        if normalized_tag == "button":
+            return f"button[name='{name}']"
         return f"[name='{name}']"
 
     model_attr = attributes.get("modelAttribute") or attributes.get("commandName")
@@ -105,8 +169,27 @@ def build_locator(attributes: Dict[str, Any]) -> Optional[str]:
         return f"[modelAttribute='{model_attr}']"
 
     href = attributes.get("href")
-    if href:
+    if href and normalized_tag == "a":
         return f"a[href='{href}']"
+
+    # onclick fallback. Keep the original tag.
+    onclick = attributes.get("onclick") or attributes.get("onClick")
+    if onclick:
+        escaped = _css_attr(onclick)
+
+        if normalized_tag in {"a", "html:link"}:
+            return f'a[onclick="{escaped}"]'
+
+        if normalized_tag == "input":
+            input_type = str(attributes.get("type") or "").lower()
+            if input_type:
+                return f'input[type="{input_type}"][onclick="{escaped}"]'
+            return f'input[onclick="{escaped}"]'
+
+        if normalized_tag == "button":
+            return f'button[onclick="{escaped}"]'
+
+        return f'[onclick="{escaped}"]'
 
     return None
 
@@ -139,7 +222,7 @@ def element_record(
         "tag": tag.lower(),
         "line": line,
         "attributes": attributes,
-        "locator": build_locator(attributes),
+        "locator": build_locator(tag, kind, attributes),
         "action_hint": action_hint(kind, attributes),
     }
     if raw is not None:

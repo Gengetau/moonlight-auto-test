@@ -2,6 +2,31 @@ import pytest
 from playwright.sync_api import sync_playwright
 from src.config_parser import Config
 
+
+def _make_process_dpi_aware():
+    try:
+        import ctypes
+
+        ctypes.windll.user32.SetProcessDPIAware()
+    except Exception:
+        pass
+
+
+CHROMIUM_FULLSCREEN_ARGS = [
+    "--start-maximized",
+    "--window-size=1920,1080",
+    "--window-position=0,0",
+    "--force-device-scale-factor=1",
+    "--high-dpi-support=1",
+    "--disable-popup-blocking",
+]
+
+FIREFOX_FULLSCREEN_ARGS = [
+    "--width=1920",
+    "--height=1080",
+]
+
+
 def pytest_addoption(parser):
     parser.addoption(
         "--test-browser", 
@@ -41,10 +66,22 @@ def pytest_addoption(parser):
         help="开启半自动接管模式：由人工在浏览器中导航至目标页面，自动化脚本负责后续接管执行"
     )
     parser.addoption(
+        "--login-entry",
+        action="store",
+        default=None,
+        help="登录入口名称或序号；未指定且 .env 配置多个入口时启动时人工选择"
+    )
+    parser.addoption(
         "--struts-config",
         action="store",
         default="data/",
         help="Struts 配置文件路径或目录。支持逗号分隔的列表，若是目录则递归搜索所有 .xml"
+    )
+    parser.addoption(
+        "--checklist-path",
+        action="store",
+        default=None,
+        help="可选：自动化执行用 checklist xlsx。存在 automation_mode=auto 时优先执行 Excel case"
     )
 
 @pytest.fixture(scope="session")
@@ -76,13 +113,25 @@ def struts_config(request):
     return request.config.getoption("--struts-config")
 
 @pytest.fixture(scope="session")
-def browser(browser_name):
+def login_entry(request):
+    return Config.select_login_entry(request.config.getoption("--login-entry"), interactive=True)
+
+@pytest.fixture(scope="session")
+def browser(browser_name, login_entry):
+    _make_process_dpi_aware()
     with sync_playwright() as p:
         # 1. 启动特定浏览器
         if browser_name == "edge":
-            browser = p.chromium.launch(channel="msedge", headless=False)
+            browser = p.chromium.launch(
+                channel="msedge",
+                headless=False,
+                args=CHROMIUM_FULLSCREEN_ARGS,
+            )
         elif browser_name == "firefox":
-            browser = p.firefox.launch(headless=False)
+            browser = p.firefox.launch(
+                headless=False,
+                args=FIREFOX_FULLSCREEN_ARGS,
+            )
         elif browser_name == "chrome_port":
             if not Config.CHROME_PORTABLE_PATH:
                 raise ValueError("CHROME_PORTABLE_PATH not set in .env")
@@ -90,6 +139,11 @@ def browser(browser_name):
                 executable_path=Config.CHROME_PORTABLE_PATH, 
                 headless=False,
                 args=[
+                    "--start-maximized",
+                    "--window-size=1920,1080",
+                    "--window-position=0,0",
+                    "--force-device-scale-factor=1",
+                    "--high-dpi-support=1",
                     "--disable-popup-blocking",
                     "--disable-features=IsolateOrigins,site-per-process",
                     "--disable-site-isolation-trials",
@@ -110,6 +164,7 @@ def browser(browser_name):
 def _authenticated_page(browser, base_url):
     context = browser.new_context(
         accept_downloads=True,
+        no_viewport=True,
         user_agent="Moonlight-Automation-Agent"
     )
     # 自动处理旧系统的 Alert/Confirm 弹窗
@@ -131,13 +186,16 @@ def _authenticated_page(browser, base_url):
 
     page = context.new_page()
     try:
+        page.keyboard.press("Control+0")
         page.goto(base_url, wait_until="load", timeout=30000)
+        page.keyboard.press("Control+0")
         page.fill("input[name='user']", Config.USERNAME)
         page.fill("input[name='password']", Config.PASSWORD)
         page.click("input[type='button']")
 
         # 等待登录态建立
         page.wait_for_load_state("networkidle", timeout=30000)
+        page.keyboard.press("Control+0")
     except Exception:
         # 部分环境使用预置会话或基础认证，登录页缺失时不阻断页面创建。
         pass
@@ -145,15 +203,15 @@ def _authenticated_page(browser, base_url):
 
 
 @pytest.fixture(scope="session")
-def legacy_page(browser):
-    context, page = _authenticated_page(browser, Config.LEGACY_URL)
+def legacy_page(browser, login_entry):
+    context, page = _authenticated_page(browser, login_entry["legacy_url"])
     yield page
     context.close()
 
 
 @pytest.fixture(scope="session")
-def new_page(browser):
-    context, page = _authenticated_page(browser, Config.NEW_URL)
+def new_page(browser, login_entry):
+    context, page = _authenticated_page(browser, login_entry["new_url"])
     yield page
     context.close()
 
@@ -167,3 +225,8 @@ def page(new_page):
 
 def pytest_html_report_title(report):
     report.title = "Moonlight UI 自动化多端适配测试报告"
+
+
+@pytest.fixture(scope="session")
+def checklist_path(request):
+    return request.config.getoption("--checklist-path")

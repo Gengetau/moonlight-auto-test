@@ -5,6 +5,9 @@ import re
 import time
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple, Union
+from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
+
+from PIL import Image, ImageDraw, ImageGrab
 
 from src.assert_engine import compare_visual_screenshot
 
@@ -12,6 +15,79 @@ from src.assert_engine import compare_visual_screenshot
 def _safe_name(value: Any) -> str:
     name = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(value or "unknown")).strip("_")
     return name[:120] or "unknown"
+
+
+def _safe_download_filename(filename: str, browser_name: str) -> str:
+    original = Path(str(filename or "download")).name
+    name, ext = os.path.splitext(original)
+    safe_base = _safe_name(name)
+    safe_ext = re.sub(r"[^A-Za-z0-9.]+", "", ext)[:20]
+    return f"{safe_base}_{_safe_name(browser_name)}{safe_ext}"
+
+
+def _page_is_closed(page: Page) -> bool:
+    try:
+        return page.is_closed()
+    except Exception:
+        return True
+
+
+def _is_target_closed_error(exc: BaseException) -> bool:
+    message = str(exc).lower()
+    return (
+        "target page, context or browser has been closed" in message
+        or "target closed" in message
+        or "page has been closed" in message
+        or "page closed" in message
+    )
+
+
+def _closed_page_state(output_dir: Path, name: str) -> Dict[str, Any]:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    screenshot = output_dir / f"{name}.png"
+    image = Image.new("RGB", (640, 360), "white")
+    draw = ImageDraw.Draw(image)
+    draw.rectangle((0, 0, 639, 359), outline=(210, 216, 224), width=2)
+    draw.text((32, 32), "Page closed", fill=(20, 30, 42))
+    draw.text((32, 64), "The action closed this browser page.", fill=(70, 84, 102))
+    image.save(screenshot)
+    return {
+        "screenshot": str(screenshot),
+        "page_closed": True,
+        "url": "about:closed",
+        "title": "",
+        "text": "Page closed",
+        "dom": "<page-closed />",
+        "target_frame": {"name": "closed", "url": "about:closed"},
+        "frame_candidates": [],
+    }
+
+
+def _capture_browser_screen(page: Page, screenshot: Path, timeout: int = 15000) -> Dict[str, Any]:
+    """
+    Capture the visible browser window including browser chrome.
+
+    Playwright page screenshots cannot include the address bar. In headed
+    Windows runs we bring the page to the front and capture the primary display
+    at the migration-test resolution requirement: 1920x1080, scaling 100%.
+    """
+    try:
+        page.bring_to_front()
+        try:
+            page.keyboard.press("Control+0", timeout=2000)
+        except (PlaywrightTimeoutError, PlaywrightError):
+            pass
+        page.wait_for_timeout(250)
+        image = ImageGrab.grab(bbox=(0, 0, 1920, 1080))
+        image.save(screenshot)
+        return {
+            "ok": True,
+            "screenshot_scope": "browser_screen_1920x1080",
+            "screenshot_resolution": "1920x1080",
+            "includes_browser_chrome": True,
+        }
+    except Exception as exc:
+        return {"ok": False, "reason": str(exc)}
 
 
 ACTION_ALIASES = {
@@ -25,6 +101,14 @@ ACTION_ALIASES = {
     "input": "fill",
     "text": "fill",
     "textarea": "fill",
+    "clear": "clear",
+    "set_value": "set_value",
+    "setvalue": "set_value",
+    "hidden": "set_value",
+    "press": "press",
+    "key": "press",
+    "special_key": "press",
+    "close_window": "click",
     "select": "select",
     "change": "select",
     "form": "submit",
@@ -57,6 +141,12 @@ def infer_semantic_action(action_type: Optional[str], context: Optional[Dict[str
     locator = str(context.get("locator") or context.get("selector") or "").lower()
     evidence = " ".join(str(context.get(key) or "").lower() for key in ("raw", "label", "semantic_key"))
 
+    if "set_value" in raw or "setvalue" in raw or "hidden" in raw:
+        return "set_value"
+    if "clear" in raw:
+        return "clear"
+    if "press" in raw or "special_key" in raw:
+        return "press"
     if "upload" in raw or "file" in raw or "type='file'" in evidence or 'type="file"' in evidence:
         return "upload"
     if "select" in raw or ":select" in evidence or " select" in evidence:
@@ -84,6 +174,9 @@ def _wait_for_semantic_ready(page: Page, timeout: int = 10000) -> Dict[str, Any]
         "body_visible": False,
         "business_elements": 0,
     }
+    if _page_is_closed(page):
+        wait_state["page_closed"] = True
+        return wait_state
     # 针对旧系统，优先使用 domcontentloaded
     try:
         page.wait_for_load_state("domcontentloaded", timeout=timeout)
@@ -99,7 +192,14 @@ def _wait_for_semantic_ready(page: Page, timeout: int = 10000) -> Dict[str, Any]
         pass
 
     # 强制 settle 时间，给旧系统 JS 渲染留白
-    page.wait_for_timeout(2000)
+    try:
+        page.wait_for_timeout(2000)
+    except PlaywrightError as exc:
+        if _is_target_closed_error(exc) or _page_is_closed(page):
+            wait_state["page_closed"] = True
+            wait_state["settle_error"] = str(exc)
+            return wait_state
+        raise
 
     target, diagnostics = _find_business_frame(page, timeout=min(timeout, 3000))
     wait_state["target_frame"] = _frame_identity(target)
@@ -182,6 +282,8 @@ def _walk_frames(frame: Frame) -> Iterable[Frame]:
 
 
 def _frame_for_selector(page: Page, selector: str, timeout: int = 3000) -> Tuple[Frame, Dict[str, Any]]:
+    if _page_is_closed(page):
+        raise ValueError("Page is closed before action")
     target, diagnostics = _find_business_frame(page, timeout=timeout)
     for frame in _walk_frames(page.main_frame):
         try:
@@ -268,6 +370,15 @@ def _resolve_upload_locator(frame: Frame, selector: str) -> Tuple[str, Dict[str,
 
     return selector, diagnostics
 
+
+def _opens_popup_hint(context: Optional[Dict[str, Any]]) -> bool:
+    context = context or {}
+    attributes = {str(key).lower(): value for key, value in (context.get("attributes") or {}).items()}
+    target = str(attributes.get("target") or "").strip().lower()
+    evidence = " ".join(str(context.get(key) or "").lower() for key in ("raw", "label", "semantic_key"))
+    return bool(target and target not in {"_self", "self"}) or "window.open" in evidence or "target=" in evidence
+
+
 def execute_action(
     page: Page,
     action_type: str,
@@ -294,10 +405,13 @@ def execute_action(
         "selector": selector,
         "browser_name": browser_name,
     }
+    action_dispatched = False
+    capture_page = page
+    keep_popup = bool((action_context or {}).get("keep_popup"))
 
     def _log_event(event_type: str, details: Any):
         # 内部闭包用于记录 Playwright 事件
-        test_id_str = test_id or "global"
+        test_id_str = _safe_name(test_id or "global")
         log_dir = Path(capture_dir) if capture_dir else Path("./output/logs")
         log_dir.mkdir(parents=True, exist_ok=True)
         with open(log_dir / f"{test_id_str}_events.log", "a", encoding="utf-8") as f:
@@ -309,11 +423,15 @@ def execute_action(
         page.on("pageerror", lambda err: _log_event("JS_ERROR", str(err)))
         page.on("requestfailed", lambda req: _log_event("REQ_FAILED", f"{req.url} ({req.failure})"))
 
+        if _page_is_closed(page):
+            raise ValueError("Page is closed before action")
+
         result["wait_state"] = _wait_for_semantic_ready(page, timeout=max(timeout, 15000 if browser_name == "firefox" else timeout))
         semantic_action = result["semantic_action"]
         navigated_directly = False
 
         if semantic_action in ("goto", "navigate") and re.match(r"^https?://|^/", str(selector or "")):
+            action_dispatched = True
             page.goto(selector, wait_until="domcontentloaded", timeout=max(timeout, 30000))
             navigated_directly = True
         else:
@@ -324,11 +442,49 @@ def execute_action(
             pass
         elif semantic_action in ("click", "navigate"):
             # 增加元素可见性检查
-            frame.locator(selector).first.wait_for(state="visible", timeout=timeout)
-            frame.locator(selector).first.click(timeout=timeout)
+            locator = frame.locator(selector).first
+            locator.wait_for(state="visible", timeout=timeout)
+            action_dispatched = True
+            if _opens_popup_hint(action_context):
+                try:
+                    with page.expect_popup(timeout=3000) as popup_info:
+                        locator.click(timeout=timeout)
+                    popup = popup_info.value
+                    popup.wait_for_load_state("domcontentloaded", timeout=min(timeout, 10000))
+                    capture_page = popup
+                    result["popup_opened"] = True
+                    result["popup_url"] = popup.url
+                    if keep_popup:
+                        result["popup_page"] = popup
+                except PlaywrightTimeoutError as exc:
+                    if "popup" not in str(exc).lower():
+                        raise
+                    result["popup_opened"] = False
+            else:
+                locator.click(timeout=timeout)
         elif semantic_action == "fill":
             frame.locator(selector).first.wait_for(state="visible", timeout=timeout)
             frame.locator(selector).first.fill(value or "moonlight-semantic-sample", timeout=timeout)
+        elif semantic_action == "clear":
+            frame.locator(selector).first.wait_for(state="visible", timeout=timeout)
+            frame.locator(selector).first.fill("", timeout=timeout)
+        elif semantic_action == "set_value":
+            locator = frame.locator(selector).first
+            locator.wait_for(state="attached", timeout=timeout)
+            locator.evaluate(
+                """(element, nextValue) => {
+                    element.value = nextValue || "";
+                    element.dispatchEvent(new Event("input", { bubbles: true }));
+                    element.dispatchEvent(new Event("change", { bubbles: true }));
+                }""",
+                value or "moonlight-hidden-auto",
+            )
+        elif semantic_action == "press":
+            key = value or "Enter"
+            if selector and selector not in {"-", "__page__"}:
+                frame.locator(selector).first.wait_for(state="attached", timeout=timeout)
+                frame.locator(selector).first.focus(timeout=timeout)
+            page.keyboard.press(key, timeout=timeout)
         elif semantic_action == "select":
             locator = frame.locator(selector).first
             locator.wait_for(state="visible", timeout=timeout)
@@ -352,6 +508,7 @@ def execute_action(
         elif semantic_action == "submit":
             locator = frame.locator(selector).first
             locator.wait_for(state="attached", timeout=timeout)
+            action_dispatched = True
             locator.evaluate(
                 """element => {
                     const form = element.tagName && element.tagName.toLowerCase() === "form" ? element : element.closest("form");
@@ -366,9 +523,7 @@ def execute_action(
                     frame.locator(selector).first.click(timeout=timeout)
                 download = download_info.value
                 # 隔离三端下载文件
-                original_filename = download.suggested_filename
-                name, ext = os.path.splitext(original_filename)
-                save_path = f"./output/downloads/{name}_{browser_name}{ext}"
+                save_path = f"./output/downloads/{_safe_download_filename(download.suggested_filename, browser_name)}"
                 Path(save_path).parent.mkdir(parents=True, exist_ok=True)
                 download.save_as(save_path)
                 result["download_path"] = save_path
@@ -382,32 +537,67 @@ def execute_action(
 
         if result["status"] == "PASS":
             result["post_wait_state"] = _wait_for_semantic_ready(page, timeout=min(timeout, 8000))
+            if result["post_wait_state"].get("page_closed"):
+                result["page_closed_after_action"] = True
     except (PlaywrightTimeoutError, PlaywrightError, ValueError) as exc:
-        result.update({"status": "BLOCKED", "reason": str(exc)})
+        closes_page = result.get("semantic_action") in ("click", "navigate", "submit", "goto")
+        if action_dispatched and closes_page and (_is_target_closed_error(exc) or _page_is_closed(page)):
+            result.update(
+                {
+                    "status": "PASS",
+                    "page_closed_after_action": True,
+                    "post_wait_state": {"page_closed": True, "settle_error": str(exc)},
+                }
+            )
+        else:
+            result.update({"status": "BLOCKED", "reason": str(exc)})
     finally:
         if capture_dir:
             name = _safe_name(test_id or f"{action_type}_{int(time.time() * 1000)}")
-            result["state"] = _capture_state(page, Path(capture_dir), name)
+            result["state"] = _capture_state(capture_page, Path(capture_dir), name)
+            if capture_page is not page and not keep_popup:
+                try:
+                    capture_page.close()
+                except PlaywrightError:
+                    pass
 
     return result
 
 
 def _capture_state(page: Page, output_dir: Path, name: str) -> Dict[str, Any]:
+    if _page_is_closed(page):
+        return _closed_page_state(output_dir, name)
+
     output_dir.mkdir(parents=True, exist_ok=True)
     screenshot = output_dir / f"{name}.png"
     state: Dict[str, Any] = {"screenshot": str(screenshot)}
-    target_frame, diagnostics = _find_business_frame(page, timeout=3000)
+    try:
+        target_frame, diagnostics = _find_business_frame(page, timeout=3000)
+    except PlaywrightError as exc:
+        if _is_target_closed_error(exc) or _page_is_closed(page):
+            state = _closed_page_state(output_dir, name)
+            state["capture_error"] = str(exc)
+            return state
+        raise
     state["target_frame"] = _frame_identity(target_frame)
     state["frame_candidates"] = diagnostics[:8]
-    try:
-        target_frame.locator("body").screenshot(path=str(screenshot), timeout=15000)
-    except (PlaywrightTimeoutError, PlaywrightError) as exc:
-        state["screenshot_error"] = str(exc)
+    browser_screen = _capture_browser_screen(page, screenshot)
+    if browser_screen.get("ok"):
+        state.update({key: value for key, value in browser_screen.items() if key != "ok"})
+    else:
+        state["browser_screen_error"] = browser_screen.get("reason")
         try:
             page.screenshot(path=str(screenshot), full_page=True, timeout=15000)
-            state["screenshot_fallback"] = "page"
-        except (PlaywrightTimeoutError, PlaywrightError) as fallback_exc:
-            state["screenshot_fallback_error"] = str(fallback_exc)
+            state["screenshot_scope"] = "page_full"
+            state["includes_browser_chrome"] = False
+        except (PlaywrightTimeoutError, PlaywrightError) as exc:
+            state["screenshot_error"] = str(exc)
+            try:
+                target_frame.locator("body").screenshot(path=str(screenshot), timeout=15000)
+                state["screenshot_fallback"] = "target_frame_body"
+                state["includes_browser_chrome"] = False
+            except (PlaywrightTimeoutError, PlaywrightError) as fallback_exc:
+                state["screenshot_fallback_error"] = str(fallback_exc)
 
     for key, getter in (
         ("url", lambda: target_frame.url or page.url),
@@ -427,25 +617,192 @@ def _normalize_text(value: str) -> str:
     return " ".join(value.split())
 
 
-def compare_captured_state(legacy_state: Dict[str, Any], new_state: Dict[str, Any]) -> Dict[str, Any]:
+DYNAMIC_URL_QUERY_KEYS = {
+    "userId",
+    "userid",
+    "sessionId",
+    "sessionid",
+    "JSESSIONID",
+    "jsessionid",
+    "token",
+    "csrf",
+    "_csrf",
+    "_",
+    "timestamp",
+    "ts",
+    "r",
+}
+
+
+def normalize_url_for_compare(url: str) -> str:
+    """
+    Normalize Legacy/New URLs for migration comparison.
+
+    We intentionally ignore scheme/host because Legacy and New run on different
+    servers. We also ignore dynamic query parameters such as encrypted userId.
+    """
+    if not url:
+        return ""
+
+    parsed = urlparse(str(url))
+    query = [
+        (key, value)
+        for key, value in parse_qsl(parsed.query, keep_blank_values=True)
+        if key not in DYNAMIC_URL_QUERY_KEYS
+    ]
+
+    return urlunparse(
+        (
+            "",
+            "",
+            parsed.path,
+            "",
+            urlencode(query, doseq=True),
+            "",
+        )
+    )
+
+
+COMPARE_POLICY = {
+    "page_snapshot": {
+        "url_required": True,
+        "title_required": False,
+        "text_required": False,
+        "dom_required": False,
+        "visual_required": True,
+    },
+    "wait": {
+        "url_required": True,
+        "title_required": False,
+        "text_required": False,
+        "dom_required": False,
+        "visual_required": True,
+    },
+    "click": {
+        "url_required": False,
+        "title_required": False,
+        "text_required": False,
+        "dom_required": False,
+        "visual_required": True,
+    },
+    "submit": {
+        "url_required": False,
+        "title_required": False,
+        "text_required": False,
+        "dom_required": False,
+        "visual_required": True,
+    },
+    "upload": {
+        "url_required": False,
+        "title_required": False,
+        "text_required": False,
+        "dom_required": False,
+        "visual_required": True,
+    },
+    "download": {
+        "url_required": False,
+        "title_required": False,
+        "text_required": False,
+        "dom_required": False,
+        "visual_required": False,
+    },
+    "navigate": {
+        "url_required": True,
+        "title_required": False,
+        "text_required": False,
+        "dom_required": False,
+        "visual_required": True,
+    },
+    "close_window": {
+        "url_required": False,
+        "title_required": False,
+        "text_required": False,
+        "dom_required": False,
+        "visual_required": False,
+    },
+}
+
+
+def compare_captured_state(
+    legacy_state: Dict[str, Any],
+    new_state: Dict[str, Any],
+    *,
+    action_type: str = "wait",
+    visual_status: Optional[str] = None,
+) -> Dict[str, Any]:
     """
     Compare stable page data captured after the same action on Legacy and New.
 
-    Pixel-level image diffing is intentionally left to a caller/plugin because this
-    repository does not currently carry an image comparison dependency.
+    Important migration-testing rule:
+    - Full DOM equality is usually too strict for Struts -> Spring migration.
+    - Dynamic URL query values such as encrypted userId must not fail the case.
+    - If visual comparison passes and DOM is not required, return WARN instead
+      of DIFF so pytest does not fail on harmless implementation differences.
     """
-    url_match = legacy_state.get("url") == new_state.get("url")
+    policy = COMPARE_POLICY.get(action_type, COMPARE_POLICY["click"])
+
+    legacy_url_normalized = normalize_url_for_compare(legacy_state.get("url", ""))
+    new_url_normalized = normalize_url_for_compare(new_state.get("url", ""))
+    url_match = legacy_url_normalized == new_url_normalized
+
     title_match = legacy_state.get("title") == new_state.get("title")
+
     legacy_text = _normalize_text(legacy_state.get("text", ""))
     new_text = _normalize_text(new_state.get("text", ""))
     text_match = legacy_text == new_text
-    dom_match = _normalize_text(legacy_state.get("dom", "")) == _normalize_text(new_state.get("dom", ""))
+
+    legacy_dom = _normalize_text(legacy_state.get("dom", ""))
+    new_dom = _normalize_text(new_state.get("dom", ""))
+    dom_match = legacy_dom == new_dom
+
+    hard_failures: List[str] = []
+    warnings: List[str] = []
+
+    if policy.get("url_required") and not url_match:
+        hard_failures.append("URL differs")
+    elif not url_match:
+        warnings.append("URL differs")
+
+    if policy.get("title_required") and not title_match:
+        hard_failures.append("Title differs")
+    elif not title_match:
+        warnings.append("Title differs")
+
+    if policy.get("text_required") and not text_match:
+        hard_failures.append("Text differs")
+    elif not text_match:
+        warnings.append("Text differs")
+
+    if policy.get("dom_required") and not dom_match:
+        hard_failures.append("DOM differs")
+    elif not dom_match:
+        warnings.append("DOM differs")
+
+    if visual_status and policy.get("visual_required") and visual_status != "PASS":
+        hard_failures.append(f"Visual comparison {visual_status}")
+
+    if hard_failures:
+        status = "DIFF"
+    elif warnings:
+        status = "WARN"
+    else:
+        status = "PASS"
+
     return {
-        "status": "PASS" if url_match and title_match and text_match and dom_match else "DIFF",
+        "status": status,
         "url_match": url_match,
+        "url_required": policy.get("url_required", False),
+        "legacy_url_normalized": legacy_url_normalized,
+        "new_url_normalized": new_url_normalized,
         "title_match": title_match,
+        "title_required": policy.get("title_required", False),
         "text_match": text_match,
+        "text_required": policy.get("text_required", False),
         "dom_match": dom_match,
+        "dom_required": policy.get("dom_required", False),
+        "dom_warning": "DOM differs; visual comparison may still pass" if not dom_match and not policy.get("dom_required") else None,
+        "warnings": warnings,
+        "hard_failures": hard_failures,
         "legacy_screenshot": legacy_state.get("screenshot"),
         "new_screenshot": new_state.get("screenshot"),
     }
@@ -601,16 +958,22 @@ def execute_consistency_flow(
             )
             continue
 
-        result = compare_captured_state(legacy_state, new_state)
-        visual = compare_visual_screenshot(
-            legacy_state.get("screenshot", ""),
-            new_state.get("screenshot", ""),
-            str(root / f"{index:04d}_{_safe_name(page_id)}_diff.png"),
-            threshold_percent=visual_threshold_percent,
+        visual = {"status": "SKIPPED", "reason": "Visual comparison is disabled for this action type"}
+        if COMPARE_POLICY.get(action_type, COMPARE_POLICY["click"]).get("visual_required", True):
+            visual = compare_visual_screenshot(
+                legacy_state.get("screenshot", ""),
+                new_state.get("screenshot", ""),
+                str(root / f"{index:04d}_{_safe_name(page_id)}_diff.png"),
+                threshold_percent=visual_threshold_percent,
+            )
+
+        result = compare_captured_state(
+            legacy_state,
+            new_state,
+            action_type=action_type,
+            visual_status=visual.get("status"),
         )
         result["visual"] = visual
-        if result["status"] == "PASS" and visual.get("status") != "PASS":
-            result["status"] = visual.get("status", "DIFF")
         result.update(
             {
                 "page_id": page_id,

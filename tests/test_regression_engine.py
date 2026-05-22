@@ -3,7 +3,13 @@ from pathlib import Path
 
 from PIL import Image
 
-from src.action_executor import build_steps_from_page_mapping, infer_semantic_action
+from src.action_executor import (
+    _capture_state,
+    _opens_popup_hint,
+    _safe_download_filename,
+    build_steps_from_page_mapping,
+    infer_semantic_action,
+)
 from src.assert_engine import compare_visual_screenshot
 from src.regression_engine import RegressionEngine
 
@@ -106,6 +112,8 @@ def test_render_report_contains_side_by_side_sections(tmp_path):
     assert "Legacy" in html
     assert "New" in html
     assert "Diff" in html
+    assert "Checklist Coverage Matrix" in html
+    assert "1-1 画面レイアウト" in html
 
 
 def test_build_steps_from_page_mapping_is_risk_first():
@@ -127,6 +135,98 @@ def test_infer_semantic_action_uses_scanner_hints():
     assert infer_semantic_action(None, {"kind": "file", "action_hint": "upload"}) == "upload"
     assert infer_semantic_action("click", {"raw": '<form:select path="country">'}) == "select"
     assert infer_semantic_action(None, {"kind": "link", "raw": '<html:link href="/next">'}) == "navigate"
+
+
+def test_action_dedupe_prefers_locator_change_over_full_action_fallback(tmp_path):
+    mapping_path = tmp_path / "page_mapping.json"
+    mapping_path.write_text(json.dumps({"page_mappings": []}), encoding="utf-8")
+    engine = RegressionEngine(mapping_path=str(mapping_path), output_dir=str(tmp_path / "out"))
+    actions, skipped = engine._dedupe_actions(
+        [
+            {
+                "kind": "button",
+                "label": "save",
+                "semantic_key": "action:save",
+                "legacy_locator": "[name='save']",
+                "new_locator": "#save",
+            },
+            {
+                "kind": "button",
+                "label": "save",
+                "semantic_key": "action:save",
+                "legacy_locator": "[name='save']",
+                "new_locator": "[name='save']",
+            },
+            {
+                "kind": "link",
+                "label": "help",
+                "semantic_key": "locator:a[href='/help.html']",
+                "legacy_locator": "a[href='/help.html']",
+                "new_locator": "a[href='/help.html']",
+            },
+        ]
+    )
+
+    assert len(actions) == 2
+    assert len(skipped) == 1
+    assert actions[0]["new_locator"] == "#save"
+
+
+def test_popup_hint_detects_targeted_links():
+    assert _opens_popup_hint({"attributes": {"target": "winHelp"}}) is True
+    assert _opens_popup_hint({"attributes": {"target": "_self"}}) is False
+
+
+def test_download_filename_is_windows_safe():
+    name = _safe_download_filename('a[onclick="x"]?.xls', "chrome:port")
+
+    assert name == "a_onclick_x_chrome_port.xls"
+
+
+def test_report_coverage_matrix_classifies_upload_and_download(tmp_path):
+    mapping_path = tmp_path / "page_mapping.json"
+    mapping_path.write_text(json.dumps({"page_mappings": []}), encoding="utf-8")
+    output_dir = tmp_path / "out"
+    output_dir.mkdir()
+    screenshot = output_dir / "shot.png"
+    Image.new("RGB", (1, 1), "white").save(screenshot)
+
+    engine = RegressionEngine(mapping_path=str(mapping_path), output_dir=str(output_dir))
+    report = engine.render_report(
+        [
+            {
+                "page_id": "Upload.jsp",
+                "risk": "High",
+                "action": "uploadFile",
+                "action_type": "upload",
+                "status": "PASS",
+                "url_match": True,
+                "dom_match": True,
+                "legacy_screenshot": str(screenshot),
+                "new_screenshot": str(screenshot),
+                "diff_screenshot": str(screenshot),
+                "visual": {"diff_percent": 0.0},
+            },
+            {
+                "page_id": "Download.jsp",
+                "risk": "High",
+                "action": "TemplateDownload",
+                "action_type": "download",
+                "status": "PASS",
+                "url_match": True,
+                "dom_match": True,
+                "legacy_screenshot": str(screenshot),
+                "new_screenshot": str(screenshot),
+                "diff_screenshot": str(screenshot),
+                "visual": {"diff_percent": 0.0},
+            },
+        ]
+    )
+
+    html = Path(report).read_text(encoding="utf-8")
+    assert "6 ファイル出力" in html
+    assert "7 ファイルアップロード" in html
+    assert "AUTO" in html
 
 
 def test_render_report_contains_semantic_diagnostics(tmp_path):
@@ -167,3 +267,45 @@ def test_render_report_contains_semantic_diagnostics(tmp_path):
     assert "frEditFrame" in html
     assert "new_locator" in html
     assert "Timeout waiting for locator" in html
+
+
+def test_capture_state_handles_closed_page(tmp_path):
+    class ClosedPage:
+        def is_closed(self):
+            return True
+
+    state = _capture_state(ClosedPage(), tmp_path, "closed")
+
+    assert state["page_closed"] is True
+    assert state["url"] == "about:closed"
+    assert Path(state["screenshot"]).exists()
+
+
+def test_compare_state_treats_matching_closed_pages_as_pass(tmp_path):
+    mapping_path = tmp_path / "page_mapping.json"
+    mapping_path.write_text(json.dumps({"page_mappings": []}), encoding="utf-8")
+    output_dir = tmp_path / "out"
+    output_dir.mkdir()
+
+    class ClosedPage:
+        def is_closed(self):
+            return True
+
+    legacy_state = _capture_state(ClosedPage(), output_dir, "legacy_closed")
+    new_state = _capture_state(ClosedPage(), output_dir, "new_closed")
+    engine = RegressionEngine(mapping_path=str(mapping_path), output_dir=str(output_dir))
+
+    result = engine._compare_state(
+        "ClosePage.jsp",
+        "High",
+        "cancel",
+        legacy_state,
+        new_state,
+        output_dir / "diff.png",
+        legacy_action={"status": "PASS", "page_closed_after_action": True},
+        new_action={"status": "PASS", "page_closed_after_action": True},
+    )
+
+    assert result["status"] == "PASS"
+    assert result["url_match"] is True
+    assert result["dom_match"] is True
