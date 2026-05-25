@@ -173,6 +173,22 @@ pytest tests/test_migration.py \
   --manual-data
 ```
 
+### 6. 🌕 Moonlight Control Center (GUI)
+
+本项目提供两种图形化交互方式：
+
+#### A. 桌面原生 GUI (推荐用于公司本地电脑)
+如果您在公司本地环境运行，可以使用基于 `tkinter` 的原生窗口，无需启动浏览器服务：
+```bash
+./venv/bin/python src/app_gui.py
+```
+
+#### B. Web 指挥台 (Streamlit)
+如果您需要更丰富的图表分析或远程协作，可以启动 Web 服务：
+```bash
+./venv/bin/streamlit run src/gui.py
+```
+
 ---
 
 ## 📂 架构图谱

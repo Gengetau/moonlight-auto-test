@@ -332,7 +332,7 @@ def compare_page(page: str, legacy_pages: List[Page], new_pages: List[Page]) -> 
                 "kind": key[0],
                 "key": key[1],
                 "label": element_label(sample),
-                "locator": sample_locator or sample.get("locator"),
+                "locator": sample.get("locator") or sample_locator,
                 "action": action_target(sample),
                 "line": sample.get("line"),
                 "count": delta,

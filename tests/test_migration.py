@@ -1,7 +1,10 @@
+import pytest
+
 from src.regression_engine import RegressionEngine
 
 
 def test_migration_regression(
+    request,
     target_page,
     manual,
     legacy_page,
@@ -13,6 +16,7 @@ def test_migration_regression(
     struts_config,
     login_entry,
     checklist_path,
+    route_map_path,
 ):
     """
     Legacy/New 全量或风险优先回归入口。
@@ -20,7 +24,10 @@ def test_migration_regression(
     默认执行全量页面；传入 --risk-only 时只执行 High/Medium 风险页面。
     传入 --target-page 时只执行指定 JSP，且无视风险等级。
     """
-    engine = RegressionEngine(mapping_path=mapping_path, checklist_path=checklist_path, legacy_base_url=login_entry["legacy_url"],
+    if not request.config.getoption("--run-migration"):
+        pytest.skip("requires --run-migration with real browser/login environment")
+
+    engine = RegressionEngine(mapping_path=mapping_path, checklist_path=checklist_path, route_map_path=route_map_path, legacy_base_url=login_entry["legacy_url"],
         new_base_url=login_entry["new_url"],
                               )
     result = engine.run(

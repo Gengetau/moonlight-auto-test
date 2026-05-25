@@ -36,7 +36,7 @@ FORM_FIELD_TAGS = {
     "html:text",
     "html:textarea",
 }
-ACTION_TAGS = {"html:file", "html:link", "input"}
+ACTION_TAGS = {"a", "html:file", "html:link", "input"}
 TARGET_TAGS = FORM_CONTAINER_TAGS | FORM_FIELD_TAGS | ACTION_TAGS
 TAG_RE = re.compile(
     r"<\s*(?P<tag>form:[\w.-]+|html:[\w.-]+|form|input)\b"
@@ -78,7 +78,7 @@ def classify_tag(tag: str, attributes: Dict[str, Any]) -> Optional[str]:
     # 针对 Spring 标签或原生 input，检查 type=file
     if (normalized == "input" or normalized == "form:input") and str(attributes.get("type", "")).lower() == "file":
         return "file"
-    if normalized == "html:link":
+    if normalized in {"a", "html:link"}:
         return "link"
     if normalized == "input" and str(attributes.get("type", "")).lower() == "button":
         return "button"
@@ -169,7 +169,7 @@ def build_locator(
         return f"[modelAttribute='{model_attr}']"
 
     href = attributes.get("href")
-    if href and normalized_tag == "a":
+    if href and href != "#" and normalized_tag == "a":
         return f"a[href='{href}']"
 
     # onclick fallback. Keep the original tag.
@@ -230,6 +230,14 @@ def element_record(
     return record
 
 
+def _label_key_from_node(node: Any) -> Optional[str]:
+    message = node.find(lambda child: str(getattr(child, "name", "")).lower() == "bean:message")
+    if message is None:
+        return None
+    key = message.attrs.get("key") if hasattr(message, "attrs") else None
+    return str(key) if key else None
+
+
 def scan_with_regex(source: str) -> List[Dict[str, Any]]:
     records: List[Dict[str, Any]] = []
     for match in TAG_RE.finditer(source):
@@ -260,8 +268,37 @@ def scan_with_beautifulsoup(source: str) -> List[Dict[str, Any]]:
         }
         record = element_record(tag=tag, attributes=normalized_attributes, line=None)
         if record:
+            label_key = _label_key_from_node(node)
+            if label_key:
+                record["label_key"] = label_key
             records.append(record)
     return records
+
+
+def dedupe_runtime_alternatives(records: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    keyed: Dict[tuple, int] = {}
+    result: List[Dict[str, Any]] = []
+    for record in records:
+        attributes = record.get("attributes") or {}
+        key = None
+        if record.get("kind") == "link" and record.get("label_key") and attributes.get("target"):
+            key = (record.get("kind"), record.get("label_key"), attributes.get("target"))
+
+        if key is None:
+            result.append(record)
+            continue
+
+        previous = keyed.get(key)
+        if previous is None:
+            keyed[key] = len(result)
+            result.append(record)
+            continue
+
+        previous_href = str((result[previous].get("attributes") or {}).get("href") or "")
+        current_href = str(attributes.get("href") or "")
+        if "_en/" in previous_href and "_en/" not in current_href:
+            result[previous] = record
+    return result
 
 
 def merge_records(primary: List[Dict[str, Any]], secondary: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -303,7 +340,7 @@ def merge_records(primary: List[Dict[str, Any]], secondary: List[Dict[str, Any]]
 def scan_jsp_source(source: str, source_name: str = "<memory>") -> Dict[str, Any]:
     regex_records = scan_with_regex(source)
     soup_records = scan_with_beautifulsoup(source)
-    elements = merge_records(regex_records, soup_records)
+    elements = dedupe_runtime_alternatives(merge_records(regex_records, soup_records))
     counts: Dict[str, int] = {}
     for element in elements:
         kind = element["kind"]

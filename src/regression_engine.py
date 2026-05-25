@@ -2,6 +2,7 @@ import html
 import json
 import re
 import time
+import glob
 from collections import Counter
 from pathlib import Path, PureWindowsPath
 from typing import Any, Dict, Iterable, List, Optional, Tuple
@@ -12,6 +13,7 @@ from playwright.sync_api import Page, Error as PlaywrightError, TimeoutError as 
 from src.action_executor import _capture_state, execute_action, infer_semantic_action
 from src.assert_engine import compare_visual_screenshot
 from src.config_parser import Config
+from src.route_navigator import RouteMapCatalog, RouteNavigator
 
 
 def _judge_compare_status(
@@ -75,6 +77,7 @@ class RegressionEngine:
         visual_threshold_percent: float = 0.1,
         timeout: int = 15000,
         checklist_path: Optional[str] = None,
+        route_map_path: Optional[str] = None,
     ) -> None:
         self.mapping_path = Path(mapping_path)
         self.checklist_path = Path(checklist_path) if checklist_path else None
@@ -84,6 +87,7 @@ class RegressionEngine:
         self.visual_threshold_percent = visual_threshold_percent
         self.timeout = timeout
         self.mapping = self.load_mapping()
+        self.route_map_catalog = RouteMapCatalog(self._route_map_paths(route_map_path))
 
     def load_mapping(self) -> Dict[str, Any]:
         if not self.mapping_path.exists():
@@ -447,6 +451,74 @@ class RegressionEngine:
             new_page,
             new_url,
         )
+
+        direct_legacy_reached = legacy_nav.get("status") == "PASS" and self._page_matches_mapping(legacy_page, mapping)
+        direct_new_reached = new_nav.get("status") == "PASS" and self._page_matches_mapping(new_page, mapping)
+
+        if not direct_legacy_reached or not direct_new_reached:
+            route = self.route_map_catalog.find_for_target(page_id)
+            if route:
+                navigator = RouteNavigator(
+                    self.route_map_catalog,
+                    timeout=self.timeout,
+                    browser_name=browser_name,
+                )
+                print(
+                    f"[{page_id}] DIRECT NAVIGATION fallback to route map: "
+                    + json.dumps(
+                        {
+                            "legacy_direct_reached": direct_legacy_reached,
+                            "new_direct_reached": direct_new_reached,
+                            "route_id": route.get("route_id"),
+                            "route_map_path": route.get("route_map_path"),
+                        },
+                        ensure_ascii=False,
+                    )
+                )
+
+                if not direct_legacy_reached:
+                    legacy_page, legacy_nav = navigator.navigate(
+                        legacy_page,
+                        entry_url=self.legacy_base_url,
+                        target_page=page_id,
+                        capture_dir=page_dir,
+                        side="legacy",
+                    )
+                else:
+                    legacy_nav.update({"strategy": "direct_url", "target_reached": True})
+
+                if not direct_new_reached:
+                    new_page, new_nav = navigator.navigate(
+                        new_page,
+                        entry_url=self.new_base_url,
+                        target_page=page_id,
+                        capture_dir=page_dir,
+                        side="new",
+                    )
+                else:
+                    new_nav.update({"strategy": "direct_url", "target_reached": True})
+            else:
+                if not direct_legacy_reached:
+                    legacy_nav.update(
+                        {
+                            "status": "BLOCKED",
+                            "strategy": "direct_url",
+                            "target_reached": False,
+                            "reason": legacy_nav.get("reason") or f"Direct navigation did not reach target page and no route map exists: {page_id}",
+                        }
+                    )
+                if not direct_new_reached:
+                    new_nav.update(
+                        {
+                            "status": "BLOCKED",
+                            "strategy": "direct_url",
+                            "target_reached": False,
+                            "reason": new_nav.get("reason") or f"Direct navigation did not reach target page and no route map exists: {page_id}",
+                        }
+                    )
+        else:
+            legacy_nav.update({"strategy": "direct_url", "target_reached": True})
+            new_nav.update({"strategy": "direct_url", "target_reached": True})
 
         return self._run_captured_page_pair(
             legacy_page,
@@ -1002,6 +1074,7 @@ class RegressionEngine:
                 threshold_percent=self.visual_threshold_percent,
             )
         url_match = self._normalized_url(legacy_state.get("url", "")) == self._normalized_url(new_state.get("url", ""))
+        dom_match = str(legacy_state.get("dom", "")) == str(new_state.get("dom", ""))
         status = _judge_compare_status(
             action_type=action_type,
             visual_status=visual.get("status"),
@@ -1018,6 +1091,7 @@ class RegressionEngine:
             "action": action,
             "status": status,
             "url_match": url_match,
+            "dom_match": dom_match,
             "visual": visual,
             "legacy_url": legacy_state.get("url"),
             "new_url": new_state.get("url"),
@@ -1081,7 +1155,7 @@ class RegressionEngine:
     </div>
     {self._render_summary_details(results, counts)}
   </header>
-  <main>{rows or '<p>No results.</p>'}</main>
+  <main>{self._render_coverage_matrix(results)}{rows or '<p>No results.</p>'}</main>
 </body>
 </html>
 """,
@@ -1112,6 +1186,7 @@ class RegressionEngine:
     Legacy: {html.escape(str(item.get('legacy_url') or '-'))}<br>
     New: {html.escape(str(item.get('new_url') or '-'))}<br>
     Reason: {html.escape(str(reason))}<br>
+    {self._render_diagnostics(item)}
   </div>
 </section>"""
 
@@ -1188,6 +1263,32 @@ class RegressionEngine:
       </div>
     </div>"""
 
+    def _render_coverage_matrix(self, results: List[Dict[str, Any]]) -> str:
+        action_types = {
+            str(item.get("action_type") or self._action_type_from_payload(item) or "").lower()
+            for item in results
+        }
+        rows = [
+            ("1-1 画面レイアウト", "AUTO"),
+            ("2 画面遷移", "AUTO" if {"navigate", "page_snapshot", "wait"} & action_types else "REVIEW"),
+            ("3 入力・検索・更新", "AUTO" if {"fill", "submit", "click", "select"} & action_types else "REVIEW"),
+            ("6 ファイル出力", "AUTO" if "download" in action_types else "REVIEW"),
+            ("7 ファイルアップロード", "AUTO" if "upload" in action_types else "REVIEW"),
+        ]
+        body = "\n".join(
+            f"<tr><td>{html.escape(label)}</td><td>{html.escape(status)}</td></tr>"
+            for label, status in rows
+        )
+        return f"""
+<section class="case">
+  <div class="case-head"><strong>Checklist Coverage Matrix</strong></div>
+  <div class="details">
+    <table>
+      <tbody>{body}</tbody>
+    </table>
+  </div>
+</section>"""
+
     def _render_diagnostics(self, item: Dict[str, Any]) -> str:
         legacy_action = item.get("legacy_action") or {}
         new_action = item.get("new_action") or {}
@@ -1208,9 +1309,53 @@ class RegressionEngine:
         }
         return f'<div class="diag"><code>{html.escape(json.dumps(diagnostics, ensure_ascii=False, default=str, indent=2))}</code></div>'
 
+    def _dedupe_actions(self, actions: List[Dict[str, Any]]) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+        """
+        Backward-compatible dedupe used by older tests and callers.
+
+        Keep the first action for the same semantic key. page_mapping places
+        locator_changes before full_action_steps, so this preserves explicit
+        migration mappings over later fallback scanner actions.
+        """
+        seen = set()
+        unique: List[Dict[str, Any]] = []
+        skipped: List[Dict[str, Any]] = []
+        for action in actions:
+            key = (
+                action.get("semantic_key")
+                or action.get("label")
+                or action.get("legacy_locator")
+                or action.get("locator")
+                or json.dumps(action, sort_keys=True, ensure_ascii=False, default=str)
+            )
+            if key in seen:
+                skipped.append(action)
+                continue
+            seen.add(key)
+            unique.append(action)
+        return unique, skipped
+
     @staticmethod
     def _page_url(base_url: str, page_id: str) -> str:
         return urljoin(base_url, str(page_id or "").lstrip("/"))
+
+    @staticmethod
+    def _route_map_paths(route_map_path: Optional[str]) -> Optional[List[Path]]:
+        if not route_map_path:
+            return None
+        paths: List[Path] = []
+        for raw in str(route_map_path).split(","):
+            item = raw.strip()
+            if not item:
+                continue
+            path = Path(item)
+            if any(char in item for char in "*?[]"):
+                paths.extend(Path(match) for match in sorted(glob.glob(item)))
+            elif path.is_dir():
+                paths.extend(sorted(path.glob("usable_route_map*.json")))
+            else:
+                paths.append(path)
+        return paths
 
     @staticmethod
     def _normalized_url(url: str) -> str:
@@ -1233,6 +1378,45 @@ class RegressionEngine:
     @staticmethod
     def _target_page_name(value: Any) -> str:
         return PureWindowsPath(str(value or "").replace("/", "\\")).name
+
+    def _page_matches_mapping(self, page: Page, mapping: Dict[str, Any]) -> bool:
+        """
+        Best-effort check that direct navigation landed on the requested page.
+
+        Legacy Struts pages can render the useful state inside frames or
+        popups, so this checks all frame URLs against both page_id and resolved
+        action URL. Body presence alone is not enough because login/menu pages
+        also satisfy that.
+        """
+        target_values = [
+            mapping.get("page_id"),
+            mapping.get("entry_url"),
+            mapping.get("resolved_entry_url"),
+        ]
+        needles = []
+        for value in target_values:
+            raw = str(value or "").replace("\\", "/").strip().lower()
+            if not raw:
+                continue
+            leaf = raw.rsplit("/", 1)[-1]
+            stem = re.sub(r"\.(jsp|do|action)$", "", leaf, flags=re.IGNORECASE)
+            for candidate in (raw, leaf, stem, f"{stem}.do"):
+                candidate = candidate.strip("/")
+                if len(candidate) >= 3 and candidate not in needles:
+                    needles.append(candidate)
+
+        if not needles:
+            return True
+
+        urls = []
+        try:
+            urls.append(page.url)
+            urls.extend(frame.url for frame in page.frames)
+        except PlaywrightError:
+            return False
+
+        haystack = "\n".join(str(url or "").replace("\\", "/").lower() for url in urls)
+        return any(needle in haystack for needle in needles)
 
     def _goto(self, page: Page, url: str) -> Dict[str, Any]:
         try:

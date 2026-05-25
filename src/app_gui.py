@@ -194,7 +194,7 @@ class MoonlightGUI:
     def run_regression(self):
         target = self.reg_target.get().strip()
         entry = self.reg_entry.get().strip()
-        cmd = "pytest tests/test_migration.py"
+        cmd = "pytest tests/test_migration.py --run-migration"
         if target: cmd += f" --target-page={target}"
         if self.reg_risk.get(): cmd += " --risk-only"
         if self.reg_manual.get(): cmd += " --manual"

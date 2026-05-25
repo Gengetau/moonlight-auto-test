@@ -124,7 +124,7 @@ with tabs[0]:
         manual_mode = st.checkbox("Manual Takeover Mode", value=False)
         
     if st.button("🔥 Launch Regression Engine"):
-        cmd = "pytest tests/test_migration.py"
+        cmd = "pytest tests/test_migration.py --run-migration"
         if target_page:
             cmd += f" --target-page={target_page}"
         if risk_only:

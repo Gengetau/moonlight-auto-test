@@ -83,6 +83,23 @@ def pytest_addoption(parser):
         default=None,
         help="可选：自动化执行用 checklist xlsx。存在 automation_mode=auto 时优先执行 Excel case"
     )
+    parser.addoption(
+        "--route-map-path",
+        action="store",
+        default=None,
+        help="可选：usable_route_map JSON、目录或 glob；未指定时自动查找 generated/valid/usable_route_map*.json"
+    )
+    parser.addoption(
+        "--run-migration",
+        action="store_true",
+        default=False,
+        help="显式运行需要真实浏览器和登录环境的迁移回归测试"
+    )
+
+
+def pytest_runtest_setup(item):
+    if item.name == "test_migration_regression" and not item.config.getoption("--run-migration"):
+        pytest.skip("requires --run-migration with real browser/login environment")
 
 @pytest.fixture(scope="session")
 def browser_name(request):
@@ -111,6 +128,10 @@ def manual(request):
 @pytest.fixture(scope="session")
 def struts_config(request):
     return request.config.getoption("--struts-config")
+
+@pytest.fixture(scope="session")
+def route_map_path(request):
+    return request.config.getoption("--route-map-path")
 
 @pytest.fixture(scope="session")
 def login_entry(request):

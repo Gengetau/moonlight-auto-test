@@ -12,6 +12,7 @@ from src.action_executor import (
 )
 from src.assert_engine import compare_visual_screenshot
 from src.regression_engine import RegressionEngine
+from src.route_navigator import RouteMapCatalog
 
 
 def test_compare_visual_screenshot_writes_diff(tmp_path):
@@ -80,6 +81,55 @@ def test_select_pages_target_page_reports_missing_mapping(tmp_path):
     assert "Target JSP page not found" in message
     assert "missing.jsp" in message
     assert "exists.jsp" in message
+
+
+def test_route_map_catalog_selects_verified_route_for_target(tmp_path):
+    route_map = tmp_path / "usable_route_map.json"
+    route_map.write_text(
+        json.dumps(
+            {
+                "schema": "moonlight.usable_route_map.v1",
+                "verified": [
+                    {
+                        "route_id": "r1",
+                        "status": "verified",
+                        "target_page": "ProjectMemberUploadDisp.jsp",
+                        "target_page_name": "projectmemberuploaddisp.jsp",
+                        "source_route": {"length": 3},
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    catalog = RouteMapCatalog([route_map])
+    route = catalog.find_for_target("ProjectMemberUploadDisp.jsp")
+
+    assert route["route_id"] == "r1"
+    assert route["route_map_path"] == str(route_map)
+
+
+def test_page_matches_mapping_checks_frame_urls(tmp_path):
+    mapping_path = tmp_path / "page_mapping.json"
+    mapping_path.write_text(json.dumps({"page_mappings": []}), encoding="utf-8")
+    engine = RegressionEngine(mapping_path=str(mapping_path), output_dir=str(tmp_path / "out"))
+
+    class Frame:
+        def __init__(self, url):
+            self.url = url
+
+    class Page:
+        url = "https://legacy.example/patlics/PatlicsTopMain.do"
+        frames = [
+            Frame("about:blank"),
+            Frame("https://legacy.example/patlics/ProjectMemberUploadDisp.do"),
+        ]
+
+    assert engine._page_matches_mapping(
+        Page(),
+        {"page_id": "ProjectMemberUploadDisp.jsp", "entry_url": "ProjectMemberUploadDisp.do"},
+    )
 
 
 def test_render_report_contains_side_by_side_sections(tmp_path):
