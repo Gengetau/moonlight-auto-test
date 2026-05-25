@@ -3,7 +3,7 @@ import os
 import json
 import re
 import time
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import Any, Dict, Iterable, List, Optional, Tuple, Union
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
@@ -313,6 +313,52 @@ def _default_upload_file(capture_dir: Optional[Union[str, Path]] = None) -> str:
     return str(sample)
 
 
+def _upload_filename(value: Any) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    normalized = text.replace("\\", "/")
+    return Path(normalized).name or PureWindowsPath(text).name
+
+
+def _resolve_upload_file_value(value: Optional[str], capture_dir: Optional[Union[str, Path]] = None) -> str:
+    raw = str(value or "").strip()
+    env_value = str(os.environ.get("MOONLIGHT_UPLOAD_FILE") or "").strip()
+    if env_value:
+        env_path = Path(env_value)
+        if env_path.exists():
+            return str(env_path)
+
+    if raw:
+        raw_path = Path(raw)
+        if raw_path.exists():
+            return str(raw_path)
+
+        filename = _upload_filename(raw)
+        if "fakepath" in raw.lower() and filename:
+            search_roots = [
+                Path("test_data/upload"),
+                Path("test_data"),
+                Path("data/upload"),
+                Path("data"),
+            ]
+            for root in search_roots:
+                if not root.exists():
+                    continue
+                direct = root / filename
+                if direct.exists():
+                    return str(direct)
+                for candidate in root.rglob(filename):
+                    if candidate.is_file():
+                        return str(candidate)
+
+            return _default_upload_file(capture_dir)
+
+        return raw
+
+    return _default_upload_file(capture_dir)
+
+
 
 
 def _resolve_upload_locator(frame: Frame, selector: str) -> Tuple[str, Dict[str, Any]]:
@@ -501,7 +547,7 @@ def execute_action(
             resolved_selector, upload_locator_state = _resolve_upload_locator(frame, selector)
             result["upload_locator_state"] = upload_locator_state
             frame.locator(resolved_selector).first.wait_for(state="attached", timeout=timeout)
-            upload_file = value or _default_upload_file(capture_dir)
+            upload_file = _resolve_upload_file_value(value, capture_dir)
             frame.locator(resolved_selector).first.set_input_files(upload_file, timeout=timeout)
             result["upload_file"] = upload_file
             result["resolved_selector"] = resolved_selector

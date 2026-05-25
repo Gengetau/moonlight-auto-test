@@ -47,6 +47,13 @@ pip install -r requirements.txt
 playwright install --with-deps
 ```
 
+Windows PowerShell:
+```powershell
+py -m venv venv
+.\venv\Scripts\python.exe -m pip install -r requirements.txt
+.\venv\Scripts\python.exe -m playwright install
+```
+
 ### 2. 注入时空坐标 (`.env`)
 在根目录创建 `.env` 文件，这是连接两世界的唯一凭证：
 ```ini
@@ -109,8 +116,14 @@ pytest tests/test_migration.py \
   --test-browser=chrome_port \
   --target-page=AbstListEdit.jsp \
   --login-entry=dev-a \
+  --checklist-path=generated/valid/migration_checklist.xlsx \
+  --upload-file=test_data/upload/プロジェクトリストアップロード.tsv \
+  --force-route-map \
+  --route-map-path=generated/valid/route \
   --html=output/AbstListEdit_report.html
 ```
+`--force-route-map` 会在存在可用路径图时优先按 `usable_route_map*.json` 导航，而不是先尝试 URL 直达。
+`--upload-file` 可选；指定后，所有自动化上传动作会优先使用该真实本地文件，覆盖 checklist 或录制路径中的上传样本。未指定时仍使用 checklist 的 `test_data`，如果只有浏览器安全占位路径 `C:\fakepath\...`，工具会按文件名在 `test_data/upload` 下查找。
 
 半自动接管模式 (Takeover Mode)：当旧系统由于 Frame 嵌套或 Session 状态复杂导致直接 `page.goto` 白屏时，由主祭人工操作浏览器至目标页面，自动化脚本负责后续接管。
 ```bash
@@ -129,7 +142,7 @@ pytest tests/test_migration.py \
 ```powershell
 .\venv\Scripts\python.exe -m src.route_catalog `
   --target AbstListEdit.jsp `
-  --output generated\valid\route_candidates_AbstListEdit.json `
+  --output generated\valid\route\route_candidates_AbstListEdit.json `
   --limit-per-target 5 `
   --max-sources 8 `
   --target-timeout-seconds 5
@@ -140,18 +153,19 @@ pytest tests/test_migration.py \
 .\venv\Scripts\python.exe -m src.route_catalog `
   --target ProjectMemberUploadDisp.jsp `
   --entry PatlicsMenu.jsp `
-  --output generated\valid\route_candidates_ProjectMemberUploadDisp.json `
+  --output generated\valid\route\route_candidates_ProjectMemberUploadDisp.json `
   --limit-per-target 5
 ```
 
 再只验证这个页面的候选路径。默认关闭自动登录；如入口页出现登录表单，工具会暂停等待人工登录或准备入口。
 ```powershell
 .\venv\Scripts\python.exe -m src.route_map_runner `
-  --candidates generated\valid\route_candidates_AbstListEdit.json `
+  --candidates generated\valid\route\route_candidates_AbstListEdit.json `
   --target AbstListEdit.jsp `
-  --output generated\valid\usable_route_map_legacy_AbstListEdit.json `
+  --output generated\valid\route\usable_route_map_legacy_AbstListEdit.json `
   --capture-dir output\route_map\AbstListEdit_legacy `
   --side legacy `
+  --upload-file test_data\upload\プロジェクトリストアップロード.tsv `
   --manual-data
 ```
 
@@ -161,13 +175,16 @@ pytest tests/test_migration.py \
 - `--login-entry dev-a`: 多入口环境下直接指定入口，避免启动时交互选择。
 - `--side new`: 只验证新系统路径；一次只打开一个环境。
 - `--auto-login`: 启用自动填账号密码并点击登录；默认不启用。
+- `--upload-file <path>`: 路径验证或人工录制中遇到上传控件时，回放阶段使用这个真实本地文件；用于避免浏览器只暴露 `C:\fakepath\...`。
 
-如果已经有全量 `generated\valid\route_candidates.json`，也可以不重新生成候选，直接按目标页面过滤验证：
+人工介入时，工具会在页面中录制 `click`、`input/change`、`submit` 等事件，并写入 `usable_route_map*.json` 的 `manual_replay`。后续回归使用 route map 时会优先回放这些人工操作。旧的 route map 没有录制数据，如需启用该能力，需要重新验证对应路径。
+
+如果已经有全量 `generated\valid\route\route_candidates.json`，也可以不重新生成候选，直接按目标页面过滤验证：
 ```powershell
 .\venv\Scripts\python.exe -m src.route_map_runner `
-  --candidates generated\valid\route_candidates.json `
+  --candidates generated\valid\route\route_candidates.json `
   --target AbstListEdit.jsp `
-  --output generated\valid\usable_route_map_legacy_AbstListEdit.json `
+  --output generated\valid\route\usable_route_map_legacy_AbstListEdit.json `
   --side legacy `
   --limit 3 `
   --manual-data
@@ -180,14 +197,75 @@ pytest tests/test_migration.py \
 #### A. 桌面原生 GUI (推荐用于公司本地电脑)
 如果您在公司本地环境运行，可以使用基于 `tkinter` 的原生窗口，无需启动浏览器服务：
 ```bash
-./venv/bin/python src/app_gui.py
+python src/app_gui.py
 ```
+
+Windows PowerShell:
+```powershell
+.\venv\Scripts\python.exe src\app_gui.py
+```
+
+启动后窗口分为三个主要区域：
+
+1. `Scanner & Mapper`
+   - `Legacy JSP Path` / `New JSP Path`: 分别选择旧系统和新系统的 JSP 根目录。
+   - `Start Full Scan`: 扫描 JSP 元素，输出 `mappings\legacy_elements.json` 和 `mappings\new_elements.json`。
+   - `Generate Mapping & Summary`: 生成页面/元素映射，输出 `generated\valid\page_mapping.json` 和 `generated\valid\comparison_summary.md`。
+   - `Export Excel Checklist`: 根据映射结果导出自动化测试清单，输出 `generated\valid\migration_checklist.xlsx`。
+
+2. `Regression`
+   - `Target Page`: 可选，填写单个 JSP 文件名时只跑该页面，例如 `ProjectMemberUploadDisp.jsp`。
+   - `Login Entry`: 从 `.env` 中配置的入口名生成下拉框。
+   - `Browser`: 选择测试浏览器，支持 `Chrome portable`、`Microsoft Edge`、`Firefox`。
+   - `Checklist Path`: 自动化测试清单，默认 `generated\valid\migration_checklist.xlsx`。文件存在时会传给 pytest，优先执行 Excel 中的 `automation_mode=auto` 用例。
+   - `Use Upload File` / `Upload File`: 勾选后选择真实本地文件，GUI 会把它传给 `--upload-file`，后续上传动作统一读取该文件。
+   - `Risk-Only Mode`: 只执行高/中风险差异页面。
+   - `Takeover Mode`: 启用人工接管模式，用于需要手工登录、手工导航或准备数据的场景。
+   - `Use Route Map`: 勾选后优先使用 `generated\valid\route\usable_route_map*.json` 到达目标页面；适用于不能通过 URL 直达页面的系统，默认开启。
+   - `Launch Regression Engine`: 执行回归，报告输出到 `output\gui_regression_report.html`。
+
+3. `Route Intelligence`
+   - `Target JSP`: 需要建图的目标页面，默认留空，使用时手工填写，例如 `ProjectMemberUploadDisp.jsp`。
+   - `Entry JSP`: 候选路径入口页面，例如 `PatlicsMenu.jsp`。
+   - `Scout Paths`: 调用 struts-tracer 缓存生成候选路径，输出 `generated\valid\route\route_candidates_<Target>.json`。
+     如果 `Target JSP` 填写 `/docroot/adminTool/ProjectListUploadErr.jsp` 这样的带目录路径，文件名中的目录分隔符会自动转换为 `_`。
+   - `Side`: 选择验证旧系统 `legacy` 或新系统 `new`，一次只打开一个系统。
+   - `Login Entry`: 从 `.env` 中配置的入口名生成下拉框。验证路径时会传给 `route_map_runner`，避免命令在浏览器启动前停在入口选择。
+   - `Browser`: 选择路径验证浏览器，支持 `Chrome portable`、`Microsoft Edge`、`Firefox`。
+   - `Auto Login`: 勾选后打开入口页时自动填写 `.env` 中的测试账号密码；不勾选时，遇到登录页会等待人工登录。
+   - `Use Upload File` / `Upload File`: 路径验证需要上传数据时，勾选并选择真实本地文件，录制出的 `manual_replay` 会使用该文件路径。
+   - `Verify Selected Route`: 验证候选路径是否可实际到达，输出 `generated\valid\route\usable_route_map_<side>_<Target>.json`。
+
+窗口底部的 `Console Output` 会实时显示实际执行的命令和日志。如果按钮执行失败，先看这里的最后几行错误。
+
+注意：原生 GUI 的日志区不能输入内容；如果路径验证进入 `Enter/r/m/s/q` 等人工确认，请在启动 GUI 的 PowerShell 窗口中输入。
 
 #### B. Web 指挥台 (Streamlit)
 如果您需要更丰富的图表分析或远程协作，可以启动 Web 服务：
 ```bash
-./venv/bin/streamlit run src/gui.py
+streamlit run src/gui.py
 ```
+
+Windows PowerShell:
+```powershell
+.\venv\Scripts\streamlit.exe run src\gui.py
+```
+
+首次使用前请确认已安装依赖：
+```powershell
+.\venv\Scripts\python.exe -m pip install -r requirements.txt
+```
+
+Web 指挥台包含四个页签：
+
+- `Regression`: 与原生 GUI 的回归页一致，勾选 `Use Upload File` 后可上传一个文件作为本次自动化的上传数据，输出 `output\gui_report.html`。
+- `Route Mapping`: 先生成候选路径，再验证 `legacy` 或 `new` 的可用路径；`Target JSP` 默认留空，`Login Entry` 从 `.env` 入口列表中选择；验证页也支持 `Use Upload File`。
+- `Scanner & Mapper`: 执行 JSP 扫描与映射生成。
+- `Analysis`: 读取 `generated\valid\page_mapping.json`，展示风险分布和页面列表。
+
+日常本地排查建议优先使用原生 GUI；需要图表概览或远程共享时再使用 Streamlit。
+
+关于 Edge IE 模式：Playwright 无法像普通浏览器参数一样可靠地开启 IE mode。当前 GUI 不单独提供 `IE mode` 选项；如果公司电脑已经通过 Edge 企业策略配置了 IE mode site list，可以选择 `Microsoft Edge`，实际是否进入 IE mode 由 Edge 策略决定。
 
 ---
 

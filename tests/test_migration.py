@@ -17,6 +17,8 @@ def test_migration_regression(
     login_entry,
     checklist_path,
     route_map_path,
+    force_route_map,
+    upload_file,
 ):
     """
     Legacy/New 全量或风险优先回归入口。
@@ -27,9 +29,15 @@ def test_migration_regression(
     if not request.config.getoption("--run-migration"):
         pytest.skip("requires --run-migration with real browser/login environment")
 
-    engine = RegressionEngine(mapping_path=mapping_path, checklist_path=checklist_path, route_map_path=route_map_path, legacy_base_url=login_entry["legacy_url"],
+    engine = RegressionEngine(
+        mapping_path=mapping_path,
+        checklist_path=checklist_path,
+        route_map_path=route_map_path,
+        force_route_map=force_route_map,
+        upload_file=upload_file,
+        legacy_base_url=login_entry["legacy_url"],
         new_base_url=login_entry["new_url"],
-                              )
+    )
     result = engine.run(
         legacy_page,
         new_page,

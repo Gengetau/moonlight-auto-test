@@ -87,7 +87,19 @@ def pytest_addoption(parser):
         "--route-map-path",
         action="store",
         default=None,
-        help="可选：usable_route_map JSON、目录或 glob；未指定时自动查找 generated/valid/usable_route_map*.json"
+        help="可选：usable_route_map JSON、目录或 glob；未指定时自动递归查找 generated/valid/**/usable_route_map*.json"
+    )
+    parser.addoption(
+        "--force-route-map",
+        action="store_true",
+        default=False,
+        help="有可用 route map 时优先按路径图导航；适用于目标系统不能通过 URL 直达页面的场景"
+    )
+    parser.addoption(
+        "--upload-file",
+        action="store",
+        default=None,
+        help="可选：自动化遇到文件上传控件时使用的本地文件路径"
     )
     parser.addoption(
         "--run-migration",
@@ -132,6 +144,14 @@ def struts_config(request):
 @pytest.fixture(scope="session")
 def route_map_path(request):
     return request.config.getoption("--route-map-path")
+
+@pytest.fixture(scope="session")
+def force_route_map(request):
+    return request.config.getoption("--force-route-map")
+
+@pytest.fixture(scope="session")
+def upload_file(request):
+    return request.config.getoption("--upload-file")
 
 @pytest.fixture(scope="session")
 def login_entry(request):

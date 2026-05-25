@@ -1,5 +1,6 @@
 import argparse
 import json
+import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -29,6 +30,14 @@ FIREFOX_ARGS = [
     "--width=1920",
     "--height=1080",
 ]
+
+
+def _configure_stdio() -> None:
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
 
 
 def _make_process_dpi_aware() -> None:
@@ -101,7 +110,8 @@ def _wait_for_manual_entry_ready(page: Page) -> None:
     print()
     print("[路径建图] 首页自动登录已关闭")
     print("  请在浏览器中完成登录、入口选择或必要输入。")
-    raw = input("  页面准备好后按 Enter 继续；输入 q 中止路径建图: ").strip().lower()
+    print("  页面准备好后按 Enter 继续；输入 q 中止路径建图。")
+    raw = input("> ").strip().lower()
     if raw == "q":
         raise InterruptedError("用户中止路径建图")
     try:
@@ -188,6 +198,8 @@ def run_route_map(args: argparse.Namespace) -> Path:
 
     print(f"[路径建图] 环境={args.side} 入口={login_entry['name']} URL={entry_url}")
     print(f"[路径建图] 候选路径数={len(routes)} 输出={args.output}")
+    if args.upload_file:
+        print(f"[路径建图] 上传文件={args.upload_file}")
 
     with sync_playwright() as playwright:
         browser = _launch_browser(playwright, args.browser)
@@ -207,6 +219,7 @@ def run_route_map(args: argparse.Namespace) -> Path:
                         browser_name=args.browser,
                         timeout=args.timeout,
                         manual_data=args.manual_data,
+                        upload_file=str(args.upload_file) if args.upload_file else None,
                     )
                 except KeyboardInterrupt:
                     raise
@@ -252,10 +265,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--timeout", type=int, default=15000)
     parser.add_argument("--auto-login", action="store_true", help="打开入口后自动填写账号密码并点击登录；默认关闭。")
     parser.add_argument("--manual-data", action="store_true", help="允许在输入、检索、选择、上传等场景由人工判断或接管。")
+    parser.add_argument("--upload-file", type=Path, default=None, help="可选：人工录制或路径回放中遇到文件上传时使用的真实本地文件。")
     return parser
 
 
 def main() -> None:
+    _configure_stdio()
     output = run_route_map(build_parser().parse_args())
     print(f"[路径建图] 已写入 {output}")
 

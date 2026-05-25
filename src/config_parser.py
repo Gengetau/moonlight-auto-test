@@ -54,7 +54,8 @@ class Config:
             print(f"      New:    {entry['new_url']}")
 
         while True:
-            raw = input(f"选择入口 [1-{len(entries)}]，直接回车默认 1: ").strip()
+            print(f"选择入口 [1-{len(entries)}]，直接回车默认 1:")
+            raw = input("> ").strip()
             selected = cls._find_login_entry(entries, raw or "1")
             if selected is not None:
                 return cls.apply_login_entry(selected)

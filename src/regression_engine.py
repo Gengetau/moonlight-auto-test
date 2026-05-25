@@ -78,6 +78,8 @@ class RegressionEngine:
         timeout: int = 15000,
         checklist_path: Optional[str] = None,
         route_map_path: Optional[str] = None,
+        force_route_map: bool = False,
+        upload_file: Optional[str] = None,
     ) -> None:
         self.mapping_path = Path(mapping_path)
         self.checklist_path = Path(checklist_path) if checklist_path else None
@@ -86,6 +88,8 @@ class RegressionEngine:
         self.output_dir = Path(output_dir)
         self.visual_threshold_percent = visual_threshold_percent
         self.timeout = timeout
+        self.force_route_map = force_route_map
+        self.upload_file = str(upload_file) if upload_file else None
         self.mapping = self.load_mapping()
         self.route_map_catalog = RouteMapCatalog(self._route_map_paths(route_map_path))
 
@@ -442,6 +446,49 @@ class RegressionEngine:
         # ============================================================
         # AUTO MODE
         # ============================================================
+        route = self.route_map_catalog.find_for_target(page_id)
+        if self.force_route_map and route:
+            navigator = RouteNavigator(
+                self.route_map_catalog,
+                timeout=self.timeout,
+                browser_name=browser_name,
+                upload_file=self.upload_file,
+            )
+            print(
+                f"[{page_id}] FORCE ROUTE MAP navigation: "
+                + json.dumps(
+                    {
+                        "route_id": route.get("route_id"),
+                        "route_map_path": route.get("route_map_path"),
+                    },
+                    ensure_ascii=False,
+                )
+            )
+            legacy_page, legacy_nav = navigator.navigate(
+                legacy_page,
+                entry_url=self.legacy_base_url,
+                target_page=page_id,
+                capture_dir=page_dir,
+                side="legacy",
+            )
+            new_page, new_nav = navigator.navigate(
+                new_page,
+                entry_url=self.new_base_url,
+                target_page=page_id,
+                capture_dir=page_dir,
+                side="new",
+            )
+            return self._run_captured_page_pair(
+                legacy_page,
+                new_page,
+                mapping,
+                page_dir,
+                browser_name,
+                legacy_nav,
+                new_nav,
+                manual=False,
+            )
+
         legacy_nav = self._goto(
             legacy_page,
             legacy_url,
@@ -456,12 +503,12 @@ class RegressionEngine:
         direct_new_reached = new_nav.get("status") == "PASS" and self._page_matches_mapping(new_page, mapping)
 
         if not direct_legacy_reached or not direct_new_reached:
-            route = self.route_map_catalog.find_for_target(page_id)
             if route:
                 navigator = RouteNavigator(
                     self.route_map_catalog,
                     timeout=self.timeout,
                     browser_name=browser_name,
+                    upload_file=self.upload_file,
                 )
                 print(
                     f"[{page_id}] DIRECT NAVIGATION fallback to route map: "
@@ -532,6 +579,22 @@ class RegressionEngine:
         )
 
 
+    @staticmethod
+    def _skip_mapping_fallback_action(action: Dict[str, Any]) -> bool:
+        kind = str(action.get("kind") or "").lower()
+        action_hint = str(action.get("action_hint") or action.get("action_type") or "").lower()
+        automation_mode = str(action.get("automation_mode") or "").lower()
+        semantic_action = infer_semantic_action(action_hint or kind, action)
+
+        # Source-only fallback does not know the business scenario. Bare forms
+        # and terminal close-window buttons are only safe when provided by an
+        # explicit checklist/executable case.
+        if kind == "form" or automation_mode == "scenario_only" or semantic_action == "submit":
+            return True
+        if action_hint in {"close_window", "window_close"} or kind == "close_window":
+            return True
+        return False
+
     def _build_action_plan(self, page_id: str, mapping: Dict[str, Any]) -> Tuple[List[Dict[str, Any]], str]:
         """
         Build executable runtime action plan.
@@ -555,16 +618,14 @@ class RegressionEngine:
 
         actions: List[Dict[str, Any]] = []
         for change in mapping.get("locator_changes", []) or []:
+            if self._skip_mapping_fallback_action(change):
+                continue
             actions.append(self._normalize_action_case(change))
 
         for step in mapping.get("full_action_steps", []) or []:
-            kind = str(step.get("kind") or "").lower()
             action_hint = str(step.get("action_hint") or "").lower()
-            automation_mode = str(step.get("automation_mode") or "").lower()
 
-            # Bare form submit is not a safe standalone runtime action.
-            # It should be represented as executable_cases/upload_submit.
-            if kind == "form" or automation_mode == "scenario_only":
+            if self._skip_mapping_fallback_action(step):
                 continue
 
             legacy_loc = step.get("legacy_locator") or step.get("locator")
@@ -792,6 +853,8 @@ class RegressionEngine:
             value = step.get("value") or step.get("test_data") or action_case.get("value")
             semantic_action = infer_semantic_action(action_type, step)
             action_lower = str(action_type or semantic_action).strip().lower()
+            if semantic_action == "upload" and self.upload_file:
+                value = self.upload_file
 
             if action_lower in {"snapshot", "page_snapshot", "visual_check", "wait"}:
                 result = {
@@ -844,6 +907,7 @@ class RegressionEngine:
                     "locator": locator,
                     "status": result.get("status"),
                     "reason": result.get("reason"),
+                    "upload_file_override": bool(self.upload_file and semantic_action == "upload"),
                 }
             )
             last_result = result
@@ -893,6 +957,22 @@ class RegressionEngine:
                 new_nav=new_nav,
             )
         )
+
+        if legacy_nav.get("status") != "PASS" or new_nav.get("status") != "PASS":
+            print(
+                f"[{page_id}] ROUTE NAVIGATION blocked; skip action plan: "
+                + json.dumps(
+                    {
+                        "legacy_status": legacy_nav.get("status"),
+                        "legacy_reason": legacy_nav.get("reason"),
+                        "new_status": new_nav.get("status"),
+                        "new_reason": new_nav.get("reason"),
+                    },
+                    ensure_ascii=False,
+                    default=str,
+                )
+            )
+            return results
 
         for blocked in mapping.get("missing_legacy_elements", []):
             results.append(
@@ -1352,7 +1432,7 @@ class RegressionEngine:
             if any(char in item for char in "*?[]"):
                 paths.extend(Path(match) for match in sorted(glob.glob(item)))
             elif path.is_dir():
-                paths.extend(sorted(path.glob("usable_route_map*.json")))
+                paths.extend(sorted(path.rglob("usable_route_map*.json")))
             else:
                 paths.append(path)
         return paths

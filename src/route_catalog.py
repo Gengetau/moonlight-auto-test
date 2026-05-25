@@ -37,6 +37,17 @@ def _normal_page_name(value: str) -> str:
     return Path(value).name.lower()
 
 
+def _normal_lookup(value: str) -> str:
+    return str(value or "").replace("\\", "/").strip()
+
+
+def _node_type(graph: Any, node: str) -> str:
+    try:
+        return str(graph.node_type_label(node))
+    except Exception:
+        return ""
+
+
 def _cache_path_for_project(tracer_root: Path, project_dir: Path) -> Path:
     digest = hashlib.md5(str(project_dir.resolve()).encode("utf-8")).hexdigest()
     return tracer_root / ".tracer_cache" / f"graph_{digest}.pkl"
@@ -82,31 +93,111 @@ def _route_id(target: str, labels: Sequence[Dict[str, str]], index: int) -> str:
     return hashlib.sha1(raw.encode("utf-8")).hexdigest()[:16]
 
 
-def _resolve_graph_node(graph: Any, value: str, *, is_file: bool = True) -> Optional[str]:
+def _add_unique(target: List[str], value: Optional[str]) -> None:
+    if value and value not in target:
+        target.append(value)
+
+
+def _looks_like_requested_node(graph: Any, node: str, requested: str, *, is_file: bool) -> bool:
+    node_text = _normal_lookup(node)
+    requested_text = _normal_lookup(requested).lstrip("/")
+    if not node_text or not requested_text:
+        return False
+
+    node_lower = node_text.lower()
+    requested_lower = requested_text.lower()
+    node_type = _node_type(graph, node).lower()
+
+    if is_file:
+        if node_type and node_type != "jsp":
+            return False
+        if not node_lower.endswith(".jsp"):
+            return False
+        return (
+            node_lower == requested_lower
+            or node_lower.endswith("/" + requested_lower)
+            or Path(node_text).name.lower() == Path(requested_text).name.lower()
+        )
+
+    action = "/" + requested_lower.lstrip("./")
+    if action.endswith(".do"):
+        action = action[:-3]
+    node_action = "/" + node_lower.lstrip("./")
+    if node_action.endswith(".do"):
+        node_action = node_action[:-3]
+    return node_action == action or node_action.endswith(action)
+
+
+def _node_match_score(graph: Any, node: str, requested: str, *, is_file: bool) -> tuple:
+    node_text = _normal_lookup(node)
+    requested_text = _normal_lookup(requested)
+    node_lower = node_text.lower()
+    requested_lower = requested_text.lower()
+    stripped = requested_text.lstrip("/")
+    stripped_lower = stripped.lower()
+
+    malformed_penalty = 50 if "/>/" in node_lower else 0
+    type_label = _node_type(graph, node).lower()
+    type_penalty = 20 if is_file and type_label and type_label != "jsp" else 0
+
+    if node_lower == requested_lower:
+        rank = 0
+    elif is_file and stripped and node_lower == f"/docroot/{stripped_lower}":
+        rank = 1
+    elif is_file and stripped and node_lower.endswith("/" + stripped_lower):
+        rank = 2
+    elif is_file and Path(node_text).name.lower() == Path(stripped).name.lower():
+        rank = 3 if "/docroot/" in node_lower else 4
+    else:
+        rank = 9
+
+    return (type_penalty + malformed_penalty + rank, len(node_text), node_text)
+
+
+def _resolve_graph_nodes(graph: Any, value: str, *, is_file: bool = True, limit: int = 20) -> List[str]:
+    candidates: List[str] = []
+    value = _normal_lookup(value)
+    if not value:
+        return candidates
+
     if graph.has_node(value):
-        return value
-    resolved = graph._resolve_node(value, is_file=is_file)
-    if graph.has_node(resolved):
-        return resolved
-    matches = graph.fuzzy_find(value, limit=1)
+        _add_unique(candidates, value)
+
+    try:
+        resolved = graph._resolve_node(value, is_file=is_file)
+    except Exception:
+        resolved = None
+    if resolved and graph.has_node(resolved):
+        _add_unique(candidates, resolved)
+
+    for node in graph.g.nodes:
+        node_text = str(node)
+        if _looks_like_requested_node(graph, node_text, value, is_file=is_file):
+            _add_unique(candidates, node_text)
+
+    for match in graph.fuzzy_find(value, limit=limit):
+        _add_unique(candidates, match)
+
+    candidates.sort(key=lambda item: _node_match_score(graph, item, value, is_file=is_file))
+    return candidates[:limit]
+
+
+def _resolve_graph_node(graph: Any, value: str, *, is_file: bool = True) -> Optional[str]:
+    matches = _resolve_graph_nodes(graph, value, is_file=is_file, limit=1)
     return matches[0] if matches else None
 
 
 def _source_nodes(graph: Any, entries: Optional[Sequence[str]]) -> List[str]:
-    def add_unique(target: List[str], value: Optional[str]) -> None:
-        if value and value not in target:
-            target.append(value)
-
     if entries:
         sources = []
         for entry in entries:
-            resolved = _resolve_graph_node(graph, entry, is_file=True)
-            add_unique(sources, resolved)
+            for resolved in _resolve_graph_nodes(graph, entry, is_file=True):
+                _add_unique(sources, resolved)
         return sources
 
     sources: List[str] = []
     for entry in DEFAULT_RUNTIME_ENTRY_HINTS:
-        add_unique(sources, _resolve_graph_node(graph, entry, is_file=True))
+        _add_unique(sources, _resolve_graph_node(graph, entry, is_file=True))
 
     root_sources = [
         node
@@ -114,7 +205,7 @@ def _source_nodes(graph: Any, entries: Optional[Sequence[str]]) -> List[str]:
         if graph.g.in_degree(node) == 0 and str(node).lower().endswith(".jsp")
     ]
     for node in sorted(root_sources, key=lambda item: (graph.g.out_degree(item), len(str(item)), str(item))):
-        add_unique(sources, node)
+        _add_unique(sources, node)
     return sources
 
 
@@ -167,45 +258,55 @@ def build_candidate_routes(
     warnings: List[Dict[str, Any]] = []
 
     for target in targets:
-        target_node = _resolve_graph_node(graph, target, is_file=True)
-        if not target_node:
+        target_nodes = _resolve_graph_nodes(graph, target, is_file=True)
+        if not target_nodes:
             warnings.append({"target": target, "warnings": ["target node was not found in struts-tracer graph"]})
             continue
 
         found_for_target = 0
         started_at = time.monotonic()
         timed_out = False
-        for source in _source_nodes(graph, entries)[: config.max_sources]:
-            if time.monotonic() - started_at > config.target_timeout_seconds:
-                timed_out = True
-                break
-            if source == target_node:
-                continue
-            for path in _iter_short_candidate_paths(
-                graph,
-                source,
-                target_node,
-                max_depth=config.max_depth,
-                limit=config.limit_per_source,
-            ):
-                found_for_target += 1
-                labels = _path_labels(graph, path)
-                route_entries = [item["name"] for item in labels if item["type"] == "JSP"]
-                routes.append(
-                    {
-                        "route_id": _route_id(target, labels, found_for_target),
-                        "target_page": target,
-                        "target_page_name": _normal_page_name(target),
-                        "entry_hint": route_entries[0] if route_entries else "",
-                        "length": len(labels),
-                        "nodes": labels,
-                        "source": "struts-tracer",
-                        "status": "candidate",
-                    }
-                )
+        seen_paths = set()
+        sources = _source_nodes(graph, entries)[: config.max_sources]
+        for target_node in target_nodes:
+            for source in sources:
+                if time.monotonic() - started_at > config.target_timeout_seconds:
+                    timed_out = True
+                    break
+                if source == target_node:
+                    continue
+                for path in _iter_short_candidate_paths(
+                    graph,
+                    source,
+                    target_node,
+                    max_depth=config.max_depth,
+                    limit=config.limit_per_source,
+                ):
+                    path_key = tuple(path)
+                    if path_key in seen_paths:
+                        continue
+                    seen_paths.add(path_key)
+                    found_for_target += 1
+                    labels = _path_labels(graph, path)
+                    route_entries = [item["name"] for item in labels if item["type"] == "JSP"]
+                    routes.append(
+                        {
+                            "route_id": _route_id(target, labels, found_for_target),
+                            "target_page": target,
+                            "target_page_name": _normal_page_name(target),
+                            "target_node": target_node,
+                            "entry_hint": route_entries[0] if route_entries else "",
+                            "length": len(labels),
+                            "nodes": labels,
+                            "source": "struts-tracer",
+                            "status": "candidate",
+                        }
+                    )
+                    if found_for_target >= config.limit_per_target:
+                        break
                 if found_for_target >= config.limit_per_target:
                     break
-            if found_for_target >= config.limit_per_target:
+            if timed_out or found_for_target >= config.limit_per_target:
                 break
 
         if timed_out:

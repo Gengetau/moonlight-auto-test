@@ -2,7 +2,7 @@ import hashlib
 import json
 import re
 import time
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import Any, Dict, Iterable, List, Optional
 
 from playwright.sync_api import Error as PlaywrightError
@@ -198,6 +198,245 @@ def _takeover_page_after_action(
             pass
         return candidate
     return None
+
+
+def _install_manual_recorder(page: Page, *, route_id: str, index: int) -> Dict[str, Any]:
+    events: List[Dict[str, Any]] = []
+    binding_name = f"__moonlightManualRecord_{_safe_id(route_id)}_{index}_{int(time.time() * 1000)}"
+
+    def record(source, payload):
+        if not isinstance(payload, dict):
+            return
+        event = dict(payload)
+        try:
+            event["page_url"] = source["page"].url
+        except Exception:
+            pass
+        try:
+            event["frame_url"] = source["frame"].url
+        except Exception:
+            pass
+        events.append(event)
+
+    try:
+        page.expose_binding(binding_name, record)
+    except PlaywrightError:
+        pass
+
+    script = """
+    bindingName => {
+      if (window.__moonlightManualRecorderBinding === bindingName) return;
+      window.__moonlightManualRecorderBinding = bindingName;
+      const cssEscape = window.CSS && window.CSS.escape
+        ? window.CSS.escape.bind(window.CSS)
+        : value => String(value).replace(/[^a-zA-Z0-9_-]/g, ch => '\\\\' + ch);
+      const attrEscape = value => String(value || '').replace(/\\\\/g, '\\\\\\\\').replace(/"/g, '\\\\"');
+      const selectorFor = el => {
+        if (!el || !el.tagName) return '';
+        const tag = el.tagName.toLowerCase();
+        const id = el.getAttribute('id');
+        const name = el.getAttribute('name');
+        const type = el.getAttribute('type');
+        const href = el.getAttribute('href');
+        const onclick = el.getAttribute('onclick');
+        if (id) return `${tag}#${cssEscape(id)}`;
+        if (name && type) return `${tag}[name="${attrEscape(name)}"][type="${attrEscape(type)}"]`;
+        if (name) return `${tag}[name="${attrEscape(name)}"]`;
+        if (href && href !== '#') return `${tag}[href="${attrEscape(href)}"]`;
+        if (onclick) {
+          const compact = onclick.replace(/\\s+/g, ' ').trim();
+          if (compact.length >= 12) return `${tag}[onclick*="${attrEscape(compact.slice(0, 80))}"]`;
+        }
+        const path = [];
+        let node = el;
+        while (node && node.nodeType === 1 && node !== document.body && path.length < 5) {
+          const nodeTag = node.tagName.toLowerCase();
+          const siblings = Array.from(node.parentElement ? node.parentElement.children : [])
+            .filter(sibling => sibling.tagName === node.tagName);
+          const nth = siblings.length > 1 ? `:nth-of-type(${siblings.indexOf(node) + 1})` : '';
+          path.unshift(`${nodeTag}${nth}`);
+          node = node.parentElement;
+        }
+        return path.length ? path.join(' > ') : tag;
+      };
+      const payloadFor = (eventType, event) => {
+        const target = eventType === 'submit'
+          ? event.target
+          : (event.target && event.target.nodeType === 1 ? event.target : event.target && event.target.parentElement);
+        if (!target || !target.tagName) return null;
+        const tag = target.tagName.toLowerCase();
+        const type = (target.getAttribute('type') || '').toLowerCase();
+        const fileNames = type === 'file'
+          ? Array.from(target.files || []).map(file => file.name)
+          : [];
+        return {
+          event_type: eventType,
+          selector: selectorFor(target),
+          tag,
+          type,
+          name: target.getAttribute('name') || '',
+          id: target.getAttribute('id') || '',
+          value: type === 'file'
+            ? ''
+            : tag === 'select'
+            ? target.value
+            : (type === 'password' ? '' : (target.value || '')),
+          file_names: fileNames,
+          file_count: fileNames.length,
+          checked: !!target.checked,
+          text: (type === 'file'
+            ? fileNames.join(', ')
+            : (target.innerText || target.value || target.getAttribute('title') || '')
+          ).trim().slice(0, 120),
+          href: target.getAttribute('href') || '',
+          onclick: (target.getAttribute('onclick') || '').slice(0, 240),
+          action: target.getAttribute('action') || (target.closest && target.closest('form') ? target.closest('form').getAttribute('action') || '' : ''),
+          timestamp: Date.now()
+        };
+      };
+      const send = payload => {
+        if (!payload || !payload.selector || !window[bindingName]) return;
+        try { window[bindingName](payload); } catch (_) {}
+      };
+      ['input', 'change'].forEach(type => {
+        document.addEventListener(type, event => send(payloadFor(type, event)), true);
+      });
+      document.addEventListener('click', event => send(payloadFor('click', event)), true);
+      document.addEventListener('submit', event => send(payloadFor('submit', event)), true);
+    }
+    """
+
+    try:
+        page.add_init_script(f"({script})({json.dumps(binding_name)})")
+    except PlaywrightError:
+        pass
+    for frame in page.frames:
+        try:
+            frame.evaluate(script, binding_name)
+        except PlaywrightError:
+            continue
+    return {"binding_name": binding_name, "events": events}
+
+
+def _upload_filename(value: Any) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    normalized = text.replace("\\", "/")
+    return Path(normalized).name or PureWindowsPath(text).name
+
+
+def _resolve_manual_upload_value(event: Dict[str, Any], upload_file: Optional[str] = None) -> str:
+    if upload_file:
+        return str(upload_file)
+
+    raw_value = str(event.get("value") or "").strip()
+    if raw_value and "fakepath" not in raw_value.lower() and Path(raw_value).exists():
+        return raw_value
+
+    names: List[str] = []
+    for name in event.get("file_names") or []:
+        leaf = _upload_filename(name)
+        if leaf and leaf not in names:
+            names.append(leaf)
+
+    raw_leaf = _upload_filename(raw_value)
+    if raw_leaf and raw_leaf not in names:
+        names.append(raw_leaf)
+
+    for name in names:
+        for root in (Path("test_data/upload"), Path("test_data"), Path("data/upload"), Path("data")):
+            if not root.exists():
+                continue
+            direct = root / name
+            if direct.exists():
+                return str(direct)
+            for candidate in root.rglob(name):
+                if candidate.is_file():
+                    return str(candidate)
+
+    return ""
+
+
+def _manual_replay_from_events(events: List[Dict[str, Any]], *, upload_file: Optional[str] = None) -> List[Dict[str, Any]]:
+    replay: List[Dict[str, Any]] = []
+    pending: Dict[str, Dict[str, Any]] = {}
+
+    def flush(selector: Optional[str] = None) -> None:
+        selectors = [selector] if selector else list(pending)
+        for item_selector in selectors:
+            event = pending.pop(item_selector, None)
+            if not event:
+                continue
+            tag = str(event.get("tag") or "").lower()
+            input_type = str(event.get("type") or "").lower()
+            action_type = "fill"
+            if tag == "select":
+                action_type = "select"
+            elif input_type in {"checkbox", "radio"}:
+                action_type = "click"
+            elif input_type == "file":
+                action_type = "upload"
+            value = event.get("value") or ""
+            if action_type == "upload":
+                value = _resolve_manual_upload_value(event, upload_file)
+            replay.append(
+                {
+                    "action_type": action_type,
+                    "selector": item_selector,
+                    "value": value,
+                    "event_type": event.get("event_type"),
+                    "file_names": event.get("file_names") or [],
+                }
+            )
+
+    for event in events:
+        selector = str(event.get("selector") or "")
+        if not selector:
+            continue
+        event_type = str(event.get("event_type") or "").lower()
+        tag = str(event.get("tag") or "").lower()
+        input_type = str(event.get("type") or "").lower()
+
+        if event_type in {"input", "change"} and tag in {"input", "textarea", "select"}:
+            pending[selector] = event
+            continue
+
+        if event_type == "click":
+            if tag in {"input", "textarea", "select"} and input_type not in {"button", "submit", "reset", "image"}:
+                continue
+            flush()
+            replay.append(
+                {
+                    "action_type": "click",
+                    "selector": selector,
+                    "value": "",
+                    "event_type": event_type,
+                    "text": event.get("text") or "",
+                }
+            )
+            continue
+
+        if event_type == "submit":
+            flush()
+            if replay and replay[-1].get("action_type") == "click":
+                continue
+            replay.append(
+                {
+                    "action_type": "submit",
+                    "selector": selector,
+                    "value": "",
+                    "event_type": event_type,
+                }
+            )
+
+    flush()
+    compact: List[Dict[str, Any]] = []
+    for item in replay:
+        if compact and compact[-1] == item:
+            continue
+        compact.append(item)
+    return compact
 
 
 def _css_string(value: str) -> str:
@@ -511,8 +750,10 @@ def _manual_checkpoint(
     action: str,
     capture_dir: Path,
     reason: str,
+    upload_file: Optional[str] = None,
 ) -> Dict[str, Any]:
     before = _capture_state(page, capture_dir, f"{_safe_id(route_id)}_{index:02d}_manual_before")
+    recorder = _install_manual_recorder(page, route_id=route_id, index=index)
     while True:
         print()
         print("[路径建图] 自动路径验证被阻塞")
@@ -525,7 +766,8 @@ def _manual_checkpoint(
         print("    [m] 我已手工完成当前 action，继续验证下一步")
         print("    [s] 这条路径不可达")
         print("    [q] 中止路径建图")
-        raw = input("  请选择 [Enter/r/m/s/q]: ").strip().lower()
+        print("  请选择 [Enter/r/m/s/q]:")
+        raw = input("> ").strip().lower()
         if raw in {"", "r", "retry"}:
             return {
                 "status": "RETRY",
@@ -550,6 +792,9 @@ def _manual_checkpoint(
             except (PlaywrightTimeoutError, PlaywrightError):
                 pass
             after = _capture_state(page, capture_dir, f"{_safe_id(route_id)}_{index:02d}_manual_after")
+            manual_events = list(recorder.get("events") or [])
+            manual_replay = _manual_replay_from_events(manual_events, upload_file=upload_file)
+            print(f"  已记录人工事件 {len(manual_events)} 个，可回放动作 {len(manual_replay)} 个。")
             return {
                 "status": "PASS",
                 "manual": True,
@@ -557,8 +802,18 @@ def _manual_checkpoint(
                 "state_before": before,
                 "state": after,
                 "visible_controls": _visible_controls(page),
+                "manual_events": manual_events,
+                "manual_replay": manual_replay,
             }
         print("  输入无效，请选择 Enter/r、m、s 或 q。")
+
+
+def _manual_step_fields(manual_result: Dict[str, Any], *, replay_mode: str) -> Dict[str, Any]:
+    return {
+        "manual_events": manual_result.get("manual_events") or [],
+        "manual_replay": manual_result.get("manual_replay") or [],
+        "manual_replay_mode": replay_mode,
+    }
 
 
 def find_runtime_action_locator(page: Page, action: str, timeout: int = 1500) -> Optional[str]:
@@ -640,6 +895,7 @@ def verify_candidate_route(
     browser_name: str = "chrome",
     timeout: int = 15000,
     manual_data: bool = False,
+    upload_file: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Execute one candidate route from the current logged-in entry state.
@@ -703,6 +959,7 @@ def verify_candidate_route(
                     action=action,
                     capture_dir=capture_dir,
                     reason=reason,
+                    upload_file=upload_file,
                 )
                 if manual_result.get("status") == "RETRY":
                     continue
@@ -722,6 +979,7 @@ def verify_candidate_route(
                         "url": (manual_result.get("state") or {}).get("url"),
                         "popup_taken_over": manual_takeover_page is not None,
                         "active_page_url": page.url if not _page_is_closed(page) else None,
+                        **_manual_step_fields(manual_result, replay_mode="current_action"),
                     }
                 )
                 if manual_result.get("status") == "PASS":
@@ -749,6 +1007,7 @@ def verify_candidate_route(
                                 action=next_action,
                                 capture_dir=capture_dir,
                                 reason=reason,
+                                upload_file=upload_file,
                             )
                             if manual_next_result.get("status") == "RETRY":
                                 continue
@@ -761,6 +1020,7 @@ def verify_candidate_route(
                                 result["steps"][-1]["reason"] = manual_next_result.get("reason")
                                 result["steps"][-1]["popup_taken_over"] = manual_takeover_page is not None
                                 result["steps"][-1]["active_page_url"] = page.url if not _page_is_closed(page) else None
+                                result["steps"][-1].update(_manual_step_fields(manual_next_result, replay_mode="after_action"))
                                 break
 
                             result["status"] = "UNREACHABLE_ROUTE"
@@ -837,6 +1097,7 @@ def verify_candidate_route(
                             action=next_action,
                             capture_dir=capture_dir,
                             reason=reason,
+                            upload_file=upload_file,
                         )
                         if manual_result.get("status") == "RETRY":
                             continue
@@ -849,6 +1110,7 @@ def verify_candidate_route(
                             result["steps"][-1]["reason"] = manual_result.get("reason")
                             result["steps"][-1]["popup_taken_over"] = manual_takeover_page is not None
                             result["steps"][-1]["active_page_url"] = page.url if not _page_is_closed(page) else None
+                            result["steps"][-1].update(_manual_step_fields(manual_result, replay_mode="after_action"))
                             break
 
                         result["status"] = "UNREACHABLE_ROUTE"
@@ -869,6 +1131,7 @@ def verify_candidate_route(
                     action=action,
                     capture_dir=capture_dir,
                     reason=reason,
+                    upload_file=upload_file,
                 )
                 if manual_result.get("status") == "RETRY":
                     result["steps"][-1]["manual_retry_requested"] = True
@@ -886,6 +1149,7 @@ def verify_candidate_route(
                         "url": (manual_result.get("state") or {}).get("url"),
                         "popup_taken_over": manual_takeover_page is not None,
                         "active_page_url": page.url if not _page_is_closed(page) else None,
+                        **_manual_step_fields(manual_result, replay_mode="current_action"),
                     }
                 )
                 if manual_result.get("status") == "PASS":

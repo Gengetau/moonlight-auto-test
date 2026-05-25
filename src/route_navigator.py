@@ -31,7 +31,7 @@ class RouteMapCatalog:
         valid_dir = Path("generated/valid")
         if not valid_dir.exists():
             return []
-        return sorted(valid_dir.glob("usable_route_map*.json"))
+        return sorted(valid_dir.rglob("usable_route_map*.json"))
 
     @staticmethod
     def _target_name(value: Any) -> str:
@@ -47,15 +47,16 @@ class RouteMapCatalog:
             payload = json.loads(path.read_text(encoding="utf-8"))
             for route in list(payload.get("verified") or []) + list(payload.get("manual_verified") or []):
                 route_id = route.get("route_id") or json.dumps(route.get("source_route") or {}, sort_keys=True, default=str)
-                if route_id in seen:
+                seen_key = (route_id, route.get("run_side"), str(path))
+                if seen_key in seen:
                     continue
-                seen.add(route_id)
+                seen.add(seen_key)
                 loaded = dict(route)
                 loaded["route_map_path"] = str(path)
                 routes.append(loaded)
         return routes
 
-    def find_for_target(self, target_page: Any) -> Optional[Dict[str, Any]]:
+    def find_for_target(self, target_page: Any, *, side: Optional[str] = None) -> Optional[Dict[str, Any]]:
         target_name = self._target_name(target_page)
         if not target_name:
             return None
@@ -70,24 +71,107 @@ class RouteMapCatalog:
         if not candidates:
             return None
 
-        def rank(route: Dict[str, Any]) -> Tuple[int, int]:
+        def rank(route: Dict[str, Any]) -> Tuple[int, int, int]:
+            side_rank = 0 if side and route.get("run_side") == side else 1
             status_rank = 0 if route.get("status") == "verified" else 1
             length = int((route.get("source_route") or {}).get("length") or len(route.get("steps") or []) or 999)
-            return status_rank, length
+            return side_rank, status_rank, length
 
         return sorted(candidates, key=rank)[0]
+
+
+def _route_steps_by_index(route: Dict[str, Any]) -> Dict[int, Dict[str, Any]]:
+    steps: Dict[int, Dict[str, Any]] = {}
+    for step in route.get("steps") or []:
+        try:
+            steps[int(step.get("index"))] = step
+        except (TypeError, ValueError):
+            continue
+    return steps
+
+
+def _execute_manual_replay(
+    page: Page,
+    replay_steps: List[Dict[str, Any]],
+    *,
+    capture_dir: Path,
+    test_id: str,
+    browser_name: str,
+    timeout: int,
+    upload_file: Optional[str] = None,
+) -> Tuple[Page, Dict[str, Any]]:
+    result: Dict[str, Any] = {"status": "PASS", "steps": []}
+    for replay_index, replay in enumerate(replay_steps, start=1):
+        selector = str(replay.get("selector") or "")
+        action_type = str(replay.get("action_type") or "click")
+        value = replay.get("value") or None
+        if str(action_type).lower() in {"upload", "file", "set_input_files"} and upload_file:
+            value = upload_file
+        if not selector:
+            result.update({"status": "BLOCKED", "reason": "Recorded manual replay step has no selector"})
+            return page, result
+
+        pages_before = _pages_for_context(page)
+        action_result = execute_action(
+            page,
+            action_type,
+            selector,
+            value,
+            browser_name=browser_name,
+            capture_dir=capture_dir,
+            test_id=f"{test_id}_manual_{replay_index:02d}",
+            timeout=timeout,
+            action_context={
+                "label": f"manual replay {replay_index}",
+                "action_type": action_type,
+                "locator": selector,
+                "keep_popup": True,
+            },
+        )
+        takeover_page = _takeover_page_after_action(page, pages_before, action_result, timeout)
+        if takeover_page is not None:
+            page = takeover_page
+        result["steps"].append(
+            {
+                "index": replay_index,
+                "action_type": action_type,
+                "selector": selector,
+                "status": action_result.get("status"),
+                "reason": action_result.get("reason"),
+                "popup_taken_over": takeover_page is not None,
+                "active_page_url": page.url if not _page_is_closed(page) else None,
+            }
+        )
+        if action_result.get("status") != "PASS":
+            result.update(
+                {
+                    "status": "BLOCKED",
+                    "reason": action_result.get("reason") or f"Recorded manual replay failed: {selector}",
+                    "state": action_result.get("state"),
+                }
+            )
+            return page, result
+    return page, result
 
 
 class RouteNavigator:
     """Replay a verified route from an environment entry page to a target page."""
 
-    def __init__(self, catalog: RouteMapCatalog, *, timeout: int = 15000, browser_name: str = "chrome") -> None:
+    def __init__(
+        self,
+        catalog: RouteMapCatalog,
+        *,
+        timeout: int = 15000,
+        browser_name: str = "chrome",
+        upload_file: Optional[str] = None,
+    ) -> None:
         self.catalog = catalog
         self.timeout = timeout
         self.browser_name = browser_name
+        self.upload_file = upload_file
 
-    def route_for(self, target_page: Any) -> Optional[Dict[str, Any]]:
-        return self.catalog.find_for_target(target_page)
+    def route_for(self, target_page: Any, *, side: Optional[str] = None) -> Optional[Dict[str, Any]]:
+        return self.catalog.find_for_target(target_page, side=side)
 
     def navigate(
         self,
@@ -98,7 +182,7 @@ class RouteNavigator:
         capture_dir: Path,
         side: str,
     ) -> Tuple[Page, Dict[str, Any]]:
-        route = self.route_for(target_page)
+        route = self.route_for(target_page, side=side)
         if not route:
             return page, {
                 "status": "BLOCKED",
@@ -120,18 +204,38 @@ class RouteNavigator:
             "steps": [],
         }
 
+        result["entry_url"] = entry_url
         try:
-            page.goto(entry_url, wait_until="domcontentloaded", timeout=max(self.timeout, 60000))
-        except Exception as exc:
-            result.update({"status": "BLOCKED", "reason": f"Failed to open route entry: {exc}"})
-            result["state"] = _capture_state(page, route_capture_dir, "entry_blocked")
-            return page, result
+            current_url = "" if _page_is_closed(page) else str(page.url or "")
+        except Exception:
+            current_url = ""
+        result["start_url"] = current_url
+
+        if not current_url or current_url == "about:blank":
+            try:
+                page.goto(entry_url, wait_until="domcontentloaded", timeout=max(self.timeout, 60000))
+                result["entry_opened"] = True
+            except Exception as exc:
+                result.update({"status": "BLOCKED", "reason": f"Failed to open route entry: {exc}"})
+                result["state"] = _capture_state(page, route_capture_dir, "entry_blocked")
+                return page, result
+        else:
+            result["entry_reused"] = True
+            try:
+                page.bring_to_front()
+                page.wait_for_load_state("domcontentloaded", timeout=min(self.timeout, 5000))
+            except Exception:
+                pass
 
         action_nodes = list(_iter_action_nodes(source_route))
+        recorded_steps = _route_steps_by_index(route)
         for index, action_node in enumerate(action_nodes, start=1):
             action = action_node["name"]
             next_action = action_nodes[index]["name"] if index < len(action_nodes) else None
             step_id = f"{_safe_id(route_id)}_{index:02d}_{_safe_id(action)}"
+            recorded_step = recorded_steps.get(index) or {}
+            manual_replay = list(recorded_step.get("manual_replay") or [])
+            manual_replay_mode = str(recorded_step.get("manual_replay_mode") or "")
 
             reached_url = _find_reached_action_url(page, action)
             if reached_url:
@@ -145,6 +249,59 @@ class RouteNavigator:
                         "url": reached_url,
                     }
                 )
+                continue
+
+            if manual_replay and manual_replay_mode == "current_action":
+                page, replay_result = _execute_manual_replay(
+                    page,
+                    manual_replay,
+                    capture_dir=route_capture_dir,
+                    test_id=step_id,
+                    browser_name=self.browser_name,
+                    timeout=self.timeout,
+                    upload_file=self.upload_file,
+                )
+                step = {
+                    "index": index,
+                    "action": action,
+                    "locator": None,
+                    "status": replay_result.get("status"),
+                    "manual_replay_used": True,
+                    "manual_replay_steps": replay_result.get("steps") or [],
+                    "reason": replay_result.get("reason"),
+                    "active_page_url": page.url if not _page_is_closed(page) else None,
+                }
+                result["steps"].append(step)
+                if replay_result.get("status") != "PASS":
+                    result.update(
+                        {
+                            "status": "BLOCKED",
+                            "blocked_at": index,
+                            "reason": replay_result.get("reason") or f"Recorded manual replay failed for action: {action}",
+                            "state": replay_result.get("state") or _capture_state(page, route_capture_dir, f"{step_id}_manual_replay_failed"),
+                            "visible_controls": _visible_controls(page),
+                        }
+                    )
+                    return page, result
+                if next_action:
+                    next_ready = _wait_for_action_ready(page, next_action, timeout=min(self.timeout, 5000))
+                    if next_ready.get("locator"):
+                        step["next_action"] = next_action
+                        step["next_action_locator"] = next_ready.get("locator")
+                    elif next_ready.get("reached_url"):
+                        step["next_action"] = next_action
+                        step["next_action_reached_url"] = next_ready.get("reached_url")
+                    else:
+                        result.update(
+                            {
+                                "status": "BLOCKED",
+                                "blocked_at": index + 1,
+                                "reason": f"Recorded manual replay did not expose next action after {action}: {next_action}",
+                                "state": _capture_state(page, route_capture_dir, f"{step_id}_manual_replay_next_missing"),
+                                "visible_controls": _visible_controls(page),
+                            }
+                        )
+                        return page, result
                 continue
 
             locator = find_runtime_action_locator(page, action)
@@ -199,6 +356,30 @@ class RouteNavigator:
                     }
                 )
                 return page, result
+
+            if manual_replay and manual_replay_mode == "after_action":
+                page, replay_result = _execute_manual_replay(
+                    page,
+                    manual_replay,
+                    capture_dir=route_capture_dir,
+                    test_id=step_id,
+                    browser_name=self.browser_name,
+                    timeout=self.timeout,
+                    upload_file=self.upload_file,
+                )
+                step["manual_replay_used"] = True
+                step["manual_replay_steps"] = replay_result.get("steps") or []
+                if replay_result.get("status") != "PASS":
+                    result.update(
+                        {
+                            "status": "BLOCKED",
+                            "blocked_at": index,
+                            "reason": replay_result.get("reason") or f"Recorded manual replay failed after action: {action}",
+                            "state": replay_result.get("state") or _capture_state(page, route_capture_dir, f"{step_id}_manual_replay_failed"),
+                            "visible_controls": _visible_controls(page),
+                        }
+                    )
+                    return page, result
 
             if next_action:
                 next_ready = _wait_for_action_ready(page, next_action, timeout=min(self.timeout, 5000))
