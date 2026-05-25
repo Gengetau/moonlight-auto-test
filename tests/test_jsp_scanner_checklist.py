@@ -1,4 +1,4 @@
-from src.checklist_generator import generate_cases, page_entries, universal_checklist_markdown_lines
+from src.checklist_generator import generate_cases, page_entries, universal_checklist_markdown_lines, write_excel
 from src.jsp_scanner import scan_jsp_source
 
 
@@ -178,10 +178,9 @@ def test_page_mapping_input_uses_full_mappings_and_missing_elements():
 
     assert [page["page_id"] for page in pages] == ["MatchedA.jsp", "MatchedB.jsp", "MatchedC.jsp"]
     assert {case.page for case in cases} == {"MatchedA.jsp", "MatchedB.jsp", "MatchedC.jsp"}
-    assert len([case for case in cases if case.page == "MatchedA.jsp" and case.kind == "form"]) >= 4
-    assert len([case for case in cases if case.page == "MatchedA.jsp" and case.kind == "button"]) >= 3
-    assert len([case for case in cases if case.page == "MatchedB.jsp" and case.kind == "link"]) >= 3
-    assert any(case.page == "MatchedA.jsp" and case.automation_mode == "auto" for case in cases)
+    assert {case.case_type for case in cases} == {"initial_display"}
+    assert all(case.automation_mode == "auto" for case in cases)
+    assert all(case.generated_by == "PageCasePlanner" for case in cases)
 
 
 def test_universal_checklist_lines_include_xls_categories():
@@ -191,3 +190,27 @@ def test_universal_checklist_lines_include_xls_categories():
     assert "1-1 画面レイアウト" in text
     assert "7 ファイルアップロード" in text
     assert "13 マルチブラウザ動作確認" in text
+
+
+def test_page_specific_excel_contains_profile_and_skipped_sheets(tmp_path):
+    from openpyxl import load_workbook
+
+    scan_data = {
+        "page_mappings": [
+            {
+                "page_id": "Upload.jsp",
+                "elements": [
+                    {"kind": "file", "tag": "html:file", "attributes": {"property": "uploadFile"}, "locator": "input[name='uploadFile']"},
+                    {"kind": "button", "tag": "input", "attributes": {"onclick": "fnSubmit('/Upload.do')"}, "locator": "input[name='entry']"},
+                ],
+            }
+        ]
+    }
+    output = tmp_path / "migration_checklist.xlsx"
+
+    write_excel(output, scan_data, generate_cases(scan_data))
+
+    workbook = load_workbook(output, read_only=True)
+    assert "Checklist" in workbook.sheetnames
+    assert "PageProfile" in workbook.sheetnames
+    assert "SkippedTemplates" in workbook.sheetnames

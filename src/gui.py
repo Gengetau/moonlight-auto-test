@@ -32,6 +32,13 @@ def quote(value):
     return '"' + text.replace('"', '\\"') + '"'
 
 
+def clean_path_input(value):
+    text = str(value or "").strip()
+    if len(text) >= 2 and text[0] == text[-1] and text[0] in {"'", '"'}:
+        text = text[1:-1].strip()
+    return text
+
+
 def route_file_stem(target):
     text = str(target or "").replace("\\", "/").strip().strip("/")
     if text.lower().endswith(".jsp"):
@@ -73,12 +80,17 @@ PYTHON_CMD = quote(venv_executable("python"))
 PYTEST_CMD = quote(venv_executable("pytest"))
 REPORT_PATHS = (
     Path("output/regression/regression_report.html"),
+    Path("output/gui_regression_report.html"),
     Path("output/gui_report.html"),
 )
 
 
 def latest_report_path():
-    existing = [path for path in REPORT_PATHS if path.exists()]
+    nested_reports = []
+    regression_dir = Path("output/regression")
+    if regression_dir.exists():
+        nested_reports = list(regression_dir.rglob("regression_report.html"))
+    existing = [path for path in [*REPORT_PATHS, *nested_reports] if path.exists()]
     if not existing:
         return None
     return max(existing, key=lambda path: path.stat().st_mtime)
@@ -319,7 +331,11 @@ with tabs[1]:
                         upload_path = save_uploaded_file(v_selected_upload_file, subdir="gui_route")
                         cmd += f" --upload-file {quote(upload_path)}"
                     st.warning("Manual Data mode enabled. Check terminal for interactions if needed.")
-                    run_command(cmd)
+                    code, _ = run_command(cmd)
+                    if code == 0 and Path("generated/valid/page_mapping.json").exists():
+                        st.info("Runtime profile saved. Regenerating checklist from current mapping/profile data...")
+                        checklist_cmd = f"{PYTHON_CMD} src/checklist_generator.py generated/valid/page_mapping.json -o generated/valid/migration_checklist.xlsx"
+                        run_command(checklist_cmd)
 
 # --- TAB: Scanner & Mapper ---
 with tabs[2]:
@@ -332,6 +348,8 @@ with tabs[2]:
         new_path = st.text_input("New JSP Root Path", key="scan_new_root")
         
         if st.button("🔍 Run Full Scan", key="scan_run_full"):
+            leg_path = clean_path_input(leg_path)
+            new_path = clean_path_input(new_path)
             if leg_path:
                 run_command(f"{PYTHON_CMD} src/jsp_scanner.py {quote(leg_path)} -o mappings/legacy_elements.json")
             if new_path:
@@ -339,8 +357,17 @@ with tabs[2]:
 
     with col2:
         st.subheader("Step 2: Bridge Time & Space")
+        generate_checklist_after_mapping = st.checkbox("Generate checklist after mapping", value=True, key="scan_generate_checklist_after_mapping")
         if st.button("🌉 Generate Mapping", key="scan_generate_mapping"):
             cmd = f"{PYTHON_CMD} src/page_mapping.py mappings/legacy_elements.json mappings/new_elements.json -o generated/valid/page_mapping.json --md generated/valid/comparison_summary.md"
+            code, _ = run_command(cmd)
+            if code == 0 and generate_checklist_after_mapping:
+                checklist_cmd = f"{PYTHON_CMD} src/checklist_generator.py generated/valid/page_mapping.json -o generated/valid/migration_checklist.xlsx"
+                run_command(checklist_cmd)
+
+        st.subheader("Step 3: Test Documents")
+        if st.button("📊 Export Excel Checklist", key="scan_export_checklist"):
+            cmd = f"{PYTHON_CMD} src/checklist_generator.py generated/valid/page_mapping.json -o generated/valid/migration_checklist.xlsx"
             run_command(cmd)
 
 # --- TAB: Analysis ---

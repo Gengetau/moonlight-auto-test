@@ -13,6 +13,10 @@ if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
 from src.coverage_policy import CHECKLIST_SECTIONS, CASE_DEPTH  # noqa: E402
+try:  # noqa: E402
+    from src.page_case_planner import PageCasePlanner
+except ImportError:  # pragma: no cover - direct script execution fallback
+    from page_case_planner import PageCasePlanner  # type: ignore
 
 
 SEVERITY_ORDER = {"High": 0, "Medium": 1, "Low": 2}
@@ -34,6 +38,8 @@ AUTO_ACTION_TYPES = {
     "press",
     "close_window",
 }
+RUNTIME_PROFILE_SCHEMA = "moonlight.runtime_page_profile.v1"
+DEFAULT_RUNTIME_PROFILE_DIR = Path("generated/valid/runtime_profile")
 
 
 @dataclass(frozen=True)
@@ -60,6 +66,13 @@ class TestCase:
     expected_value: str = ""
     pre_steps: str = ""
     main_step: str = ""
+    case_id: str = ""
+    parent_case_id: str = ""
+    viewpoint_id: str = ""
+    enabled: str = "true"
+    generated_by: str = ""
+    matched_capabilities: str = ""
+    destructive: str = "false"
 
 
 def as_text(value: Any, default: str = "") -> str:
@@ -91,6 +104,12 @@ def first_attr(attributes: Dict[str, Any], *names: str) -> str:
 
 
 def page_entries(scan_data: Dict[str, Any]) -> Iterable[Dict[str, Any]]:
+    if scan_data.get("schema") == RUNTIME_PROFILE_SCHEMA or isinstance(scan_data.get("controls"), list):
+        yield scan_data
+        return
+    if isinstance(scan_data.get("runtime_profiles"), list):
+        yield from scan_data["runtime_profiles"]
+        return
     if "pages" in scan_data:
         yield from scan_data.get("pages", [])
         return
@@ -112,7 +131,97 @@ def page_entries(scan_data: Dict[str, Any]) -> Iterable[Dict[str, Any]]:
 
 
 def page_name_of(page: Dict[str, Any]) -> str:
-    return as_text(page.get("page_id") or page.get("source") or page.get("legacy_sources", [None])[0], "<unknown>")
+    return as_text(
+        page.get("page_id")
+        or page.get("target_page_name")
+        or page.get("target_page")
+        or page.get("source")
+        or page.get("legacy_sources", [None])[0],
+        "<unknown>",
+    )
+
+
+def page_match_keys(value: Any) -> set:
+    text = as_text(value).replace("\\", "/").strip().strip("'\"").lower()
+    if not text:
+        return set()
+    leaf = text.rsplit("/", 1)[-1]
+    stem = leaf.rsplit(".", 1)[0] if "." in leaf else leaf
+    return {text, leaf, stem}
+
+
+def _page_values_for_match(page: Dict[str, Any]) -> List[Any]:
+    values: List[Any] = [
+        page.get("page_id"),
+        page.get("target_page_name"),
+        page.get("target_page"),
+        page.get("source"),
+        page.get("legacy_page"),
+        page.get("new_page"),
+        page.get("view_page"),
+    ]
+    for key in ("legacy_sources", "new_sources"):
+        source = page.get(key)
+        if isinstance(source, list):
+            values.extend(source)
+    return values
+
+
+def runtime_profile_paths(search_dir: Path = DEFAULT_RUNTIME_PROFILE_DIR) -> List[Path]:
+    if not search_dir.exists():
+        return []
+    return sorted(
+        (path for path in search_dir.glob("*.json") if path.is_file()),
+        key=lambda path: path.stat().st_mtime,
+        reverse=True,
+    )
+
+
+def load_runtime_profiles(search_dir: Path = DEFAULT_RUNTIME_PROFILE_DIR) -> List[Dict[str, Any]]:
+    profiles: List[Dict[str, Any]] = []
+    for path in runtime_profile_paths(search_dir):
+        try:
+            profile = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if not isinstance(profile, dict):
+            continue
+        if profile.get("schema") != RUNTIME_PROFILE_SCHEMA and not isinstance(profile.get("controls"), list):
+            continue
+        profile.setdefault("runtime_profile_path", str(path))
+        profile["_runtime_profile_mtime"] = path.stat().st_mtime
+        profiles.append(profile)
+    return profiles
+
+
+def select_runtime_profile_for_page(page: Dict[str, Any], profiles: Sequence[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    target_keys = set()
+    for value in _page_values_for_match(page):
+        target_keys.update(page_match_keys(value))
+    if not target_keys:
+        return None
+
+    best: Optional[Dict[str, Any]] = None
+    best_score = -1
+    for profile in profiles:
+        profile_keys = set()
+        for value in _page_values_for_match(profile):
+            profile_keys.update(page_match_keys(value))
+        if not target_keys.intersection(profile_keys):
+            continue
+        controls = profile.get("controls") if isinstance(profile.get("controls"), list) else []
+        score = len(controls) + int(float(profile.get("_runtime_profile_mtime") or 0) % 100000)
+        if page_match_keys(page_name_of(page)).intersection(profile_keys):
+            score += 1000000
+        if score > best_score:
+            best = profile
+            best_score = score
+    if best is None:
+        return None
+    selected = dict(best)
+    selected.setdefault("static_page_id", page_name_of(page))
+    selected["profile_source"] = "runtime_profile"
+    return selected
 
 
 def page_risk(page: Dict[str, Any]) -> str:
@@ -780,7 +889,94 @@ def automation_case(page: str, element: Dict[str, Any]) -> Optional[TestCase]:
         main_step=meta["main_step"],
     )
 
+
+def uses_page_specific_planner(scan_data: Dict[str, Any]) -> bool:
+    return (
+        isinstance(scan_data.get("page_mappings"), list)
+        or isinstance(scan_data.get("runtime_profiles"), list)
+        or scan_data.get("schema") == RUNTIME_PROFILE_SCHEMA
+        or isinstance(scan_data.get("controls"), list)
+    )
+
+
+def planned_case_to_test_case(case: Dict[str, Any]) -> TestCase:
+    capabilities = as_text(case.get("matched_capabilities"))
+    evidence_parts = [
+        f"template_id={as_text(case.get('template_id'))}",
+        f"generated_by={as_text(case.get('generated_by'), 'PageCasePlanner')}",
+    ]
+    if case.get("parent_case_id"):
+        evidence_parts.append(f"parent_case_id={as_text(case.get('parent_case_id'))}")
+    if case.get("viewpoint_id"):
+        evidence_parts.append(f"viewpoint_id={as_text(case.get('viewpoint_id'))}")
+    if capabilities:
+        evidence_parts.append(f"matched_capabilities={capabilities}")
+    if case.get("profile_source"):
+        evidence_parts.append(f"profile_source={as_text(case.get('profile_source'))}")
+    if case.get("runtime_profile_path"):
+        evidence_parts.append(f"runtime_profile_path={as_text(case.get('runtime_profile_path'))}")
+    return TestCase(
+        title=as_text(case.get("title"), as_text(case.get("case_type"), "planned case")),
+        objective=as_text(case.get("objective")),
+        steps=as_text(case.get("steps")),
+        expected=as_text(case.get("expected")),
+        severity=as_text(case.get("severity") or case.get("risk"), "High"),
+        page=as_text(case.get("page_id"), "<unknown>"),
+        kind=as_text(case.get("case_type"), "page"),
+        locator=as_text(case.get("locator"), "__page__"),
+        line="-",
+        evidence="\n".join(part for part in evidence_parts if part),
+        automation_mode=as_text(case.get("automation_mode"), "auto"),
+        case_type=as_text(case.get("case_type")),
+        action_type=as_text(case.get("action_type")),
+        test_data=as_text(case.get("test_data")),
+        submit_locator=as_text(case.get("submit_locator")),
+        expected_type=as_text(case.get("expected_type")),
+        expected_value=as_text(case.get("expected_value")),
+        pre_steps=as_text(case.get("pre_steps")),
+        main_step=as_text(case.get("main_step")),
+        case_id=as_text(case.get("case_id")),
+        parent_case_id=as_text(case.get("parent_case_id")),
+        viewpoint_id=as_text(case.get("viewpoint_id")),
+        enabled=as_text(case.get("enabled"), "true"),
+        generated_by=as_text(case.get("generated_by"), "PageCasePlanner"),
+        matched_capabilities=capabilities,
+        destructive=as_text(case.get("destructive"), "false"),
+    )
+
+
+def plan_page_specific_cases(scan_data: Dict[str, Any]) -> Tuple[List[TestCase], List[Dict[str, Any]], List[Dict[str, Any]]]:
+    planner = PageCasePlanner()
+    cases: List[TestCase] = []
+    skipped_templates: List[Dict[str, Any]] = []
+    profiles: List[Dict[str, Any]] = []
+    runtime_profiles = [] if scan_data.get("schema") == RUNTIME_PROFILE_SCHEMA else load_runtime_profiles()
+
+    for page in page_entries(scan_data):
+        profile_input = select_runtime_profile_for_page(page, runtime_profiles) or page
+        planned_cases, skipped, profile = planner.plan(profile_input)
+        cases.extend(planned_case_to_test_case(case) for case in planned_cases)
+        skipped_templates.extend(skipped)
+        profiles.append(profile)
+
+    cases.sort(
+        key=lambda item: (
+            item.page,
+            item.destructive == "true",
+            SEVERITY_ORDER.get(item.severity, 99),
+            item.case_type,
+            item.case_id,
+            item.viewpoint_id,
+        )
+    )
+    return cases, skipped_templates, profiles
+
+
 def generate_cases(scan_data: Dict[str, Any]) -> List[TestCase]:
+    if uses_page_specific_planner(scan_data):
+        cases, _, _ = plan_page_specific_cases(scan_data)
+        return cases
+
     cases: List[TestCase] = []
     for page in page_entries(scan_data):
         page_name = page_name_of(page)
@@ -893,6 +1089,10 @@ def write_excel(path: Path, scan_data: Dict[str, Any], cases: Sequence[TestCase]
     summary.title = "Summary"
     pages = list(page_entries(scan_data))
     totals = summarize_counts(scan_data, cases)
+    skipped_templates: List[Dict[str, Any]] = []
+    page_profiles: List[Dict[str, Any]] = []
+    if uses_page_specific_planner(scan_data):
+        _, skipped_templates, page_profiles = plan_page_specific_cases(scan_data)
     summary_rows = [
         ("生成时间", datetime.now().strftime("%Y-%m-%d %H:%M:%S")),
         ("扫描根路径", as_text(scan_data.get("root"), as_text(scan_data.get("source"), "<unknown>"))),
@@ -924,9 +1124,108 @@ def write_excel(path: Path, scan_data: Dict[str, Any], cases: Sequence[TestCase]
     universal.freeze_panes = "A2"
     universal.auto_filter.ref = universal.dimensions
 
+    if page_profiles:
+        profile_sheet = workbook.create_sheet("PageProfile")
+        profile_headers = [
+            "page_id",
+            "profile_source",
+            "runtime_profile_path",
+            "entry_url",
+            "view_page",
+            "ready_selector",
+            "capabilities",
+            "form_count",
+            "file_count",
+            "button_count",
+            "link_count",
+            "input_count",
+            "select_count",
+            "textarea_count",
+            "table_count",
+            "submit_action_count",
+            "download_action_count",
+            "close_action_count",
+        ]
+        profile_sheet.append(profile_headers)
+        for profile in page_profiles:
+            counts = profile.get("counts") or {}
+            capabilities = profile.get("capabilities") or {}
+            enabled_caps = ",".join(name for name, enabled in capabilities.items() if enabled)
+            profile_sheet.append(
+                [
+                    profile.get("page_id"),
+                    profile.get("profile_source"),
+                    profile.get("runtime_profile_path"),
+                    profile.get("entry_url"),
+                    profile.get("view_page"),
+                    profile.get("ready_selector"),
+                    enabled_caps,
+                    counts.get("form", 0),
+                    counts.get("file", 0),
+                    counts.get("button", 0),
+                    counts.get("link", 0),
+                    counts.get("input", 0),
+                    counts.get("select", 0),
+                    counts.get("textarea", 0),
+                    counts.get("table", 0),
+                    len(profile.get("submit_actions") or []),
+                    len(profile.get("download_actions") or []),
+                    len(profile.get("close_actions") or []),
+                ]
+            )
+        for cell in profile_sheet[1]:
+            cell.fill = PatternFill("solid", fgColor="1F4E78")
+            cell.font = Font(color="FFFFFF", bold=True)
+            cell.alignment = Alignment(vertical="center", wrap_text=True)
+        for row in profile_sheet.iter_rows(min_row=2):
+            for cell in row:
+                cell.alignment = Alignment(vertical="top", wrap_text=True)
+        for index, width in enumerate([34, 22, 54, 34, 34, 34, 72, 12, 12, 12, 12, 12, 12, 12, 12, 18, 20, 18], start=1):
+            profile_sheet.column_dimensions[get_column_letter(index)].width = width
+        profile_sheet.freeze_panes = "A2"
+        profile_sheet.auto_filter.ref = profile_sheet.dimensions
+
+    if skipped_templates:
+        skipped_sheet = workbook.create_sheet("SkippedTemplates")
+        skipped_headers = [
+            "page_id",
+            "template_id",
+            "case_type",
+            "status",
+            "reason",
+            "missing_capabilities",
+            "matched_capabilities",
+        ]
+        skipped_sheet.append(skipped_headers)
+        for skipped in skipped_templates:
+            skipped_sheet.append(
+                [
+                    skipped.get("page_id"),
+                    skipped.get("template_id"),
+                    skipped.get("case_type"),
+                    skipped.get("status"),
+                    skipped.get("reason"),
+                    skipped.get("missing_capabilities"),
+                    skipped.get("matched_capabilities"),
+                ]
+            )
+        for cell in skipped_sheet[1]:
+            cell.fill = PatternFill("solid", fgColor="1F4E78")
+            cell.font = Font(color="FFFFFF", bold=True)
+            cell.alignment = Alignment(vertical="center", wrap_text=True)
+        for row in skipped_sheet.iter_rows(min_row=2):
+            for cell in row:
+                cell.alignment = Alignment(vertical="top", wrap_text=True)
+        for index, width in enumerate([34, 24, 24, 16, 36, 34, 72], start=1):
+            skipped_sheet.column_dimensions[get_column_letter(index)].width = width
+        skipped_sheet.freeze_panes = "A2"
+        skipped_sheet.auto_filter.ref = skipped_sheet.dimensions
+
     detail = workbook.create_sheet("Checklist")
     headers = [
         "case_id",
+        "parent_case_id",
+        "viewpoint_id",
         "priority",
         "page_id",
         "line",
@@ -947,12 +1246,18 @@ def write_excel(path: Path, scan_data: Dict[str, Any], cases: Sequence[TestCase]
         "pre_steps",
         "main_step",
         "evidence",
+        "enabled",
+        "generated_by",
+        "matched_capabilities",
+        "destructive",
     ]
     detail.append(headers)
     for index, case in enumerate(cases, start=1):
-        case_id = f"{Path(case.page).stem or 'PAGE'}-{index:05d}"
+        case_id = case.case_id or f"{Path(case.page).stem or 'PAGE'}-{index:05d}"
         detail.append([
             case_id,
+            case.parent_case_id,
+            case.viewpoint_id,
             case.severity,
             case.page,
             case.line,
@@ -973,6 +1278,10 @@ def write_excel(path: Path, scan_data: Dict[str, Any], cases: Sequence[TestCase]
             case.pre_steps,
             case.main_step,
             case.evidence,
+            case.enabled,
+            case.generated_by,
+            case.matched_capabilities,
+            case.destructive,
         ])
 
     header_fill = PatternFill("solid", fgColor="1F4E78")
@@ -984,7 +1293,7 @@ def write_excel(path: Path, scan_data: Dict[str, Any], cases: Sequence[TestCase]
     for row in detail.iter_rows(min_row=2):
         for cell in row:
             cell.alignment = Alignment(vertical="top", wrap_text=True)
-    widths = [18, 10, 44, 8, 16, 14, 34, 42, 56, 64, 64, 18, 18, 18, 34, 34, 18, 28, 42, 42, 58]
+    widths = [46, 46, 24, 10, 44, 8, 18, 18, 34, 42, 56, 64, 64, 18, 18, 18, 34, 34, 18, 28, 42, 42, 58, 10, 20, 72, 12]
     for index, width in enumerate(widths, start=1):
         detail.column_dimensions[get_column_letter(index)].width = width
     detail.freeze_panes = "A2"

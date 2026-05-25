@@ -27,6 +27,9 @@ Moonlight 是为 **TargetApp 从 Struts 迁移到 Spring** 架构而设计的“
 - **Markdown**: 适合在 Git/Chat 中快速审阅。
 - **Excel**: 适合主祭（ミカ）进行大规模资产核对与状态追踪。
 - **字段证据**: 所有的表单用例都会附带其内部字段的完整性校验线索。
+- **页面专属 Case**: 当输入为 `page_mapping.json` 时，先由 `page_case_planner.py` 生成 PageProfile，再按页面实际能力生成少而准的自动化 case；不适用的模板会写入 `SkippedTemplates` sheet。
+- **Runtime PageProfile**: 路径验证成功后会抓取浏览器真实渲染 DOM，输出到 `generated/valid/runtime_profile/*.json`；后续生成 checklist 时会优先使用同名目标页的 runtime profile，再回退到静态 JSP 扫描结果。
+- **观点扩展 Case**: PageProfile 先生成可执行 seed case，再由 `CaseExpansionRules` 扩展异常系、边界系、复帰系观点；Excel 中通过 `parent_case_id` / `viewpoint_id` 追踪来源。
 
 ### Phase 4: [语义执行层] 自动比对 (`action_executor.py`, `regression_engine.py`)
 利用 Playwright 驱动，在两个时空下执行相同的业务意图，而不是机械复读录制脚本：
@@ -103,6 +106,12 @@ python src/page_mapping.py mappings/legacy_elements.json mappings/new_elements.j
 ```bash
 python src/checklist_generator.py mappings/page_diff.json -o generated/migration_checklist.xlsx
 ```
+如果输入包含 `page_mappings`，Excel 会额外生成：
+- `PageProfile`: 每个页面的结构画像与 capabilities。
+- 如果存在 `generated/valid/runtime_profile/<side>_<Target>_<route>.json`，`checklist_generator.py` 会优先用浏览器运行时 DOM 生成该目标页的 PageProfile；`PageProfile` sheet 中的 `profile_source` / `runtime_profile_path` 可确认来源。
+- `SkippedTemplates`: 没有生成的 fuzzy template 及跳过原因。
+
+这可以避免把搜索、结果表、下载、关闭窗口、上传 submit 等模板无差别套到所有页面上。
 
 ### 4. 运行回归测试
 执行自动化比对逻辑：
@@ -176,6 +185,7 @@ pytest tests/test_migration.py \
 - `--side new`: 只验证新系统路径；一次只打开一个环境。
 - `--auto-login`: 启用自动填账号密码并点击登录；默认不启用。
 - `--upload-file <path>`: 路径验证或人工录制中遇到上传控件时，回放阶段使用这个真实本地文件；用于避免浏览器只暴露 `C:\fakepath\...`。
+- `--runtime-profile-dir <path>`: 路径验证到达目标页后保存浏览器真实 DOM 画像；默认 `generated\valid\runtime_profile`，生成 checklist 时会自动优先读取。
 
 人工介入时，工具会在页面中录制 `click`、`input/change`、`submit` 等事件，并写入 `usable_route_map*.json` 的 `manual_replay`。后续回归使用 route map 时会优先回放这些人工操作。旧的 route map 没有录制数据，如需启用该能力，需要重新验证对应路径。
 
@@ -259,8 +269,10 @@ Windows PowerShell:
 Web 指挥台包含四个页签：
 
 - `Regression`: 与原生 GUI 的回归页一致，勾选 `Use Upload File` 后可上传一个文件作为本次自动化的上传数据，输出 `output\gui_report.html`。
+- 单页面回归的详细报告会写入该页面截图目录，例如 `output\regression\0001_ProjectListUploadDisp.jsp\regression_report.html`，方便和截图一起查看。
 - `Route Mapping`: 先生成候选路径，再验证 `legacy` 或 `new` 的可用路径；`Target JSP` 默认留空，`Login Entry` 从 `.env` 入口列表中选择；验证页也支持 `Use Upload File`。
-- `Scanner & Mapper`: 执行 JSP 扫描与映射生成。
+- Streamlit 版路径验证成功后会保存 runtime profile，并在存在 `generated\valid\page_mapping.json` 时自动重新生成 `generated\valid\migration_checklist.xlsx`。
+- `Scanner & Mapper`: 执行 JSP 扫描、映射生成与 Excel checklist 导出。Streamlit 版在 `Generate Mapping` 后默认自动生成 `generated\valid\migration_checklist.xlsx`，也可以单独点击 `Export Excel Checklist`。
 - `Analysis`: 读取 `generated\valid\page_mapping.json`，展示风险分布和页面列表。
 
 日常本地排查建议优先使用原生 GUI；需要图表概览或远程共享时再使用 Streamlit。

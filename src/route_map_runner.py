@@ -1,5 +1,6 @@
 import argparse
 import json
+import re
 import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -88,6 +89,45 @@ def _safe_accept(dialog) -> None:
         dialog.accept()
     except Exception:
         pass
+
+
+def _safe_file_stem(value: Any, default: str = "target") -> str:
+    text = str(value or default).replace("\\", "/").rsplit("/", 1)[-1]
+    text = re.sub(r"\.[A-Za-z0-9]+$", "", text)
+    text = re.sub(r"[^A-Za-z0-9_.-]+", "_", text).strip("_")
+    return text[:120] or default
+
+
+def _persist_runtime_profile(result: Dict[str, Any], args: argparse.Namespace, login_entry_name: str) -> Optional[Path]:
+    profile = result.pop("runtime_profile", None)
+    if not isinstance(profile, dict):
+        return None
+
+    profile["side"] = args.side
+    profile["login_entry"] = login_entry_name
+    profile["route_map_path"] = str(args.output)
+    profile["candidates_path"] = str(args.candidates)
+
+    target_stem = _safe_file_stem(
+        profile.get("target_page_name")
+        or profile.get("target_page")
+        or result.get("target_page_name")
+        or result.get("target_page")
+        or args.target
+    )
+    route_stem = _safe_file_stem(result.get("route_id") or profile.get("route_id"), "route")
+    output_path = args.runtime_profile_dir / f"{args.side}_{target_stem}_{route_stem}.json"
+    args.runtime_profile_dir.mkdir(parents=True, exist_ok=True)
+    profile["runtime_profile_path"] = str(output_path)
+    output_path.write_text(json.dumps(profile, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    result["runtime_profile_path"] = str(output_path)
+    result["runtime_profile_summary"] = {
+        "url": profile.get("url"),
+        "counts": profile.get("counts") or {},
+        "control_count": len(profile.get("controls") or []),
+    }
+    return output_path
 
 
 def _looks_like_login_entry(page: Page) -> bool:
@@ -235,6 +275,12 @@ def run_route_map(args: argparse.Namespace) -> Path:
 
                 result["run_side"] = args.side
                 result["login_entry"] = login_entry["name"]
+                try:
+                    profile_path = _persist_runtime_profile(result, args, login_entry["name"])
+                    if profile_path:
+                        print(f"[路径建图] Runtime profile 输出={profile_path}")
+                except Exception as exc:
+                    result["runtime_profile_error"] = str(exc)
                 results.append(result)
                 write_usable_route_map(results, args.output)
 
@@ -256,6 +302,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--candidates", type=Path, default=Path("generated/valid/route_candidates.json"))
     parser.add_argument("--output", type=Path, default=Path("generated/valid/usable_route_map.json"))
     parser.add_argument("--capture-dir", type=Path, default=Path("output/route_map"))
+    parser.add_argument("--runtime-profile-dir", type=Path, default=Path("generated/valid/runtime_profile"))
     parser.add_argument("--side", choices=["legacy", "new"], default="legacy", help="一次只运行一个环境。")
     parser.add_argument("--login-entry", default=None, help="登录入口名称或序号；未指定且存在多个入口时会交互选择。")
     parser.add_argument("--browser", choices=["edge", "firefox", "chrome_port"], default="chrome_port")

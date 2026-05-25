@@ -246,6 +246,13 @@ class MoonlightGUI:
         return '"' + text.replace('"', '\\"') + '"'
 
     @staticmethod
+    def clean_path_input(value):
+        text = str(value or "").strip()
+        if len(text) >= 2 and text[0] == text[-1] and text[0] in {"'", '"'}:
+            text = text[1:-1].strip()
+        return text
+
+    @staticmethod
     def route_file_stem(target):
         text = str(target or "").replace("\\", "/").strip().strip("/")
         if text.lower().endswith(".jsp"):
@@ -283,8 +290,8 @@ class MoonlightGUI:
         threading.Thread(target=target, daemon=True).start()
 
     def run_scan(self):
-        leg = self.path_legacy.get().strip()
-        new = self.path_new.get().strip()
+        leg = self.clean_path_input(self.path_legacy.get())
+        new = self.clean_path_input(self.path_new.get())
         if leg:
             self.run_command(f"{self.quote(self.python_cmd)} src/jsp_scanner.py {self.quote(leg)} -o mappings/legacy_elements.json", "Legacy scan finished.")
         if new:

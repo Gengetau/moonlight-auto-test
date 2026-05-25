@@ -384,6 +384,13 @@ def scan_path(path: Path) -> Dict[str, Any]:
     }
 
 
+def normalize_cli_path(path: Path) -> Path:
+    text = str(path).strip()
+    if len(text) >= 2 and text[0] == text[-1] and text[0] in {"'", '"'}:
+        text = text[1:-1].strip()
+    return Path(text)
+
+
 def write_json(data: Dict[str, Any], output: Optional[Path]) -> None:
     text = json.dumps(data, ensure_ascii=False, indent=2)
     if output:
@@ -403,11 +410,12 @@ def main() -> None:
         help="JSON output file. Defaults to stdout.",
     )
     args = parser.parse_args()
+    input_path = normalize_cli_path(args.path)
 
-    if not args.path.exists():
-        raise SystemExit(f"Path does not exist: {args.path}")
+    if not input_path.exists():
+        raise SystemExit(f"Path does not exist: {input_path}")
 
-    write_json(scan_path(args.path), args.output)
+    write_json(scan_path(input_path), args.output)
 
 
 if __name__ == "__main__":

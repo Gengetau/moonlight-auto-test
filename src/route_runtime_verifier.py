@@ -9,6 +9,7 @@ from playwright.sync_api import Error as PlaywrightError
 from playwright.sync_api import Page, TimeoutError as PlaywrightTimeoutError
 
 from src.action_executor import _capture_state, execute_action
+from src.runtime_page_profile import capture_runtime_page_profile
 
 
 ACTION_CONTROL_SELECTORS = (
@@ -1164,6 +1165,12 @@ def verify_candidate_route(
 
     result["state"] = _capture_state(page, capture_dir, f"{_safe_id(route_id)}_final")
     result["visible_controls"] = _visible_controls(page)
+    result["runtime_profile"] = capture_runtime_page_profile(
+        page,
+        target_page=str(route.get("target_page") or ""),
+        target_page_name=str(route.get("target_page_name") or ""),
+        route_id=str(route_id),
+    )
     result["page_state_id"] = _page_state_id(result)
     result["manual_steps"] = sum(1 for step in result["steps"] if step.get("manual"))
     if result["manual_steps"]:

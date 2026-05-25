@@ -166,6 +166,38 @@ def test_render_report_contains_side_by_side_sections(tmp_path):
     assert "1-1 画面レイアウト" in html
 
 
+def test_render_report_for_single_page_goes_next_to_screenshots(tmp_path):
+    mapping_path = tmp_path / "page_mapping.json"
+    mapping_path.write_text(json.dumps({"page_mappings": []}), encoding="utf-8")
+    output_dir = tmp_path / "out"
+    page_dir = output_dir / "0001_ProjectListUploadDisp.jsp"
+    page_dir.mkdir(parents=True)
+    screenshot = page_dir / "00_legacy_initial.png"
+    Image.new("RGB", (1, 1), "white").save(screenshot)
+
+    engine = RegressionEngine(mapping_path=str(mapping_path), output_dir=str(output_dir))
+    report = engine.render_report(
+        [
+            {
+                "page_id": "ProjectListUploadDisp.jsp",
+                "risk": "High",
+                "action": "page_snapshot",
+                "status": "PASS",
+                "url_match": True,
+                "legacy_screenshot": str(screenshot),
+                "new_screenshot": str(screenshot),
+                "diff_screenshot": str(screenshot),
+                "visual": {"diff_percent": 0.0},
+            }
+        ]
+    )
+
+    assert Path(report).parent == page_dir
+    html = Path(report).read_text(encoding="utf-8")
+    assert "Page: ProjectListUploadDisp.jsp" in html
+    assert 'src="00_legacy_initial.png"' in html
+
+
 def test_build_steps_from_page_mapping_is_risk_first():
     steps = build_steps_from_page_mapping(
         {

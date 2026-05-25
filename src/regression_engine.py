@@ -1188,19 +1188,22 @@ class RegressionEngine:
         }
 
     def render_report(self, results: List[Dict[str, Any]]) -> Path:
-        report_path = self.output_dir / "regression_report.html"
+        report_path, report_dir, report_page = self._report_location(results)
         counts = Counter(item["status"] for item in results)
-        rows = "\n".join(self._render_result(item) for item in results)
+        rows = "\n".join(self._render_result(item, report_dir) for item in results)
+        report_dir.mkdir(parents=True, exist_ok=True)
         report_path.write_text(
             f"""<!doctype html>
 <html lang="ja">
 <head>
   <meta charset="utf-8">
-  <title>Moonlight Legacy/New Regression Report</title>
+  <title>Moonlight Regression Report - {html.escape(report_page)}</title>
   <style>
+    * {{ box-sizing: border-box; }}
     body {{ margin: 0; font-family: Arial, sans-serif; color: #17202a; background: #f5f7fb; }}
     header {{ padding: 24px 32px; background: #17202a; color: white; }}
     h1 {{ margin: 0 0 12px; font-size: 26px; letter-spacing: 0; }}
+    .subtitle {{ margin: 0 0 16px; color: #d6eaf8; font-size: 13px; overflow-wrap: anywhere; }}
     .summary {{ display: flex; gap: 12px; flex-wrap: wrap; }}
     .summary-details {{ margin-top: 16px; display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; }}
     .summary-card {{ background: #273746; border-radius: 8px; padding: 12px; }}
@@ -1210,7 +1213,9 @@ class RegressionEngine:
     .pill {{ padding: 8px 12px; border-radius: 6px; background: #273746; font-weight: 700; }}
     main {{ padding: 24px 32px; }}
     .case {{ margin-bottom: 20px; border: 1px solid #d9e0ea; border-radius: 8px; background: white; overflow: hidden; }}
-    .case-head {{ display: flex; align-items: center; gap: 12px; padding: 12px 16px; border-bottom: 1px solid #e7ecf3; }}
+    .case-head {{ display: flex; align-items: center; gap: 12px; padding: 12px 16px; border-bottom: 1px solid #e7ecf3; flex-wrap: wrap; }}
+    .case-title {{ display: flex; align-items: center; gap: 10px; min-width: min(100%, 420px); }}
+    .case-title strong {{ overflow-wrap: anywhere; }}
     .status {{ padding: 4px 8px; border-radius: 4px; color: white; font-weight: 700; font-size: 12px; }}
     .PASS {{ background: #1e8449; }} .WARN {{ background: #b7950b; }} .DIFF {{ background: #b7950b; }} .BLOCKED {{ background: #922b21; }} .ERROR {{ background: #7b241c; }}
     .meta {{ color: #52616f; font-size: 13px; overflow-wrap: anywhere; }}
@@ -1219,6 +1224,12 @@ class RegressionEngine:
     figcaption {{ margin-bottom: 6px; font-size: 12px; color: #52616f; font-weight: 700; }}
     img {{ width: 100%; max-height: 520px; object-fit: contain; border: 1px solid #d9e0ea; background: #fff; }}
     .details {{ padding: 0 16px 16px; font-size: 13px; color: #34495e; }}
+    .detail-grid {{ display: grid; grid-template-columns: 160px minmax(0, 1fr); gap: 6px 12px; margin-bottom: 12px; }}
+    .detail-grid b {{ color: #17202a; }}
+    table {{ width: 100%; border-collapse: collapse; }}
+    td {{ border-top: 1px solid #e7ecf3; padding: 8px 10px; }}
+    details {{ margin-top: 10px; }}
+    summary {{ cursor: pointer; font-weight: 700; color: #17202a; }}
     code {{ font-family: Consolas, monospace; font-size: 12px; white-space: pre-wrap; }}
     @media (max-width: 900px) {{ .grid, .summary-details {{ grid-template-columns: 1fr; }} }}
   </style>
@@ -1226,6 +1237,7 @@ class RegressionEngine:
 <body>
   <header>
     <h1>Moonlight Legacy/New Regression Report</h1>
+    <p class="subtitle">Page: {html.escape(report_page)} / Report: {html.escape(str(report_path))}</p>
     <div class="summary">
       <span class="pill">Total: {len(results)}</span>
       <span class="pill">PASS: {counts.get('PASS', 0)}</span>
@@ -1243,7 +1255,30 @@ class RegressionEngine:
         )
         return report_path
 
-    def _render_result(self, item: Dict[str, Any]) -> str:
+    def _report_location(self, results: List[Dict[str, Any]]) -> Tuple[Path, Path, str]:
+        pages = sorted({str(item.get("page_id") or "-") for item in results})
+        report_page = pages[0] if len(pages) == 1 else f"{len(pages)} pages"
+        report_dir = self.output_dir
+
+        if len(pages) == 1:
+            asset_dir = self._first_asset_dir(results)
+            if asset_dir is not None:
+                report_dir = asset_dir
+            else:
+                report_dir = self.output_dir / f"0001_{self._safe_name(report_page)}"
+
+        return report_dir / "regression_report.html", report_dir, report_page
+
+    @staticmethod
+    def _first_asset_dir(results: List[Dict[str, Any]]) -> Optional[Path]:
+        for item in results:
+            for key in ("legacy_screenshot", "new_screenshot", "diff_screenshot"):
+                value = item.get(key)
+                if value:
+                    return Path(value).resolve().parent
+        return None
+
+    def _render_result(self, item: Dict[str, Any], report_dir: Path) -> str:
         visual = item.get("visual") or {}
         diff_percent = visual.get("diff_percent")
         diff_text = "-" if diff_percent is None else f"{diff_percent:.4f}%"
@@ -1252,29 +1287,37 @@ class RegressionEngine:
         return f"""
 <section class="case">
   <div class="case-head">
-    <span class="status {html.escape(item.get('status', 'DIFF'))}">{html.escape(item.get('status', 'DIFF'))}</span>
-    <strong>{html.escape(str(item.get('page_id')))}</strong>
-    <span class="meta">risk={html.escape(str(item.get('risk')))} action={html.escape(str(item.get('action')))} diff={diff_text}</span>
+    <div class="case-title">
+      <span class="status {html.escape(item.get('status', 'DIFF'))}">{html.escape(item.get('status', 'DIFF'))}</span>
+      <strong>{html.escape(str(item.get('page_id')))}</strong>
+    </div>
+    <span class="meta">risk={html.escape(str(item.get('risk')))} / action={html.escape(str(item.get('action')))} / diff={diff_text}</span>
   </div>
   <div class="grid">
-    {self._figure('Legacy', item.get('legacy_screenshot'))}
-    {self._figure('New', item.get('new_screenshot'))}
-    {self._figure('Diff', item.get('diff_screenshot'))}
+    {self._figure('Legacy', item.get('legacy_screenshot'), report_dir)}
+    {self._figure('New', item.get('new_screenshot'), report_dir)}
+    {self._figure('Diff', item.get('diff_screenshot'), report_dir)}
   </div>
   <div class="details">
-    URL match: {item.get('url_match')} | Action type: {html.escape(str(action_type or '-'))}<br>
-    Legacy: {html.escape(str(item.get('legacy_url') or '-'))}<br>
-    New: {html.escape(str(item.get('new_url') or '-'))}<br>
-    Reason: {html.escape(str(reason))}<br>
+    <div class="detail-grid">
+      <b>URL match</b><span>{item.get('url_match')}</span>
+      <b>Action type</b><span>{html.escape(str(action_type or '-'))}</span>
+      <b>Legacy</b><span>{html.escape(str(item.get('legacy_url') or '-'))}</span>
+      <b>New</b><span>{html.escape(str(item.get('new_url') or '-'))}</span>
+      <b>Reason</b><span>{html.escape(str(reason))}</span>
+    </div>
     {self._render_diagnostics(item)}
   </div>
 </section>"""
 
-    def _figure(self, label: str, path: Optional[str]) -> str:
+    def _figure(self, label: str, path: Optional[str], report_dir: Path) -> str:
         if not path:
             return f"<figure><figcaption>{html.escape(label)}</figcaption><div class=\"meta\">No screenshot</div></figure>"
-        rel = Path(path).resolve().relative_to(self.output_dir.resolve())
-        return f'<figure><figcaption>{html.escape(label)}</figcaption><img src="{html.escape(str(rel))}" alt="{html.escape(label)}"></figure>'
+        try:
+            rel = Path(path).resolve().relative_to(report_dir.resolve())
+        except ValueError:
+            rel = Path(path).resolve()
+        return f'<figure><figcaption>{html.escape(label)}</figcaption><img src="{html.escape(rel.as_posix())}" alt="{html.escape(label)}"></figure>'
 
     @staticmethod
     def _blocked_reason(item: Dict[str, Any]) -> Optional[str]:
@@ -1387,7 +1430,12 @@ class RegressionEngine:
             "new_blocked_reason": new_action.get("reason"),
             "frame_candidates": item.get("frame_candidates"),
         }
-        return f'<div class="diag"><code>{html.escape(json.dumps(diagnostics, ensure_ascii=False, default=str, indent=2))}</code></div>'
+        return (
+            "<details class=\"diag\">"
+            "<summary>Diagnostics</summary>"
+            f"<code>{html.escape(json.dumps(diagnostics, ensure_ascii=False, default=str, indent=2))}</code>"
+            "</details>"
+        )
 
     def _dedupe_actions(self, actions: List[Dict[str, Any]]) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
         """

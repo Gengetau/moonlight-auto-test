@@ -329,6 +329,9 @@ def _resolve_upload_file_value(value: Optional[str], capture_dir: Optional[Union
         if env_path.exists():
             return str(env_path)
 
+    if raw in {"${UPLOAD_FILE}", "$UPLOAD_FILE", "UPLOAD_FILE"}:
+        return _default_upload_file(capture_dir)
+
     if raw:
         raw_path = Path(raw)
         if raw_path.exists():
