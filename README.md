@@ -108,7 +108,7 @@ python src/checklist_generator.py mappings/page_diff.json -o generated/migration
 ```
 如果输入包含 `page_mappings`，Excel 会额外生成：
 - `PageProfile`: 每个页面的结构画像与 capabilities。
-- 如果存在 `generated/valid/runtime_profile/<side>_<Target>_<route>.json`，`checklist_generator.py` 会优先用浏览器运行时 DOM 生成该目标页的 PageProfile；`PageProfile` sheet 中的 `profile_source` / `runtime_profile_path` 可确认来源。
+- 如果存在 `generated/valid/runtime_profile/<side>_<Target>_<route>.json`，`checklist_generator.py` 会优先用浏览器运行时 DOM 生成该目标页的 PageProfile；重新生成 checklist 时还会扫描 `generated/valid/runtime_profile/**/*.json`，把 page_mapping 中不存在但已经录制过的页面也追加生成最新 case。`PageProfile` sheet 中的 `profile_source` / `runtime_profile_path` 可确认来源。
 - `SkippedTemplates`: 没有生成的 fuzzy template 及跳过原因。
 
 这可以避免把搜索、结果表、下载、关闭窗口、上传 submit 等模板无差别套到所有页面上。
@@ -133,6 +133,25 @@ pytest tests/test_migration.py \
 ```
 `--force-route-map` 会在存在可用路径图时优先按 `usable_route_map*.json` 导航，而不是先尝试 URL 直达。
 `--upload-file` 可选；指定后，所有自动化上传动作会优先使用该真实本地文件，覆盖 checklist 或录制路径中的上传样本。未指定时仍使用 checklist 的 `test_data`，如果只有浏览器安全占位路径 `C:\fakepath\...`，工具会按文件名在 `test_data/upload` 下查找。
+
+本轮新增的回归参数：
+
+- `--regression-output-dir`: 指定截图和 `regression_report.html` 输出根目录，GUI 默认使用 `output/regression/<browser>`。
+- `--upload-profile-config`: 读取 GUI 生成的多上传文件 profile JSON，按页面、case type、locator 选择真实上传文件。
+- `--include-semi-auto`: 允许执行 checklist 中 `automation_mode=semi-auto` 的用例。
+- `--include-destructive`: 允许执行 `destructive=true` 的增删改查类用例，默认关闭。
+- `--include-negative` / `--negative-profile`: 允许执行负面/错误场景，默认关闭。
+
+多页面队列执行：使用 `--target-pages` 传入逗号、分号或换行分隔的 JSP 列表。工具会按顺序逐页执行，每个目标页重新创建 Legacy/New 页面，最后汇总结果。
+```bash
+pytest tests/test_migration.py \
+  --run-migration \
+  --test-browser=chrome_port \
+  --target-pages=ProjectListUploadDisp.jsp,ProjectListUploadErr.jsp \
+  --login-entry=dev-admin \
+  --force-route-map \
+  --route-map-path=generated/valid/route
+```
 
 半自动接管模式 (Takeover Mode)：当旧系统由于 Frame 嵌套或 Session 状态复杂导致直接 `page.goto` 白屏时，由主祭人工操作浏览器至目标页面，自动化脚本负责后续接管。
 ```bash
@@ -186,8 +205,23 @@ pytest tests/test_migration.py \
 - `--auto-login`: 启用自动填账号密码并点击登录；默认不启用。
 - `--upload-file <path>`: 路径验证或人工录制中遇到上传控件时，回放阶段使用这个真实本地文件；用于避免浏览器只暴露 `C:\fakepath\...`。
 - `--runtime-profile-dir <path>`: 路径验证到达目标页后保存浏览器真实 DOM 画像；默认 `generated\valid\runtime_profile`，生成 checklist 时会自动优先读取。
+- checklist 生成时默认扫描 `generated\valid\runtime_profile` 下已有 JSON 并追加这些页面的最新 case；如需关闭，使用 `checklist_generator.py --no-runtime-profile-dir`，如需指定目录，使用 `--runtime-profile-dir <path>`。
+- `--manual-route`: 不依赖静态候选路径，从入口开始全程人工录制一条可回放路径。
 
 人工介入时，工具会在页面中录制 `click`、`input/change`、`submit` 等事件，并写入 `usable_route_map*.json` 的 `manual_replay`。后续回归使用 route map 时会优先回放这些人工操作。旧的 route map 没有录制数据，如需启用该能力，需要重新验证对应路径。
+
+如果 struts-tracer 因常量、JS 函数或动态菜单导致候选路径为 0，`route_map_runner` 在 `--manual-data` 且指定 `--target` 时会自动进入全程人工录制。也可以显式使用：
+```powershell
+.\venv\Scripts\python.exe -m src.route_map_runner `
+  --target ProjectListUploadDisp.jsp `
+  --side legacy `
+  --login-entry dev-admin `
+  --browser chrome_port `
+  --output generated\valid\route\usable_route_map_legacy_ProjectListUploadDisp.json `
+  --manual-data `
+  --manual-route
+```
+录制时请在浏览器里从入口完整操作到目标页面，确认页面状态正确后回到终端按 Enter 保存。保存后的 route map 会以 `manual_route/full_route` 形式回放整条路径。
 
 如果已经有全量 `generated\valid\route\route_candidates.json`，也可以不重新生成候选，直接按目标页面过滤验证：
 ```powershell
@@ -224,7 +258,7 @@ Windows PowerShell:
    - `Export Excel Checklist`: 根据映射结果导出自动化测试清单，输出 `generated\valid\migration_checklist.xlsx`。
 
 2. `Regression`
-   - `Target Page`: 可选，填写单个 JSP 文件名时只跑该页面，例如 `ProjectMemberUploadDisp.jsp`。
+   - `Target Page Queue`: 可选，每行填写一个 JSP 文件名，或用逗号/分号分隔；为空时执行全量或风险过滤回归。
    - `Login Entry`: 从 `.env` 中配置的入口名生成下拉框。
    - `Browser`: 选择测试浏览器，支持 `Chrome portable`、`Microsoft Edge`、`Firefox`。
    - `Checklist Path`: 自动化测试清单，默认 `generated\valid\migration_checklist.xlsx`。文件存在时会传给 pytest，优先执行 Excel 中的 `automation_mode=auto` 用例。
@@ -243,6 +277,7 @@ Windows PowerShell:
    - `Login Entry`: 从 `.env` 中配置的入口名生成下拉框。验证路径时会传给 `route_map_runner`，避免命令在浏览器启动前停在入口选择。
    - `Browser`: 选择路径验证浏览器，支持 `Chrome portable`、`Microsoft Edge`、`Firefox`。
    - `Auto Login`: 勾选后打开入口页时自动填写 `.env` 中的测试账号密码；不勾选时，遇到登录页会等待人工登录。
+   - `Manual Full Route`: 不使用静态候选路径，从入口开始全程人工录制一条可回放路径。
    - `Use Upload File` / `Upload File`: 路径验证需要上传数据时，勾选并选择真实本地文件，录制出的 `manual_replay` 会使用该文件路径。
    - `Verify Selected Route`: 验证候选路径是否可实际到达，输出 `generated\valid\route\usable_route_map_<side>_<Target>.json`。
 
@@ -266,18 +301,20 @@ Windows PowerShell:
 .\venv\Scripts\python.exe -m pip install -r requirements.txt
 ```
 
-Web 指挥台包含四个页签：
+Web 指挥台包含四个页签。本轮增强入口以 Streamlit `src/gui.py` 为主，Tk 桌面 GUI 暂不追加同等队列配置：
 
-- `Regression`: 与原生 GUI 的回归页一致，勾选 `Use Upload File` 后可上传一个文件作为本次自动化的上传数据，输出 `output\gui_report.html`。
-- 单页面回归的详细报告会写入该页面截图目录，例如 `output\regression\0001_ProjectListUploadDisp.jsp\regression_report.html`，方便和截图一起查看。
+- `Regression`: `Target Page Queue` 支持逐页队列执行；每个页面都可以单独设置 JSP、登录入口、浏览器、checklist、route map、手工接管、semi-auto/destructive/negative 开关和上传文件 profile。GUI 会为每个 enabled page 生成一条独立 pytest command 顺序执行。
+- GUI pytest-html 输出到 `output\gui\<browser>\<page>\gui_report.html`；截图和页面报告输出到 `output\regression\<browser>\<page_folder>\regression_report.html`，并和截图放在同一目录。
+- `Target JSP` 支持“候选下拉 + 自由输入”。候选来源包括 `generated\valid\page_mapping.json`、route map catalog 和最近页面报告；选择候选后会展示 entry/action、risk、route map 是否存在。
+- 上传配置支持页面默认文件和多个 upload profile。runtime 优先级为 checklist 有效 `test_data` > case-specific profile > page default profile > `--upload-file` > 默认测试数据；`${UPLOAD_FILE}`、`${UPLOAD_INVALID_FILE}`、`C:\fakepath\...` 会视为占位继续向后解析真实文件。
 - `Route Mapping`: 先生成候选路径，再验证 `legacy` 或 `new` 的可用路径；`Target JSP` 默认留空，`Login Entry` 从 `.env` 入口列表中选择；验证页也支持 `Use Upload File`。
 - Streamlit 版路径验证成功后会保存 runtime profile，并在存在 `generated\valid\page_mapping.json` 时自动重新生成 `generated\valid\migration_checklist.xlsx`。
 - `Scanner & Mapper`: 执行 JSP 扫描、映射生成与 Excel checklist 导出。Streamlit 版在 `Generate Mapping` 后默认自动生成 `generated\valid\migration_checklist.xlsx`，也可以单独点击 `Export Excel Checklist`。
 - `Analysis`: 读取 `generated\valid\page_mapping.json`，展示风险分布和页面列表。
 
-日常本地排查建议优先使用原生 GUI；需要图表概览或远程共享时再使用 Streamlit。
+本轮新增的 per-page 队列、上传 profile、浏览器隔离输出等能力优先在 Streamlit 中使用；原生 GUI 仍保留基础本地排查能力。
 
-关于 Edge IE 模式：Playwright 无法像普通浏览器参数一样可靠地开启 IE mode。当前 GUI 不单独提供 `IE mode` 选项；如果公司电脑已经通过 Edge 企业策略配置了 IE mode site list，可以选择 `Microsoft Edge`，实际是否进入 IE mode 由 Edge 策略决定。
+关于 Edge IE 模式：Playwright 无法像普通浏览器参数一样可靠地开启 IE mode。手工在普通 Edge 窗口里启用的 IE mode 站点设置通常不会带到 Playwright 启动的临时自动化 profile 中。当前 GUI 不单独提供 `IE mode` 选项；如果公司电脑已经通过 Edge 企业策略配置了 IE mode site list，可以选择 `Microsoft Edge`，实际是否进入 IE mode 由 Edge 策略决定。即使进入 IE mode，页面 DOM 也可能不再是 Chromium DOM，Playwright 对这类页面的自动化能力有限，需要单独评估。
 
 ---
 

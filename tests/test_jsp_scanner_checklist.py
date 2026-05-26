@@ -1,4 +1,6 @@
-from src.checklist_generator import generate_cases, page_entries, universal_checklist_markdown_lines, write_excel
+import json
+
+from src.checklist_generator import generate_cases, page_entries, plan_page_specific_cases, universal_checklist_markdown_lines, write_excel
 from src.jsp_scanner import scan_jsp_source
 
 
@@ -180,7 +182,7 @@ def test_page_mapping_input_uses_full_mappings_and_missing_elements():
     assert {case.page for case in cases} == {"MatchedA.jsp", "MatchedB.jsp", "MatchedC.jsp"}
     assert {case.case_type for case in cases} == {"initial_display"}
     assert all(case.automation_mode == "auto" for case in cases)
-    assert all(case.generated_by == "PageCasePlanner" for case in cases)
+    assert all(case.generated_by in {"PageCasePlanner", "CaseExpansionRules"} for case in cases)
 
 
 def test_universal_checklist_lines_include_xls_categories():
@@ -214,3 +216,51 @@ def test_page_specific_excel_contains_profile_and_skipped_sheets(tmp_path):
     assert "Checklist" in workbook.sheetnames
     assert "PageProfile" in workbook.sheetnames
     assert "SkippedTemplates" in workbook.sheetnames
+
+
+def test_checklist_generation_appends_existing_runtime_profile_pages(tmp_path):
+    runtime_dir = tmp_path / "runtime_profile"
+    runtime_dir.mkdir()
+    profile_path = runtime_dir / "legacy_runtimeupload_route1.json"
+    profile_path.write_text(
+        json.dumps(
+            {
+                "schema": "moonlight.runtime_page_profile.v1",
+                "page_id": "RuntimeUpload.jsp",
+                "target_page": "RuntimeUpload.jsp",
+                "route_id": "route1",
+                "side": "legacy",
+                "controls": [
+                    {
+                        "tag": "input",
+                        "type": "file",
+                        "name": "uploadFile",
+                        "selector": "input[name=\"uploadFile\"][type=\"file\"]",
+                        "visible": True,
+                    },
+                    {
+                        "tag": "input",
+                        "type": "button",
+                        "name": "entry",
+                        "value": "Upload",
+                        "onclick": "fnSubmit('/RuntimeUpload.do')",
+                        "selector": "input[name=\"entry\"][type=\"button\"]",
+                        "visible": True,
+                    },
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    scan_data = {"page_mappings": [{"page_id": "StaticOnly.jsp", "elements": []}]}
+
+    without_runtime = generate_cases(scan_data, runtime_profile_dir=runtime_dir, include_runtime_profile_dir=False)
+    with_runtime = generate_cases(scan_data, runtime_profile_dir=runtime_dir, include_runtime_profile_dir=True)
+    _, _, profiles = plan_page_specific_cases(scan_data, runtime_profile_dir=runtime_dir, include_runtime_profile_dir=True)
+
+    assert {case.page for case in without_runtime} == {"StaticOnly.jsp"}
+    assert {"StaticOnly.jsp", "RuntimeUpload.jsp"}.issubset({case.page for case in with_runtime})
+    assert any(case.page == "RuntimeUpload.jsp" and case.case_type == "upload_submit" for case in with_runtime)
+    runtime_profiles = [profile for profile in profiles if profile.get("page_id") == "RuntimeUpload.jsp"]
+    assert runtime_profiles
+    assert runtime_profiles[0]["runtime_profile_path"] == str(profile_path)

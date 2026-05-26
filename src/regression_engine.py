@@ -1,8 +1,10 @@
 import html
 import json
+import os
 import re
 import time
 import glob
+import fnmatch
 from collections import Counter
 from pathlib import Path, PureWindowsPath
 from typing import Any, Dict, Iterable, List, Optional, Tuple
@@ -14,6 +16,15 @@ from src.action_executor import _capture_state, execute_action, infer_semantic_a
 from src.assert_engine import compare_visual_screenshot
 from src.config_parser import Config
 from src.route_navigator import RouteMapCatalog, RouteNavigator
+
+
+NEGATIVE_CASE_TYPES = {
+    "negative_js_error",
+    "negative_network_abort",
+    "negative_http_500",
+    "negative_invalid_input",
+    "negative_file_upload",
+}
 
 
 def _judge_compare_status(
@@ -80,9 +91,16 @@ class RegressionEngine:
         route_map_path: Optional[str] = None,
         force_route_map: bool = False,
         upload_file: Optional[str] = None,
+        upload_profile_config: Optional[str] = None,
+        include_semi_auto: bool = False,
+        include_destructive: bool = False,
+        include_negative: bool = False,
+        negative_profile: Optional[str] = None,
     ) -> None:
         self.mapping_path = Path(mapping_path)
-        self.checklist_path = Path(checklist_path) if checklist_path else None
+        self.checklist_path = self._resolve_checklist_path(checklist_path)
+        self._last_checklist_debug: Dict[str, Any] = {}
+        self._checklist_case_rows: Dict[str, List[Dict[str, Any]]] = {}
         self.legacy_base_url = legacy_base_url or Config.LEGACY_URL
         self.new_base_url = new_base_url or Config.NEW_URL
         self.output_dir = Path(output_dir)
@@ -90,8 +108,43 @@ class RegressionEngine:
         self.timeout = timeout
         self.force_route_map = force_route_map
         self.upload_file = str(upload_file) if upload_file else None
+        self.upload_profiles = self._load_upload_profiles(upload_profile_config)
+        self.include_semi_auto = include_semi_auto
+        self.include_destructive = include_destructive
+        self.include_negative = include_negative
+        self.negative_profiles = {
+            item.strip().lower()
+            for item in re.split(r"[\r\n,;]+", str(negative_profile or ""))
+            if item.strip()
+        }
+        self.current_browser_name = ""
         self.mapping = self.load_mapping()
         self.route_map_catalog = RouteMapCatalog(self._route_map_paths(route_map_path))
+
+    @staticmethod
+    def _resolve_checklist_path(checklist_path: Optional[str]) -> Optional[Path]:
+        if checklist_path:
+            return Path(checklist_path)
+
+        default_path = Path("generated/valid/migration_checklist.xlsx")
+        return default_path if default_path.exists() else None
+
+    @staticmethod
+    def _load_upload_profiles(path: Optional[str]) -> List[Dict[str, Any]]:
+        if not path:
+            return []
+        profile_path = Path(path)
+        if not profile_path.exists():
+            return []
+        try:
+            payload = json.loads(profile_path.read_text(encoding="utf-8"))
+        except Exception:
+            return []
+        if isinstance(payload, list):
+            profiles = payload
+        else:
+            profiles = payload.get("upload_profiles") if isinstance(payload, dict) else []
+        return [item for item in profiles or [] if isinstance(item, dict)]
 
     def load_mapping(self) -> Dict[str, Any]:
         if not self.mapping_path.exists():
@@ -200,6 +253,7 @@ class RegressionEngine:
         browser_name: str = "chrome",
         manual: bool = False,
     ) -> Dict[str, Any]:
+        self.current_browser_name = browser_name
         self.output_dir.mkdir(parents=True, exist_ok=True)
         results: List[Dict[str, Any]] = []
         for page_index, mapping in enumerate(
@@ -608,7 +662,7 @@ class RegressionEngine:
         they must be combined with related inputs/files into a scenario such as
         upload_submit.
         """
-        checklist_cases = self._load_checklist_cases(page_id)
+        checklist_cases = self._load_checklist_cases(page_id, mapping)
         if checklist_cases:
             return checklist_cases, "checklist"
 
@@ -648,7 +702,7 @@ class RegressionEngine:
 
         return self._dedupe_runtime_actions(actions), "mapping_fallback"
 
-    def _load_checklist_cases(self, page_id: str) -> List[Dict[str, Any]]:
+    def _load_checklist_cases(self, page_id: str, mapping: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
         """
         Load executable cases from generated migration checklist.
 
@@ -656,22 +710,41 @@ class RegressionEngine:
         machine-readable columns, it returns [] and the engine falls back to
         mapping executable_cases/full_action_steps.
         """
-        if not self.checklist_path or not self.checklist_path.exists():
+        target_name = self._target_page_name(page_id)
+        debug: Dict[str, Any] = {
+            "target": target_name,
+            "path": str(self.checklist_path) if self.checklist_path else None,
+            "status": "not_configured",
+        }
+        self._last_checklist_debug = debug
+        coverage_rows: List[Dict[str, Any]] = []
+        self._checklist_case_rows[target_name] = coverage_rows
+
+        if not self.checklist_path:
+            return []
+
+        if not self.checklist_path.exists():
+            debug["status"] = "missing_file"
             return []
 
         try:
             from openpyxl import load_workbook
-        except Exception:
+        except Exception as exc:
+            debug["status"] = "openpyxl_unavailable"
+            debug["error"] = str(exc)
             return []
 
         try:
             wb = load_workbook(self.checklist_path, data_only=True, read_only=True)
             sheet = wb["Checklist"] if "Checklist" in wb.sheetnames else wb[wb.sheetnames[0]]
             rows = list(sheet.iter_rows(values_only=True))
-        except Exception:
+        except Exception as exc:
+            debug["status"] = "read_error"
+            debug["error"] = str(exc)
             return []
 
         if not rows:
+            debug["status"] = "empty_sheet"
             return []
 
         headers = [str(value or "").strip() for value in rows[0]]
@@ -693,14 +766,55 @@ class RegressionEngine:
         new_locator_col = col("new_locator", "new selector", "移行後locator")
         submit_locator_col = col("submit_locator", "submit selector", "提交locator")
         test_data_col = col("test_data", "value", "测试数据", "テストデータ")
+        operation_col = col("operation", "操作", "操作内容")
+        main_step_col = col("main_step", "main step")
+        expected_type_col = col("expected_type", "期待種別")
+        destructive_col = col("destructive", "破壊的", "destructive?")
+        generated_by_col = col("generated_by")
+        enabled_col = col("enabled", "enable", "有效", "有効")
         case_id_col = col("case_id", "id", "no", "項目no")
-        title_col = col("title", "test_viewpoint", "テスト観点", "测试项目", "用例")
+        title_col = col("title", "test_title", "test_viewpoint", "テスト観点", "测试项目", "用例")
+
+        debug["sheet"] = sheet.title
+        debug["columns"] = {
+            "page_col": page_col,
+            "mode_col": mode_col,
+            "case_type_col": case_type_col,
+            "action_type_col": action_type_col,
+            "locator_col": locator_col,
+            "submit_locator_col": submit_locator_col,
+            "operation_col": operation_col,
+            "main_step_col": main_step_col,
+            "expected_type_col": expected_type_col,
+            "destructive_col": destructive_col,
+            "enabled_col": enabled_col,
+        }
 
         if page_col is None or mode_col is None:
+            debug["status"] = "missing_required_columns"
             return []
 
-        target_name = self._target_page_name(page_id)
         cases: List[Dict[str, Any]] = []
+        stats: Counter[str] = Counter()
+        samples: List[Dict[str, str]] = []
+        allowed_modes = {"auto", "automated", "true", "yes", "y", "1", "自動", "自动"}
+        semi_auto_modes = {"semi-auto", "semiauto", "semi auto", "半自动", "半自動"}
+
+        def add_sample(kind: str, **values: str) -> None:
+            if len(samples) < 5:
+                samples.append({"kind": kind, **values})
+
+        def coverage_row(row_page: str, case_id: str, test_title: str, automation_mode: str, destructive_value: str) -> Dict[str, Any]:
+            row_info = {
+                "page_id": row_page,
+                "case_id": case_id,
+                "test_title": test_title,
+                "automation_mode": automation_mode,
+                "destructive": destructive_value or "false",
+                "excluded_reason": "",
+            }
+            coverage_rows.append(row_info)
+            return row_info
 
         for row in rows[1:]:
             def cell(idx: Optional[int]) -> str:
@@ -709,31 +823,99 @@ class RegressionEngine:
                 value = row[idx]
                 return "" if value is None else str(value).strip()
 
-            if self._target_page_name(cell(page_col)) != target_name:
+            row_page = cell(page_col)
+            if self._target_page_name(row_page) != target_name:
+                stats["page_not_matched"] += 1
                 continue
 
-            mode = cell(mode_col).lower()
-            if mode not in {"auto", "automated", "true", "yes", "y", "1", "自動", "自动"}:
+            stats["page_matched"] += 1
+            case_id = cell(case_id_col)
+            test_title = cell(title_col)
+            mode = cell(mode_col)
+            destructive_value = cell(destructive_col) or "false"
+            checklist_coverage = coverage_row(row_page, case_id, test_title, mode, destructive_value)
+
+            enabled = cell(enabled_col).lower()
+            if enabled in {"false", "0", "no", "n", "disabled", "off", "無効", "否"}:
+                stats["disabled"] += 1
+                add_sample("disabled", page=row_page, enabled=enabled)
+                checklist_coverage["excluded_reason"] = f"enabled={enabled or '<blank>'}"
                 continue
+
+            mode = mode.lower()
+            mode_allowed = mode in allowed_modes or mode.startswith("auto")
+            if not mode_allowed and self.include_semi_auto:
+                mode_allowed = mode in semi_auto_modes or mode.startswith("semi")
+            if not mode_allowed:
+                stats[f"mode_rejected:{mode or '<blank>'}"] += 1
+                add_sample("mode_rejected", page=row_page, mode=mode, case_id=case_id)
+                if mode in semi_auto_modes or mode.startswith("semi"):
+                    checklist_coverage["excluded_reason"] = f"automation_mode={mode or '<blank>'}; requires --include-semi-auto"
+                else:
+                    checklist_coverage["excluded_reason"] = f"automation_mode={mode or '<blank>'} is not executable"
+                continue
+
+            stats["auto_matched" if mode.startswith("auto") or mode in allowed_modes else "semi_auto_matched"] += 1
 
             case_type = cell(case_type_col) or cell(action_type_col) or "click"
             action_type = cell(action_type_col) or case_type
             action_lower = str(action_type or case_type).strip().lower()
+            case_lower = str(case_type or action_type).strip().lower()
             locator = cell(locator_col)
             legacy_locator = cell(legacy_locator_col) or locator
             new_locator = cell(new_locator_col) or locator or legacy_locator
             submit_locator = cell(submit_locator_col)
             test_data = cell(test_data_col)
-            label = cell(title_col) or cell(case_id_col) or case_type
+            label = test_title or case_id or case_type
+            operation = cell(operation_col)
+            main_step_text = cell(main_step_col)
+            expected_type = cell(expected_type_col)
+            destructive = self._truthy(destructive_value)
+            negative_case = self._is_negative_case(case_type, action_type)
 
-            if action_type == "upload_submit" or case_type == "upload_submit":
+            if destructive and not self.include_destructive:
+                stats["destructive_rejected"] += 1
+                add_sample("destructive_rejected", page=row_page, case_id=case_id, case_type=case_type)
+                checklist_coverage["excluded_reason"] = "destructive=true; requires --include-destructive"
+                continue
+
+            if negative_case and not self.include_negative:
+                stats["negative_rejected"] += 1
+                add_sample("negative_rejected", page=row_page, case_id=case_id, case_type=case_type)
+                checklist_coverage["excluded_reason"] = "negative case; requires --include-negative"
+                continue
+            if negative_case and self.include_negative and not self._negative_profile_enabled(case_type, action_type, cell(generated_by_col)):
+                stats["negative_profile_rejected"] += 1
+                add_sample("negative_profile_rejected", page=row_page, case_id=case_id, case_type=case_type)
+                checklist_coverage["excluded_reason"] = "negative case; --negative-profile did not match"
+                continue
+
+            is_upload_submit = self._is_upload_submit_case(
+                case_type=case_type,
+                action_type=action_type,
+                label=label,
+                operation=operation,
+                submit_locator=submit_locator,
+                main_step_text=main_step_text,
+            )
+
+            if is_upload_submit:
                 if not locator and not legacy_locator:
+                    stats["locator_missing_upload"] += 1
+                    add_sample("locator_missing_upload", page=row_page, case_id=case_id, mode=mode)
+                    checklist_coverage["excluded_reason"] = "upload_submit case has no upload locator"
                     continue
+                main_step = self._parse_step_json(main_step_text)
+                main_locator = submit_locator or main_step.get("submit_locator") or main_step.get("locator") or self._submit_locator_from_mapping(mapping, upload_locator=locator)
+                main_action_type = main_step.get("action_type") or ("click" if main_locator and not str(main_locator).strip().lower().startswith("form") else "submit")
                 case: Dict[str, Any] = {
                     "case_type": "upload_submit",
                     "action_type": "upload_submit",
                     "label": label,
+                    "page_id": row_page,
                     "source": "checklist",
+                    "expected_type": expected_type,
+                    "destructive": str(destructive).lower(),
                     "pre_steps": [
                         {
                             "action_type": "upload",
@@ -744,19 +926,24 @@ class RegressionEngine:
                         }
                     ],
                     "main_step": {
-                        "action_type": "submit",
-                        "legacy_locator": submit_locator,
-                        "new_locator": submit_locator,
-                        "locator": submit_locator,
+                        "action_type": main_action_type,
+                        "legacy_locator": main_locator,
+                        "new_locator": main_locator,
+                        "locator": main_locator,
+                        "submit_locator": submit_locator,
                     },
                 }
                 cases.append(self._normalize_action_case(case))
+                stats["loadable_upload_submit"] += 1
             else:
-                if action_lower in {"snapshot", "page_snapshot", "visual_check", "wait"}:
+                if action_lower in {"snapshot", "page_snapshot", "visual_check", "wait", "initial_display"}:
                     locator = locator or "__page__"
                     legacy_locator = legacy_locator or locator
                     new_locator = new_locator or locator
                 elif not legacy_locator and not new_locator:
+                    stats["locator_missing"] += 1
+                    add_sample("locator_missing", page=row_page, case_id=case_id, mode=mode)
+                    checklist_coverage["excluded_reason"] = "locator is missing"
                     continue
                 cases.append(
                     self._normalize_action_case(
@@ -764,16 +951,90 @@ class RegressionEngine:
                             "case_type": case_type,
                             "action_type": action_type,
                             "label": label,
+                            "page_id": row_page,
                             "legacy_locator": legacy_locator,
                             "new_locator": new_locator or legacy_locator,
                             "locator": locator,
                             "value": test_data,
+                            "expected_type": expected_type,
+                            "destructive": str(destructive).lower(),
                             "source": "checklist",
                         }
                     )
                 )
+                stats["loadable_action"] += 1
 
+        debug["status"] = "loaded" if cases else "no_cases"
+        debug["loaded"] = len(cases)
+        debug["stats"] = dict(stats)
+        debug["samples"] = samples
         return cases
+
+    @staticmethod
+    def _truthy(value: Any) -> bool:
+        return str(value or "").strip().lower() in {"true", "1", "yes", "y", "on", "破壊", "対象", "是"}
+
+    @staticmethod
+    def _is_negative_case(case_type: Any, action_type: Any) -> bool:
+        text = " ".join(str(value or "").lower() for value in (case_type, action_type))
+        return "negative" in text or text.startswith("error_") or any(case in text for case in NEGATIVE_CASE_TYPES)
+
+    def _negative_profile_enabled(self, case_type: Any, action_type: Any, generated_by: Any = "") -> bool:
+        if not self.negative_profiles:
+            return False
+        haystack = " ".join(str(value or "").lower() for value in (case_type, action_type, generated_by))
+        return any(profile in haystack for profile in self.negative_profiles)
+
+    @staticmethod
+    def _is_upload_submit_case(
+        *,
+        case_type: Any,
+        action_type: Any,
+        label: Any,
+        operation: Any,
+        submit_locator: Any,
+        main_step_text: Any,
+    ) -> bool:
+        case_lower = str(case_type or "").lower()
+        action_lower = str(action_type or "").lower()
+        label_text = str(label or "")
+        operation_lower = str(operation or "").lower()
+        main_step_lower = str(main_step_text or "").lower()
+        if case_lower == "upload_submit" or action_lower == "upload_submit":
+            return True
+        if "アップロード確認" in label_text:
+            return True
+        if submit_locator:
+            return True
+        upload_tokens = ("upload", "アップロード", "file", "ファイル")
+        submit_tokens = ("submit", "click", "確認", "送信", "押下")
+        if any(token in operation_lower for token in upload_tokens) and any(token in operation_lower for token in submit_tokens):
+            return True
+        if any(token in main_step_lower for token in ("submit", "click", "submit_locator")):
+            return True
+        return False
+
+    @staticmethod
+    def _parse_step_json(value: Any) -> Dict[str, Any]:
+        if not value:
+            return {}
+        try:
+            parsed = json.loads(str(value))
+        except Exception:
+            return {}
+        return parsed if isinstance(parsed, dict) else {}
+
+    @staticmethod
+    def _submit_locator_from_mapping(mapping: Optional[Dict[str, Any]], upload_locator: Any = "") -> str:
+        if not mapping:
+            return ""
+        candidates = list(mapping.get("executable_cases") or []) + list(mapping.get("locator_changes") or []) + list(mapping.get("full_action_steps") or [])
+        for item in candidates:
+            locator = item.get("locator") or item.get("legacy_locator") or item.get("new_locator")
+            evidence = " ".join(str(item.get(key) or "").lower() for key in ("action_hint", "action_type", "kind", "label", "raw", "semantic_key", "locator"))
+            if locator and any(token in evidence for token in ("submit", "upload", "confirm", "確認", "アップロード")):
+                return str(locator)
+        return ""
 
     def _normalize_action_case(self, action: Dict[str, Any]) -> Dict[str, Any]:
         normalized = dict(action)
@@ -820,6 +1081,78 @@ class RegressionEngine:
         side_key = f"{side}_locator"
         return action.get(side_key) or action.get("locator") or action.get("selector")
 
+    @staticmethod
+    def _upload_value_is_placeholder(value: Any) -> bool:
+        text = str(value or "").strip()
+        if not text:
+            return True
+        lowered = text.lower()
+        return (
+            lowered.startswith("${")
+            or lowered in {"$upload_file", "upload_file"}
+            or "fakepath" in lowered
+            or lowered in {"${upload_invalid_file}", "${upload_empty_file}", "${upload_large_file}"}
+        )
+
+    @staticmethod
+    def _existing_upload_value(value: Any) -> Optional[Any]:
+        if isinstance(value, list):
+            paths = [str(item) for item in value if Path(str(item)).exists()]
+            return paths if paths and len(paths) == len(value) else None
+        text = str(value or "").strip()
+        if text and Path(text).exists():
+            return text
+        return None
+
+    def _resolve_upload_value(self, value: Any, action_case: Dict[str, Any], step: Dict[str, Any], locator: Any) -> Any:
+        existing = self._existing_upload_value(value)
+        if existing is not None:
+            return existing
+
+        profile_value = self._upload_value_from_profiles(action_case, step, locator)
+        if profile_value:
+            return profile_value
+
+        if self.upload_file:
+            return self.upload_file
+
+        return "" if self._upload_value_is_placeholder(value) else value
+
+    def _upload_value_from_profiles(self, action_case: Dict[str, Any], step: Dict[str, Any], locator: Any) -> Optional[Any]:
+        page_id = str(action_case.get("page_id") or "").lower()
+        case_type = str(action_case.get("case_type") or step.get("case_type") or step.get("action_type") or "").lower()
+        locator_text = str(locator or step.get("locator") or "").strip()
+        negative_case = self._is_negative_case(action_case.get("case_type"), step.get("action_type") or action_case.get("action_type"))
+
+        def matches(profile: Dict[str, Any]) -> bool:
+            profile_negative = self._truthy(profile.get("negative"))
+            if profile_negative and not negative_case:
+                return False
+            page_patterns = profile.get("page_patterns") or []
+            if page_patterns and not any(fnmatch.fnmatch(page_id, str(pattern).lower()) for pattern in page_patterns):
+                return False
+            case_types = [str(item).lower() for item in profile.get("case_types") or [] if str(item).strip()]
+            if case_types and not any(fnmatch.fnmatch(case_type, pattern) for pattern in case_types):
+                return False
+            profile_locator = str(profile.get("locator") or "").strip()
+            if profile_locator and profile_locator != locator_text and profile_locator not in locator_text and locator_text not in profile_locator:
+                return False
+            return True
+
+        for profile in self.upload_profiles:
+            if not matches(profile):
+                continue
+            files = profile.get("files")
+            if isinstance(files, list):
+                existing = self._existing_upload_value(files)
+                if existing:
+                    return existing
+            file_value = profile.get("file")
+            existing = self._existing_upload_value(file_value)
+            if existing:
+                return existing
+        return None
+
     def _execute_action_case(
         self,
         page: Page,
@@ -851,10 +1184,17 @@ class RegressionEngine:
             action_type = step.get("action_type") or step.get("action_hint") or step.get("kind") or action_case.get("action_type") or "click"
             locator = self._action_side_locator(step, side)
             value = step.get("value") or step.get("test_data") or action_case.get("value")
+            if (
+                str(action_case.get("case_type") or "").lower() == "upload_submit"
+                and str(action_type or "").lower() == "submit"
+                and locator
+                and not str(locator).strip().lower().startswith("form")
+            ):
+                action_type = "click"
             semantic_action = infer_semantic_action(action_type, step)
             action_lower = str(action_type or semantic_action).strip().lower()
-            if semantic_action == "upload" and self.upload_file:
-                value = self.upload_file
+            if semantic_action == "upload":
+                value = self._resolve_upload_value(value, action_case, step, locator)
 
             if action_lower in {"snapshot", "page_snapshot", "visual_check", "wait"}:
                 result = {
@@ -907,7 +1247,8 @@ class RegressionEngine:
                     "locator": locator,
                     "status": result.get("status"),
                     "reason": result.get("reason"),
-                    "upload_file_override": bool(self.upload_file and semantic_action == "upload"),
+                    "upload_file": result.get("upload_file") if semantic_action == "upload" else None,
+                    "submit_locator": locator if str(action_case.get("case_type") or "").lower() == "upload_submit" and index == len(steps) else None,
                 }
             )
             last_result = result
@@ -927,6 +1268,14 @@ class RegressionEngine:
         last_result["case_type"] = action_case.get("case_type")
         last_result["executed_steps"] = executed
         return last_result
+
+    @staticmethod
+    def _executed_step_field(action_result: Dict[str, Any], field: str) -> Optional[Any]:
+        for step in action_result.get("executed_steps") or []:
+            value = step.get(field)
+            if value:
+                return value
+        return None
 
 
     def _run_captured_page_pair(
@@ -975,14 +1324,28 @@ class RegressionEngine:
             return results
 
         for blocked in mapping.get("missing_legacy_elements", []):
+            if self._is_dynamic_jsp_row_control(blocked):
+                print(
+                    f"[{page_id}] SKIP static dynamic row control: "
+                    + json.dumps(
+                        {
+                            "label": blocked.get("label") or blocked.get("key"),
+                            "locator": blocked.get("locator"),
+                            "reason": "covered by runtime/checklist CRUD action",
+                        },
+                        ensure_ascii=False,
+                    )
+                )
+                continue
+            missing_status, missing_reason = self._missing_legacy_element_status(blocked)
             results.append(
                 {
                     "page_id": page_id,
                     "risk": mapping.get("risk"),
                     "action": blocked.get("label") or blocked.get("key") or "missing_legacy_element",
                     "action_type": infer_semantic_action(blocked.get("action_hint") or blocked.get("kind"), blocked),
-                    "status": "BLOCKED",
-                    "reason": "Legacy element has no mapped New equivalent",
+                    "status": missing_status,
+                    "reason": missing_reason,
                     "legacy_locator": blocked.get("locator"),
                     "new_locator": None,
                     "legacy_screenshot": legacy_state.get("screenshot"),
@@ -1007,6 +1370,7 @@ class RegressionEngine:
                     "executable_cases": len(mapping.get("executable_cases", []) or []),
                     "full_action_steps": len(mapping.get("full_action_steps", []) or []),
                     "checklist_path": str(self.checklist_path) if self.checklist_path else None,
+                    "checklist_debug": self._last_checklist_debug,
                     "kinds": dict(Counter(action.get("kind") or action.get("case_type") or "unknown" for action in target_actions)),
                 },
                 ensure_ascii=False,
@@ -1060,6 +1424,13 @@ class RegressionEngine:
                 )
                 continue
 
+            database_operation = self._database_operation_kind(action_case, action_type, semantic_action)
+            legacy_before_state: Optional[Dict[str, Any]] = None
+            new_before_state: Optional[Dict[str, Any]] = None
+            if database_operation:
+                legacy_before_state = _capture_state(legacy_page, page_dir, f"{action_file_id}_legacy_before")
+                new_before_state = _capture_state(new_page, page_dir, f"{action_file_id}_new_before")
+
             legacy_action = self._execute_action_case(
                 legacy_page,
                 action_case,
@@ -1094,27 +1465,72 @@ class RegressionEngine:
                 )
             )
 
-            compared = self._compare_state(
-                page_id,
-                mapping.get("risk"),
-                action_name,
-                legacy_action.get("state") or {},
-                new_action.get("state") or {},
-                page_dir / f"{action_index:02d}_diff.png",
-                legacy_action=legacy_action,
-                new_action=new_action,
-                action_type=action_type,
-            )
+            if database_operation:
+                compared = self._compare_database_operation(
+                    page_id,
+                    mapping.get("risk"),
+                    action_name,
+                    action_type,
+                    database_operation,
+                    legacy_before_state or {},
+                    new_before_state or {},
+                    legacy_action,
+                    new_action,
+                    page_dir,
+                    action_file_id,
+                )
+            else:
+                compared = self._compare_state(
+                    page_id,
+                    mapping.get("risk"),
+                    action_name,
+                    legacy_action.get("state") or {},
+                    new_action.get("state") or {},
+                    page_dir / f"{action_index:02d}_diff.png",
+                    legacy_action=legacy_action,
+                    new_action=new_action,
+                    action_type=action_type,
+                )
             compared.update(
                 {
                     "action_type": action_type,
                     "legacy_locator": legacy_locator,
                     "new_locator": new_locator,
+                    "upload_file": self._executed_step_field(legacy_action, "upload_file")
+                    or self._executed_step_field(new_action, "upload_file"),
+                    "submit_locator": self._executed_step_field(legacy_action, "submit_locator")
+                    or self._executed_step_field(new_action, "submit_locator"),
+                    "legacy_after_url": legacy_action.get("after_url"),
+                    "new_after_url": new_action.get("after_url"),
+                    "navigation_detected": bool(legacy_action.get("navigation_detected") or new_action.get("navigation_detected")),
+                    "popup_detected": bool(legacy_action.get("popup_detected") or new_action.get("popup_detected")),
+                    "frame_changed": bool(legacy_action.get("frame_changed") or new_action.get("frame_changed")),
+                    "validation_only": bool(legacy_action.get("validation_only") and new_action.get("validation_only")),
                     "legacy_action": legacy_action,
                     "new_action": new_action,
                     "plan_source": plan_source,
                 }
             )
+            should_reopen_target = self._requires_target_reopen_after_action(
+                action_case,
+                action_type,
+                semantic_action,
+                legacy_action,
+                new_action,
+            )
+            if should_reopen_target:
+                legacy_page, new_page, reopen_result = self._reopen_target_pair(
+                    legacy_page,
+                    new_page,
+                    mapping,
+                    page_dir,
+                    browser_name,
+                    reason=f"after action {action_index}: {action_name}",
+                )
+                compared["post_action_reopen"] = reopen_result
+                if reopen_result.get("status") != "PASS":
+                    compared["status"] = "BLOCKED"
+                    compared["reason"] = reopen_result.get("reason") or "Failed to reopen target page after leaving/closing action."
             print(
                 f"[{page_id}] COMPARE result: "
                 + json.dumps(
@@ -1124,14 +1540,534 @@ class RegressionEngine:
                         "url_match": compared.get("url_match"),
                         "visual_status": (compared.get("visual") or {}).get("status"),
                         "visual_diff_percent": (compared.get("visual") or {}).get("diff_percent"),
+                        "comparison_mode": compared.get("comparison_mode"),
+                        "database_operation": compared.get("database_operation"),
+                        "post_action_reopen_status": (compared.get("post_action_reopen") or {}).get("status"),
                     },
                     ensure_ascii=False,
                     default=str,
                 )
             )
             results.append(compared)
+            if should_reopen_target and compared.get("status") == "BLOCKED":
+                break
 
         return results
+
+    @staticmethod
+    def _is_dynamic_jsp_row_control(blocked: Dict[str, Any]) -> bool:
+        evidence = " ".join(
+            str(blocked.get(key) or "")
+            for key in ("kind", "key", "label", "locator", "raw", "action", "semantic_key")
+        ).lower()
+        return (
+            ("<bean:" in evidence or "<logic:" in evidence or "bean:write" in evidence)
+            and any(marker in evidence for marker in ("delete", "削除", "button", "onclick"))
+        )
+
+    @staticmethod
+    def _missing_legacy_element_status(blocked: Dict[str, Any]) -> Tuple[str, str]:
+        return "BLOCKED", "Legacy element has no mapped New equivalent"
+
+    @staticmethod
+    def _database_operation_kind(action_case: Dict[str, Any], action_type: Any, semantic_action: Any) -> Optional[str]:
+        normalized_type = str(action_type or "").strip().lower()
+        if normalized_type in {
+            "snapshot",
+            "page_snapshot",
+            "visual_check",
+            "wait",
+            "initial_display",
+            "result_table_verify",
+            "download_template",
+            "download",
+            "close_window",
+            "back_action",
+            "link_navigation",
+            "upload_select",
+            "upload_without_file",
+        }:
+            return None
+
+        evidence = " ".join(
+            str(value or "")
+            for value in (
+                action_case.get("case_type"),
+                action_case.get("action_type"),
+                action_case.get("label"),
+                action_case.get("semantic_key"),
+                action_case.get("locator"),
+                action_case.get("legacy_locator"),
+                action_case.get("new_locator"),
+                action_case.get("submit_locator"),
+                action_case.get("expected_type"),
+                action_type,
+                semantic_action,
+                json.dumps(action_case.get("main_step") or {}, ensure_ascii=False, default=str),
+            )
+        ).lower()
+
+        english_words = lambda *words: re.search(r"\b(?:" + "|".join(re.escape(word) for word in words) + r")\b", evidence) is not None
+
+        if "delete_action" in evidence or "deletefile" in evidence or english_words("delete", "remove") or any(token in evidence for token in ("削除", "消去")):
+            return "delete"
+        if "search_normal" in evidence or english_words("search", "query", "find") or any(token in evidence for token in ("検索", "照会", "抽出")):
+            return "read"
+        if english_words("update", "modify", "edit", "save") or any(token in evidence for token in ("更新", "変更", "編集", "保存")):
+            return "update"
+        if "upload_submit" in evidence or english_words("create", "insert", "entry", "register", "add") or any(token in evidence for token in ("登録", "新規", "追加", "作成", "アップロード")):
+            return "create"
+        return None
+
+    def _compare_database_operation(
+        self,
+        page_id: str,
+        risk: str,
+        action: str,
+        action_type: Any,
+        operation_kind: str,
+        legacy_before: Dict[str, Any],
+        new_before: Dict[str, Any],
+        legacy_action: Dict[str, Any],
+        new_action: Dict[str, Any],
+        page_dir: Path,
+        action_file_id: str,
+    ) -> Dict[str, Any]:
+        legacy_after = legacy_action.get("state") or {}
+        new_after = new_action.get("state") or {}
+        legacy_delta = compare_visual_screenshot(
+            legacy_before.get("screenshot", ""),
+            legacy_after.get("screenshot", ""),
+            str(page_dir / f"{action_file_id}_legacy_before_after_diff.png"),
+            threshold_percent=self.visual_threshold_percent,
+        )
+        new_delta = compare_visual_screenshot(
+            new_before.get("screenshot", ""),
+            new_after.get("screenshot", ""),
+            str(page_dir / f"{action_file_id}_new_before_after_diff.png"),
+            threshold_percent=self.visual_threshold_percent,
+        )
+
+        legacy_changed = legacy_delta.get("status") == "DIFF"
+        new_changed = new_delta.get("status") == "DIFF"
+        legacy_url_changed = self._normalized_url(legacy_before.get("url", "")) != self._normalized_url(legacy_after.get("url", ""))
+        new_url_changed = self._normalized_url(new_before.get("url", "")) != self._normalized_url(new_after.get("url", ""))
+        transition_match = legacy_changed == new_changed and legacy_url_changed == new_url_changed
+
+        status = "PASS"
+        reason = "Database operation compared within each system before/after."
+        if "BLOCKED" in {legacy_action.get("status"), new_action.get("status"), legacy_delta.get("status"), new_delta.get("status")}:
+            status = "BLOCKED"
+            reason = "Database operation action or before/after capture was blocked."
+        elif not transition_match:
+            status = "DIFF"
+            reason = "Legacy/New database operation transition shape differs."
+        elif operation_kind in {"create", "update", "delete"} and not legacy_changed and not new_changed:
+            status = "WARN"
+            reason = "Database mutation completed but no visible before/after change was detected in either system."
+
+        max_diff = max(
+            [
+                float(value)
+                for value in (legacy_delta.get("diff_percent"), new_delta.get("diff_percent"))
+                if isinstance(value, (int, float))
+            ]
+            or [0.0]
+        )
+        aggregate_visual = {
+            "status": "PASS" if status in {"PASS", "WARN"} else status,
+            "diff_percent": max_diff,
+            "comparison_mode": "database_operation_before_after",
+            "legacy_delta": legacy_delta,
+            "new_delta": new_delta,
+        }
+
+        return {
+            "page_id": page_id,
+            "risk": risk,
+            "action": action,
+            "status": status,
+            "reason": reason,
+            "url_match": transition_match,
+            "dom_match": None,
+            "visual": aggregate_visual,
+            "comparison_mode": "database_operation_before_after",
+            "database_operation": operation_kind,
+            "legacy_url": legacy_after.get("url"),
+            "new_url": new_after.get("url"),
+            "legacy_screenshot": legacy_after.get("screenshot"),
+            "new_screenshot": new_after.get("screenshot"),
+            "diff_screenshot": None,
+            "legacy_before_screenshot": legacy_before.get("screenshot"),
+            "legacy_after_screenshot": legacy_after.get("screenshot"),
+            "legacy_diff_screenshot": legacy_delta.get("diff_screenshot"),
+            "new_before_screenshot": new_before.get("screenshot"),
+            "new_after_screenshot": new_after.get("screenshot"),
+            "new_diff_screenshot": new_delta.get("diff_screenshot"),
+            "legacy_before_url": legacy_before.get("url"),
+            "legacy_after_url": legacy_after.get("url"),
+            "new_before_url": new_before.get("url"),
+            "new_after_url": new_after.get("url"),
+            "legacy_delta": legacy_delta,
+            "new_delta": new_delta,
+            "legacy_delta_changed": legacy_changed,
+            "new_delta_changed": new_changed,
+            "legacy_url_changed": legacy_url_changed,
+            "new_url_changed": new_url_changed,
+            "legacy_frame": legacy_after.get("target_frame"),
+            "new_frame": new_after.get("target_frame"),
+            "frame_candidates": {
+                "legacy": legacy_after.get("frame_candidates", []),
+                "new": new_after.get("frame_candidates", []),
+            },
+            "legacy_action": legacy_action,
+            "new_action": new_action,
+        }
+
+    @staticmethod
+    def _requires_target_reopen_after_action(
+        action_case: Dict[str, Any],
+        action_type: Any,
+        semantic_action: Any,
+        legacy_action: Dict[str, Any],
+        new_action: Dict[str, Any],
+    ) -> bool:
+        if legacy_action.get("page_closed_after_action") or new_action.get("page_closed_after_action"):
+            return True
+        if RegressionEngine._is_negative_case(action_case.get("case_type"), action_case.get("action_type") or action_type):
+            return True
+
+        evidence = " ".join(
+            str(value or "")
+            for value in (
+                action_case.get("case_type"),
+                action_case.get("action_type"),
+                action_case.get("label"),
+                action_case.get("semantic_key"),
+                action_case.get("locator"),
+                action_case.get("legacy_locator"),
+                action_case.get("new_locator"),
+                action_case.get("expected_type"),
+                action_type,
+                semantic_action,
+                json.dumps(action_case.get("main_step") or {}, ensure_ascii=False, default=str),
+            )
+        ).lower()
+        if any(marker in evidence for marker in ("close_window", "window.close", "parent.close")):
+            return True
+        if any(marker in evidence for marker in ("back_action", "キャンセル", "取消", "戻る", "戻り", "戻 ")):
+            return True
+        if re.search(r"\b(?:cancel|back|bak)\b", evidence):
+            return True
+        return False
+
+    def _reopen_target_pair(
+        self,
+        legacy_page: Page,
+        new_page: Page,
+        mapping: Dict[str, Any],
+        page_dir: Path,
+        browser_name: str,
+        *,
+        reason: str,
+    ) -> Tuple[Page, Page, Dict[str, Any]]:
+        page_id = mapping.get("page_id") or "unknown"
+        print(
+            f"[{page_id}] REOPEN target page after leaving/closing action: "
+            + json.dumps({"reason": reason}, ensure_ascii=False)
+        )
+
+        legacy_page, legacy_nav = self._reopen_target_side(
+            legacy_page,
+            mapping,
+            page_dir,
+            browser_name,
+            side="legacy",
+        )
+        new_page, new_nav = self._reopen_target_side(
+            new_page,
+            mapping,
+            page_dir,
+            browser_name,
+            side="new",
+        )
+        status = "PASS" if legacy_nav.get("status") == "PASS" and new_nav.get("status") == "PASS" else "BLOCKED"
+        result = {
+            "status": status,
+            "reason": reason if status == "PASS" else "Failed to reopen target page after leaving/closing action.",
+            "legacy": legacy_nav,
+            "new": new_nav,
+        }
+        print(
+            f"[{page_id}] REOPEN result: "
+            + json.dumps(
+                {
+                    "status": status,
+                    "legacy_status": legacy_nav.get("status"),
+                    "legacy_reason": legacy_nav.get("reason"),
+                    "new_status": new_nav.get("status"),
+                    "new_reason": new_nav.get("reason"),
+                },
+                ensure_ascii=False,
+                default=str,
+            )
+        )
+        return legacy_page, new_page, result
+
+    def _reopen_target_side(
+        self,
+        page: Page,
+        mapping: Dict[str, Any],
+        page_dir: Path,
+        browser_name: str,
+        *,
+        side: str,
+    ) -> Tuple[Page, Dict[str, Any]]:
+        """Re-enter the current target page after an action leaves/closes it.
+
+        Minimal lifecycle recovery policy:
+        - If the current page is still one of the route-map step pages, reuse
+          the current session and run the route map back to the target page.
+        - Otherwise, reopen the login/base entry URL, perform the normal login
+          from env/Config credentials if a login form is present, then run the
+          route map back to the target page.
+        - If no route map is available, keep the previous direct-url fallback.
+        """
+        page_id = mapping.get("page_id") or "unknown"
+        entry_url = self.legacy_base_url if side == "legacy" else self.new_base_url
+        route = self.route_map_catalog.find_for_target(page_id, side=side) or self.route_map_catalog.find_for_target(page_id)
+
+        if route:
+            route_step = self._page_is_route_map_step(page, route)
+            pre_nav: Dict[str, Any]
+
+            if route_step:
+                pre_nav = {
+                    "status": "PASS",
+                    "strategy": "reuse_current_route_step",
+                    "current_url": self._safe_page_url(page),
+                }
+            else:
+                page, pre_nav = self._login_recovery_page(
+                    page,
+                    entry_url,
+                    page_dir,
+                    f"{side}_reopen_login_entry",
+                )
+                if pre_nav.get("status") != "PASS":
+                    pre_nav["reopen_strategy"] = "login_recovery_before_route_map"
+                    return page, pre_nav
+
+            navigator = RouteNavigator(
+                self.route_map_catalog,
+                timeout=self.timeout,
+                browser_name=browser_name,
+                upload_file=self.upload_file,
+            )
+            page, nav = navigator.navigate(
+                page,
+                entry_url=entry_url,
+                target_page=page_id,
+                capture_dir=page_dir,
+                side=side,
+            )
+            nav["pre_recovery"] = pre_nav
+            nav["route_step_detected"] = route_step
+            nav["reopen_strategy"] = "route_map_from_current_step" if route_step else "login_recovery_then_route_map"
+            return page, nav
+
+        target_url = self._page_url(
+            self.legacy_base_url if side == "legacy" else self.new_base_url,
+            mapping.get("entry_url") or mapping.get("resolved_entry_url") or page_id,
+        )
+        page, nav = self._open_or_reset_page(page, target_url, page_dir, f"{side}_reopen_direct")
+        nav["reopen_strategy"] = "direct_url"
+        if nav.get("status") == "PASS" and not self._page_matches_mapping(page, mapping):
+            nav.update(
+                {
+                    "status": "BLOCKED",
+                    "target_reached": False,
+                    "reason": f"Reopen direct URL did not reach target page: {page_id}",
+                }
+            )
+        elif nav.get("status") == "PASS":
+            nav["target_reached"] = True
+        return page, nav
+
+    def _login_recovery_page(
+        self,
+        page: Page,
+        entry_url: str,
+        page_dir: Path,
+        capture_name: str,
+    ) -> Tuple[Page, Dict[str, Any]]:
+        page, nav = self._open_or_reset_page(page, entry_url, page_dir, capture_name)
+        if nav.get("status") != "PASS":
+            return page, nav
+
+        login_result = self._try_login_if_login_form(page)
+        nav["login_recovery"] = login_result
+        if login_result.get("status") == "BLOCKED":
+            nav.update(
+                {
+                    "status": "BLOCKED",
+                    "reason": login_result.get("reason") or "Login recovery failed.",
+                }
+            )
+        return page, nav
+
+    def _try_login_if_login_form(self, page: Page) -> Dict[str, Any]:
+        password_selectors = [
+            "input[type='password']",
+            "input[name='password']",
+            "input[name='passwd']",
+            "input[name='pass']",
+        ]
+        password_selector = self._first_visible_selector(page, password_selectors, timeout=1500)
+        if not password_selector:
+            return {"status": "PASS", "reason": "login_form_not_detected"}
+
+        username = self._env_or_config(
+            "LOGIN_USERNAME",
+            "LOGIN_USER",
+            "LOGIN_USER_ID",
+            "USERNAME",
+            "USER_ID",
+        )
+        password = self._env_or_config(
+            "LOGIN_PASSWORD",
+            "LOGIN_PASS",
+            "PASSWORD",
+        )
+        if not username or not password:
+            return {
+                "status": "BLOCKED",
+                "reason": "Login form detected but username/password were not found in environment or Config.",
+            }
+
+        user_selector = self._first_visible_selector(
+            page,
+            [
+                "input[name='user']",
+                "input[name='username']",
+                "input[name='userId']",
+                "input[name='userid']",
+                "input[name='loginId']",
+                "input[name='login_id']",
+                "input[type='text']",
+            ],
+            timeout=1500,
+        )
+        if not user_selector:
+            return {"status": "BLOCKED", "reason": "Login username field was not found."}
+
+        try:
+            page.locator(user_selector).first().fill(username, timeout=3000)
+            page.locator(password_selector).first().fill(password, timeout=3000)
+
+            submit_selector = self._first_visible_selector(
+                page,
+                [
+                    "input[type='button']",
+                    "input[type='submit']",
+                    "button[type='submit']",
+                    "button",
+                ],
+                timeout=1000,
+            )
+            if submit_selector:
+                page.locator(submit_selector).first().click(timeout=5000)
+            else:
+                page.locator(password_selector).first().press("Enter", timeout=3000)
+
+            try:
+                page.wait_for_load_state("domcontentloaded", timeout=max(self.timeout, 10000))
+            except Exception:
+                pass
+            return {"status": "PASS", "strategy": "login_form_submit", "url": self._safe_page_url(page)}
+        except Exception as exc:
+            return {"status": "BLOCKED", "reason": f"Login recovery failed: {exc}"}
+
+    @staticmethod
+    def _env_or_config(*names: str) -> str:
+        for name in names:
+            value = os.environ.get(name)
+            if value:
+                return value
+            value = getattr(Config, name, None)
+            if value:
+                return str(value)
+        return ""
+
+    @staticmethod
+    def _first_visible_selector(page: Page, selectors: List[str], *, timeout: int = 1000) -> Optional[str]:
+        for selector in selectors:
+            try:
+                locator = page.locator(selector).first()
+                if locator.count() > 0 and locator.is_visible(timeout=timeout):
+                    return selector
+            except Exception:
+                continue
+        return None
+
+    def _page_is_route_map_step(self, page: Page, route: Dict[str, Any]) -> bool:
+        if self._page_is_closed(page):
+            return False
+
+        tokens = self._route_map_step_tokens(route)
+        if not tokens:
+            return False
+
+        try:
+            urls = [page.url]
+            urls.extend(frame.url for frame in page.frames)
+        except Exception:
+            return False
+
+        haystack = "\n".join(str(url or "").replace("\\", "/").lower() for url in urls)
+        return any(token in haystack for token in tokens)
+
+    @staticmethod
+    def _route_map_step_tokens(route: Dict[str, Any]) -> List[str]:
+        tokens: List[str] = []
+
+        def add_token(value: Any) -> None:
+            raw = str(value or "").replace("\\", "/").strip().lower()
+            if not raw:
+                return
+            leaf = raw.rsplit("/", 1)[-1]
+            candidates = [raw, leaf]
+            stem = re.sub(r"\.(jsp|do|action)$", "", leaf, flags=re.IGNORECASE)
+            if stem and stem != leaf:
+                candidates.extend([stem, f"{stem}.do", f"{stem}.jsp"])
+            for candidate in candidates:
+                candidate = candidate.strip("/")
+                if len(candidate) >= 3 and candidate not in tokens:
+                    tokens.append(candidate)
+
+        def walk(value: Any, parent_key: str = "") -> None:
+            if isinstance(value, dict):
+                for key, child in value.items():
+                    key_text = str(key or "").lower()
+                    if isinstance(child, str) and any(
+                        marker in key_text
+                        for marker in ("url", "page", "path", "action", "target", "entry", "href")
+                    ):
+                        add_token(child)
+                    walk(child, key_text)
+            elif isinstance(value, list):
+                for child in value:
+                    walk(child, parent_key)
+
+        walk(route)
+        return tokens
+
+    @staticmethod
+    def _safe_page_url(page: Page) -> str:
+        try:
+            return page.url
+        except Exception:
+            return ""
 
 
     def _compare_state(
@@ -1164,6 +2100,10 @@ class RegressionEngine:
             legacy_nav_status=(extra.get("legacy_nav") or {}).get("status"),
             new_nav_status=(extra.get("new_nav") or {}).get("status"),
         )
+        if status == "DIFF" and self._looks_like_data_variance(action_type, visual, legacy_state, new_state):
+            status = "WARN"
+            visual["data_variance_tolerated"] = True
+            visual["reason"] = "Visual diff appears to be table/list data variance between environments."
 
         return {
             "page_id": page_id,
@@ -1187,8 +2127,56 @@ class RegressionEngine:
             **extra,
         }
 
+    @staticmethod
+    def _looks_like_data_variance(
+        action_type: str,
+        visual: Dict[str, Any],
+        legacy_state: Dict[str, Any],
+        new_state: Dict[str, Any],
+    ) -> bool:
+        if str(visual.get("status") or "").upper() != "DIFF":
+            return False
+        try:
+            diff_percent = float(visual.get("diff_percent") or 0)
+        except (TypeError, ValueError):
+            diff_percent = 0
+        if diff_percent <= 0 or diff_percent > 10:
+            return False
+
+        normalized_action = str(action_type or "").lower()
+        if normalized_action not in {"page_snapshot", "snapshot", "initial_display", "result_table_verify"}:
+            return False
+
+        legacy_lines = RegressionEngine._stable_text_lines(legacy_state.get("text", ""))
+        new_lines = RegressionEngine._stable_text_lines(new_state.get("text", ""))
+        if not legacy_lines or not new_lines:
+            return False
+        shared = set(legacy_lines) & set(new_lines)
+        combined = " ".join(shared).lower()
+        table_markers = ("一覧", "検索結果", "結果", "削除", "アップロード日時", "ファイル", "table", "list")
+        return len(shared) >= 2 and any(marker.lower() in combined for marker in table_markers)
+
+    @staticmethod
+    def _stable_text_lines(value: Any) -> List[str]:
+        lines: List[str] = []
+        for raw_line in str(value or "").splitlines():
+            line = " ".join(raw_line.split())
+            if not line:
+                continue
+            # Drop row values that are commonly environment data, while keeping
+            # titles, headers, and button labels useful for structure checks.
+            if re.search(r"\d{4}年\d{1,2}月\d{1,2}日|\d{4}[-/]\d{1,2}[-/]\d{1,2}", line):
+                continue
+            if re.search(r"\.(csv|tsv|xls|xlsx|pdf|txt)\b", line, re.IGNORECASE):
+                continue
+            if len(line) > 120:
+                continue
+            lines.append(line)
+        return lines
+
     def render_report(self, results: List[Dict[str, Any]]) -> Path:
         report_path, report_dir, report_page = self._report_location(results)
+        browser_name = self.current_browser_name or "-"
         counts = Counter(item["status"] for item in results)
         rows = "\n".join(self._render_result(item, report_dir) for item in results)
         report_dir.mkdir(parents=True, exist_ok=True)
@@ -1220,6 +2208,7 @@ class RegressionEngine:
     .PASS {{ background: #1e8449; }} .WARN {{ background: #b7950b; }} .DIFF {{ background: #b7950b; }} .BLOCKED {{ background: #922b21; }} .ERROR {{ background: #7b241c; }}
     .meta {{ color: #52616f; font-size: 13px; overflow-wrap: anywhere; }}
     .grid {{ display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; padding: 16px; }}
+    .db-grid {{ grid-template-columns: repeat(3, minmax(0, 1fr)); }}
     figure {{ margin: 0; }}
     figcaption {{ margin-bottom: 6px; font-size: 12px; color: #52616f; font-weight: 700; }}
     img {{ width: 100%; max-height: 520px; object-fit: contain; border: 1px solid #d9e0ea; background: #fff; }}
@@ -1236,8 +2225,8 @@ class RegressionEngine:
 </head>
 <body>
   <header>
-    <h1>Moonlight Legacy/New Regression Report</h1>
-    <p class="subtitle">Page: {html.escape(report_page)} / Report: {html.escape(str(report_path))}</p>
+    <h1>Moonlight Legacy/New Regression Report - {html.escape(report_page)}</h1>
+    <p class="subtitle">Page: {html.escape(report_page)} / Browser: {html.escape(browser_name)} / Report: {html.escape(str(report_path))}</p>
     <div class="summary">
       <span class="pill">Total: {len(results)}</span>
       <span class="pill">PASS: {counts.get('PASS', 0)}</span>
@@ -1272,13 +2261,26 @@ class RegressionEngine:
     @staticmethod
     def _first_asset_dir(results: List[Dict[str, Any]]) -> Optional[Path]:
         for item in results:
-            for key in ("legacy_screenshot", "new_screenshot", "diff_screenshot"):
+            for key in (
+                "legacy_screenshot",
+                "new_screenshot",
+                "diff_screenshot",
+                "legacy_before_screenshot",
+                "legacy_after_screenshot",
+                "legacy_diff_screenshot",
+                "new_before_screenshot",
+                "new_after_screenshot",
+                "new_diff_screenshot",
+            ):
                 value = item.get(key)
                 if value:
                     return Path(value).resolve().parent
         return None
 
     def _render_result(self, item: Dict[str, Any], report_dir: Path) -> str:
+        if item.get("comparison_mode") == "database_operation_before_after":
+            return self._render_database_operation_result(item, report_dir)
+
         visual = item.get("visual") or {}
         diff_percent = visual.get("diff_percent")
         diff_text = "-" if diff_percent is None else f"{diff_percent:.4f}%"
@@ -1304,6 +2306,55 @@ class RegressionEngine:
       <b>Action type</b><span>{html.escape(str(action_type or '-'))}</span>
       <b>Legacy</b><span>{html.escape(str(item.get('legacy_url') or '-'))}</span>
       <b>New</b><span>{html.escape(str(item.get('new_url') or '-'))}</span>
+      <b>Upload file</b><span>{html.escape(str(item.get('upload_file') or '-'))}</span>
+      <b>Submit locator</b><span>{html.escape(str(item.get('submit_locator') or '-'))}</span>
+      <b>After URL</b><span>{html.escape(str(item.get('legacy_after_url') or '-'))} / {html.escape(str(item.get('new_after_url') or '-'))}</span>
+      <b>Runtime</b><span>navigation={item.get('navigation_detected')} / popup={item.get('popup_detected')} / frame={item.get('frame_changed')} / validation_only={item.get('validation_only')}</span>
+      <b>Reason</b><span>{html.escape(str(reason))}</span>
+    </div>
+    {self._render_diagnostics(item)}
+  </div>
+</section>"""
+
+    def _render_database_operation_result(self, item: Dict[str, Any], report_dir: Path) -> str:
+        legacy_delta = item.get("legacy_delta") or {}
+        new_delta = item.get("new_delta") or {}
+        legacy_diff = legacy_delta.get("diff_percent")
+        new_diff = new_delta.get("diff_percent")
+        legacy_diff_text = "-" if legacy_diff is None else f"{legacy_diff:.4f}%"
+        new_diff_text = "-" if new_diff is None else f"{new_diff:.4f}%"
+        action_type = item.get("action_type") or self._action_type_from_payload(item)
+        reason = item.get("reason") or self._blocked_reason(item) or "-"
+        operation = item.get("database_operation") or "-"
+        return f"""
+<section class="case">
+  <div class="case-head">
+    <div class="case-title">
+      <span class="status {html.escape(item.get('status', 'DIFF'))}">{html.escape(item.get('status', 'DIFF'))}</span>
+      <strong>{html.escape(str(item.get('page_id')))}</strong>
+    </div>
+    <span class="meta">risk={html.escape(str(item.get('risk')))} / action={html.escape(str(item.get('action')))} / DB={html.escape(str(operation))} / legacy Δ={legacy_diff_text} / new Δ={new_diff_text}</span>
+  </div>
+  <div class="grid db-grid">
+    {self._figure('Legacy Before', item.get('legacy_before_screenshot'), report_dir)}
+    {self._figure('Legacy After', item.get('legacy_after_screenshot'), report_dir)}
+    {self._figure('Legacy Before/After Diff', item.get('legacy_diff_screenshot'), report_dir)}
+    {self._figure('New Before', item.get('new_before_screenshot'), report_dir)}
+    {self._figure('New After', item.get('new_after_screenshot'), report_dir)}
+    {self._figure('New Before/After Diff', item.get('new_diff_screenshot'), report_dir)}
+  </div>
+  <div class="details">
+    <div class="detail-grid">
+      <b>Compare mode</b><span>database_operation_before_after</span>
+      <b>DB operation</b><span>{html.escape(str(operation))}</span>
+      <b>Transition match</b><span>{item.get('url_match')}</span>
+      <b>Action type</b><span>{html.escape(str(action_type or '-'))}</span>
+      <b>Legacy delta</b><span>{html.escape(str(legacy_delta.get('status') or '-'))} / {legacy_diff_text}</span>
+      <b>New delta</b><span>{html.escape(str(new_delta.get('status') or '-'))} / {new_diff_text}</span>
+      <b>Legacy before</b><span>{html.escape(str(item.get('legacy_before_url') or '-'))}</span>
+      <b>Legacy after</b><span>{html.escape(str(item.get('legacy_after_url') or '-'))}</span>
+      <b>New before</b><span>{html.escape(str(item.get('new_before_url') or '-'))}</span>
+      <b>New after</b><span>{html.escape(str(item.get('new_after_url') or '-'))}</span>
       <b>Reason</b><span>{html.escape(str(reason))}</span>
     </div>
     {self._render_diagnostics(item)}
@@ -1387,26 +2438,39 @@ class RegressionEngine:
     </div>"""
 
     def _render_coverage_matrix(self, results: List[Dict[str, Any]]) -> str:
-        action_types = {
-            str(item.get("action_type") or self._action_type_from_payload(item) or "").lower()
-            for item in results
-        }
-        rows = [
-            ("1-1 画面レイアウト", "AUTO"),
-            ("2 画面遷移", "AUTO" if {"navigate", "page_snapshot", "wait"} & action_types else "REVIEW"),
-            ("3 入力・検索・更新", "AUTO" if {"fill", "submit", "click", "select"} & action_types else "REVIEW"),
-            ("6 ファイル出力", "AUTO" if "download" in action_types else "REVIEW"),
-            ("7 ファイルアップロード", "AUTO" if "upload" in action_types else "REVIEW"),
-        ]
-        body = "\n".join(
-            f"<tr><td>{html.escape(label)}</td><td>{html.escape(status)}</td></tr>"
-            for label, status in rows
-        )
+        pages = sorted({self._target_page_name(item.get("page_id")) for item in results if item.get("page_id")})
+        checklist_rows: List[Dict[str, Any]] = []
+        for page in pages:
+            checklist_rows.extend(self._checklist_case_rows.get(page) or [])
+
+        if checklist_rows:
+            body = "\n".join(
+                "<tr>"
+                f"<td>{html.escape(str(row.get('case_id') or '-'))}</td>"
+                f"<td>{html.escape(str(row.get('test_title') or '-'))}</td>"
+                f"<td>{html.escape(str(row.get('automation_mode') or '-'))}</td>"
+                f"<td>{html.escape(str(row.get('destructive') or 'false'))}</td>"
+                f"<td>{html.escape(str(row.get('excluded_reason') or '-'))}</td>"
+                "</tr>"
+                for row in checklist_rows
+            )
+        else:
+            body = '<tr><td colspan="5">No checklist cases were loaded for this report.</td></tr>'
+
         return f"""
 <section class="case">
-  <div class="case-head"><strong>Checklist Coverage Matrix</strong></div>
+  <div class="case-head"><strong>Checklist Cases</strong></div>
   <div class="details">
     <table>
+      <thead>
+        <tr>
+          <td><b>case_id</b></td>
+          <td><b>test_title</b></td>
+          <td><b>automation_mode</b></td>
+          <td><b>destructive</b></td>
+          <td><b>excluded_reason</b></td>
+        </tr>
+      </thead>
       <tbody>{body}</tbody>
     </table>
   </div>
@@ -1428,6 +2492,15 @@ class RegressionEngine:
             "new_selector_found": new_action.get("selector_found"),
             "legacy_blocked_reason": legacy_action.get("reason"),
             "new_blocked_reason": new_action.get("reason"),
+            "upload_file": item.get("upload_file"),
+            "submit_locator": item.get("submit_locator"),
+            "legacy_after_url": item.get("legacy_after_url"),
+            "new_after_url": item.get("new_after_url"),
+            "navigation_detected": item.get("navigation_detected"),
+            "popup_detected": item.get("popup_detected"),
+            "frame_changed": item.get("frame_changed"),
+            "validation_only": item.get("validation_only"),
+            "post_action_reopen": item.get("post_action_reopen"),
             "frame_candidates": item.get("frame_candidates"),
         }
         return (
@@ -1505,7 +2578,10 @@ class RegressionEngine:
 
     @staticmethod
     def _target_page_name(value: Any) -> str:
-        return PureWindowsPath(str(value or "").replace("/", "\\")).name
+        name = PureWindowsPath(str(value or "").strip().replace("/", "\\")).name
+        if name.lower().endswith(".do"):
+            name = name[:-3] + ".jsp"
+        return name.lower()
 
     def _page_matches_mapping(self, page: Page, mapping: Dict[str, Any]) -> bool:
         """
@@ -1545,6 +2621,28 @@ class RegressionEngine:
 
         haystack = "\n".join(str(url or "").replace("\\", "/").lower() for url in urls)
         return any(needle in haystack for needle in needles)
+
+    @staticmethod
+    def _page_is_closed(page: Page) -> bool:
+        try:
+            return page.is_closed()
+        except Exception:
+            return True
+
+    def _open_or_reset_page(self, page: Page, url: str, capture_dir: Path, name: str) -> Tuple[Page, Dict[str, Any]]:
+        try:
+            if self._page_is_closed(page):
+                page = page.context.new_page()
+        except Exception as exc:
+            return page, {"status": "BLOCKED", "url": url, "reason": f"Failed to create replacement page: {exc}"}
+
+        nav = self._goto(page, url)
+        if nav.get("status") != "PASS":
+            try:
+                nav["state"] = _capture_state(page, capture_dir, name)
+            except Exception as exc:
+                nav["capture_error"] = str(exc)
+        return page, nav
 
     def _goto(self, page: Page, url: str) -> Dict[str, Any]:
         try:

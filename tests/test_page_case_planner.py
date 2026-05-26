@@ -160,6 +160,88 @@ def test_runtime_profile_controls_generate_page_specific_cases():
     assert profile["capabilities"]["upload_submit"] is True
 
 
+def test_runtime_profile_generates_back_and_delete_cases():
+    cases, _, profile = PageCasePlanner().plan(
+        {
+            "schema": "moonlight.runtime_page_profile.v1",
+            "page_id": "UopcUploadListDispJP.jsp",
+            "controls": [
+                {
+                    "tag": "input",
+                    "type": "button",
+                    "value": "削除",
+                    "onclick": "deleteFile('20260424161638~w1~NON~UopcSampleDataJp (1).csv')",
+                    "selector": "input[onclick*=\"deleteFile('20260424161638\"]",
+                    "visible": True,
+                },
+                {
+                    "tag": "input",
+                    "type": "button",
+                    "value": "削除",
+                    "onclick": "deleteFile('20260424160800~w1~NON~UopcSampleDataJp.csv')",
+                    "selector": "input[onclick*=\"deleteFile('20260424160800\"]",
+                    "visible": True,
+                },
+                {
+                    "tag": "input",
+                    "type": "button",
+                    "value": "戻る",
+                    "onclick": "submitForm('PatlicsMenuForm','./UopcUploadDispJP.do','')",
+                    "selector": "input[onclick*=\"UopcUploadDispJP\"]",
+                    "visible": True,
+                },
+            ],
+        }
+    )
+
+    by_type = {case["case_type"]: case for case in cases}
+
+    assert profile["capabilities"]["delete_action"] is True
+    assert profile["capabilities"]["back_action"] is True
+    assert len(profile["delete_actions"]) == 1
+    assert by_type["delete_action"]["automation_mode"] == "auto-db"
+    assert by_type["delete_action"]["destructive"] == "true"
+    assert by_type["delete_action"]["locator"] == 'input[onclick^="deleteFile("]'
+    assert by_type["back_action"]["automation_mode"] == "auto"
+    assert by_type["back_action"]["locator"] == 'input[onclick*="UopcUploadDispJP"]'
+
+
+def test_runtime_profile_generates_create_and_update_db_cases():
+    cases, _, profile = PageCasePlanner().plan(
+        {
+            "schema": "moonlight.runtime_page_profile.v1",
+            "page_id": "Edit.jsp",
+            "controls": [
+                {
+                    "tag": "input",
+                    "type": "button",
+                    "value": "登録",
+                    "onclick": "submitForm('EditForm','./Entry.do','')",
+                    "selector": "input[onclick*=\"Entry\"]",
+                    "visible": True,
+                },
+                {
+                    "tag": "input",
+                    "type": "button",
+                    "value": "更新",
+                    "onclick": "submitForm('EditForm','./Update.do','')",
+                    "selector": "input[onclick*=\"Update\"]",
+                    "visible": True,
+                },
+            ],
+        }
+    )
+
+    by_type = {case["case_type"]: case for case in cases}
+
+    assert profile["capabilities"]["create_action"] is True
+    assert profile["capabilities"]["update_action"] is True
+    assert by_type["create_action"]["automation_mode"] == "auto-db"
+    assert by_type["update_action"]["automation_mode"] == "auto-db"
+    assert by_type["create_action"]["locator"] == 'input[onclick*="Entry"]'
+    assert by_type["update_action"]["locator"] == 'input[onclick*="Update"]'
+
+
 def test_runtime_profile_ignores_container_tables_when_selecting_upload_controls():
     cases, _, profile = PageCasePlanner().plan(
         {

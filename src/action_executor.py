@@ -42,6 +42,51 @@ def _is_target_closed_error(exc: BaseException) -> bool:
     )
 
 
+def _should_accept_database_dialog(context: Optional[Dict[str, Any]]) -> bool:
+    if not context:
+        return False
+    evidence = " ".join(
+        str(context.get(key) or "")
+        for key in (
+            "case_type",
+            "action_type",
+            "label",
+            "semantic_key",
+            "locator",
+            "onclick",
+            "expected_type",
+        )
+    ).lower()
+    return any(
+        token in evidence
+        for token in (
+            "delete_action",
+            "delete",
+            "削除",
+            "update",
+            "更新",
+            "register",
+            "登録",
+            "create",
+            "追加",
+            "保存",
+            "upload_submit",
+        )
+    )
+
+
+def _accept_dialog_safely(dialog) -> str:
+    try:
+        dialog.accept()
+        return "accepted"
+    except Exception as exc:
+        message = str(exc)
+        lowered = message.lower()
+        if "already handled" in lowered or "already been handled" in lowered:
+            return "already_handled"
+        return f"accept_failed: {message}"
+
+
 def _closed_page_state(output_dir: Path, name: str) -> Dict[str, Any]:
     output_dir.mkdir(parents=True, exist_ok=True)
     screenshot = output_dir / f"{name}.png"
@@ -321,16 +366,40 @@ def _upload_filename(value: Any) -> str:
     return Path(normalized).name or PureWindowsPath(text).name
 
 
-def _resolve_upload_file_value(value: Optional[str], capture_dir: Optional[Union[str, Path]] = None) -> str:
+def _upload_placeholder_env_names(raw: str) -> List[str]:
+    token = re.sub(r"[^A-Za-z0-9_]+", "_", raw.strip("${}$ ").upper()).strip("_")
+    names = []
+    if token:
+        names.append(f"MOONLIGHT_{token}")
+    names.append("MOONLIGHT_UPLOAD_FILE")
+    return list(dict.fromkeys(names))
+
+
+def _is_upload_placeholder(value: Any) -> bool:
     raw = str(value or "").strip()
-    env_value = str(os.environ.get("MOONLIGHT_UPLOAD_FILE") or "").strip()
-    if env_value:
+    lowered = raw.lower()
+    return (
+        not raw
+        or lowered.startswith("${")
+        or lowered.startswith("$upload")
+        or lowered in {"upload_file", "upload_invalid_file", "upload_empty_file", "upload_large_file"}
+        or "fakepath" in lowered
+    )
+
+
+def _env_upload_file(raw: str) -> Optional[str]:
+    for env_name in _upload_placeholder_env_names(raw):
+        env_value = str(os.environ.get(env_name) or "").strip()
+        if not env_value:
+            continue
         env_path = Path(env_value)
         if env_path.exists():
             return str(env_path)
+    return None
 
-    if raw in {"${UPLOAD_FILE}", "$UPLOAD_FILE", "UPLOAD_FILE"}:
-        return _default_upload_file(capture_dir)
+
+def _resolve_single_upload_file_value(value: Any, capture_dir: Optional[Union[str, Path]] = None) -> str:
+    raw = str(value or "").strip()
 
     if raw:
         raw_path = Path(raw)
@@ -355,11 +424,24 @@ def _resolve_upload_file_value(value: Optional[str], capture_dir: Optional[Union
                     if candidate.is_file():
                         return str(candidate)
 
-            return _default_upload_file(capture_dir)
+    if _is_upload_placeholder(raw):
+        env_value = _env_upload_file(raw)
+        if env_value:
+            return env_value
+        return _default_upload_file(capture_dir)
 
-        return raw
+    return raw
 
-    return _default_upload_file(capture_dir)
+
+def _resolve_upload_file_value(value: Any, capture_dir: Optional[Union[str, Path]] = None) -> Union[str, List[str]]:
+    if isinstance(value, (list, tuple)):
+        resolved = [
+            _resolve_single_upload_file_value(item, capture_dir)
+            for item in value
+            if str(item or "").strip()
+        ]
+        return resolved or _default_upload_file(capture_dir)
+    return _resolve_single_upload_file_value(value, capture_dir)
 
 
 
@@ -428,6 +510,24 @@ def _opens_popup_hint(context: Optional[Dict[str, Any]]) -> bool:
     return bool(target and target not in {"_self", "self"}) or "window.open" in evidence or "target=" in evidence
 
 
+def _safe_page_url(page: Page) -> str:
+    try:
+        if _page_is_closed(page):
+            return "about:closed"
+        return page.url
+    except Exception:
+        return "about:closed"
+
+
+def _safe_frame_urls(page: Page) -> List[str]:
+    try:
+        if _page_is_closed(page):
+            return []
+        return [str(frame.url or "") for frame in page.frames]
+    except Exception:
+        return []
+
+
 def execute_action(
     page: Page,
     action_type: str,
@@ -457,6 +557,10 @@ def execute_action(
     action_dispatched = False
     capture_page = page
     keep_popup = bool((action_context or {}).get("keep_popup"))
+    before_url = _safe_page_url(page)
+    before_frame_urls = _safe_frame_urls(page)
+    result["before_url"] = before_url
+    result["before_frame_urls"] = before_frame_urls
 
     def _log_event(event_type: str, details: Any):
         # 内部闭包用于记录 Playwright 事件
@@ -471,6 +575,18 @@ def execute_action(
         page.on("console", lambda msg: _log_event("CONSOLE", f"{msg.type}: {msg.text}"))
         page.on("pageerror", lambda err: _log_event("JS_ERROR", str(err)))
         page.on("requestfailed", lambda req: _log_event("REQ_FAILED", f"{req.url} ({req.failure})"))
+        if _should_accept_database_dialog(action_context):
+            def _accept_dialog(dialog):
+                accept_status = _accept_dialog_safely(dialog)
+                dialog_state = {
+                    "type": getattr(dialog, "type", ""),
+                    "message": getattr(dialog, "message", ""),
+                    "accept_status": accept_status,
+                }
+                result.setdefault("dialogs", []).append(dialog_state)
+                _log_event("DIALOG", f"{dialog_state['type']}: {dialog_state['message']} ({accept_status})")
+
+            page.once("dialog", _accept_dialog)
 
         if _page_is_closed(page):
             raise ValueError("Page is closed before action")
@@ -601,6 +717,28 @@ def execute_action(
         else:
             result.update({"status": "BLOCKED", "reason": str(exc)})
     finally:
+        after_url = _safe_page_url(capture_page)
+        after_frame_urls = _safe_frame_urls(capture_page)
+        page_closed_after = bool(result.get("page_closed_after_action")) or _page_is_closed(capture_page)
+        popup_detected = bool(result.get("popup_opened"))
+        navigation_detected = before_url != after_url
+        frame_changed = before_frame_urls != after_frame_urls
+        result.update(
+            {
+                "after_url": after_url,
+                "after_frame_urls": after_frame_urls,
+                "navigation_detected": navigation_detected,
+                "popup_detected": popup_detected,
+                "frame_changed": frame_changed,
+                "validation_only": bool(
+                    result.get("status") == "PASS"
+                    and not navigation_detected
+                    and not popup_detected
+                    and not frame_changed
+                    and not page_closed_after
+                ),
+            }
+        )
         if capture_dir:
             name = _safe_name(test_id or f"{action_type}_{int(time.time() * 1000)}")
             result["state"] = _capture_state(capture_page, Path(capture_dir), name)

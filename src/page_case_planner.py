@@ -55,11 +55,41 @@ DEFAULT_CASE_TEMPLATES = [
         "priority": 80,
     },
     {
+        "template_id": "create_action",
+        "case_type": "create_action",
+        "action_type": "click",
+        "requires": ["create_action"],
+        "priority": 850,
+    },
+    {
+        "template_id": "update_action",
+        "case_type": "update_action",
+        "action_type": "click",
+        "requires": ["update_action"],
+        "priority": 860,
+        "destructive": True,
+    },
+    {
         "template_id": "result_table_verify",
         "case_type": "result_table_verify",
         "action_type": "snapshot",
         "requires": ["result_table"],
         "priority": 90,
+    },
+    {
+        "template_id": "back_action",
+        "case_type": "back_action",
+        "action_type": "click",
+        "requires": ["back_action"],
+        "priority": 880,
+    },
+    {
+        "template_id": "delete_action",
+        "case_type": "delete_action",
+        "action_type": "click",
+        "requires": ["delete_action"],
+        "priority": 890,
+        "destructive": True,
     },
     {
         "template_id": "close_window",
@@ -70,6 +100,15 @@ DEFAULT_CASE_TEMPLATES = [
         "destructive": True,
     },
 ]
+
+
+NEGATIVE_CASE_TYPES = {
+    "negative_js_error",
+    "negative_network_abort",
+    "negative_http_500",
+    "negative_invalid_input",
+    "negative_file_upload",
+}
 
 
 def _as_text(value: Any, default: str = "") -> str:
@@ -164,6 +203,10 @@ def _search_blob(item: Dict[str, Any]) -> str:
     ]
     values.extend(attrs.values())
     return " ".join(_as_text(value) for value in values if value is not None).lower()
+
+
+def _has_english_word(blob: str, *words: str) -> bool:
+    return re.search(r"\b(?:" + "|".join(re.escape(word) for word in words) + r")\b", blob) is not None
 
 
 def _is_file(item: Dict[str, Any]) -> bool:
@@ -277,6 +320,62 @@ def _is_close_action(item: Dict[str, Any]) -> bool:
     return action_type == "close_window" or "window.close" in blob or "parent.close" in blob
 
 
+def _is_delete_action(item: Dict[str, Any]) -> bool:
+    if _is_close_action(item) or _is_download_action(item):
+        return False
+    blob = _search_blob(item)
+    kind = _as_text(item.get("kind")).lower()
+    tag = _as_text(item.get("tag")).lower()
+    input_type = _first_attr(item, "type").lower()
+    is_button = kind == "button" or tag == "button" or (tag == "input" and input_type in {"button", "submit", "image"})
+    return is_button and ("delete" in blob or "削除" in blob)
+
+
+def _is_back_action(item: Dict[str, Any]) -> bool:
+    if _is_close_action(item) or _is_delete_action(item) or _is_download_action(item):
+        return False
+    blob = _search_blob(item)
+    kind = _as_text(item.get("kind")).lower()
+    tag = _as_text(item.get("tag")).lower()
+    input_type = _first_attr(item, "type").lower()
+    is_button = kind == "button" or tag == "button" or (tag == "input" and input_type in {"button", "submit", "image"})
+    has_back_marker = (
+        "戻" in blob
+        or "キャンセル" in blob
+        or "cancel" in blob
+        or re.search(r"\b(?:back|bak)\b", blob) is not None
+    )
+    return is_button and has_back_marker
+
+
+def _is_create_action(item: Dict[str, Any]) -> bool:
+    if _is_close_action(item) or _is_delete_action(item) or _is_download_action(item):
+        return False
+    blob = _search_blob(item)
+    kind = _as_text(item.get("kind")).lower()
+    tag = _as_text(item.get("tag")).lower()
+    input_type = _first_attr(item, "type").lower()
+    is_button = kind == "button" or tag == "button" or (tag == "input" and input_type in {"button", "submit", "image"})
+    return is_button and (
+        _has_english_word(blob, "register", "insert", "entry", "create", "add")
+        or any(token in blob for token in ("登録", "新規", "追加", "作成"))
+    )
+
+
+def _is_update_action(item: Dict[str, Any]) -> bool:
+    if _is_close_action(item) or _is_delete_action(item) or _is_download_action(item) or _is_create_action(item):
+        return False
+    blob = _search_blob(item)
+    kind = _as_text(item.get("kind")).lower()
+    tag = _as_text(item.get("tag")).lower()
+    input_type = _first_attr(item, "type").lower()
+    is_button = kind == "button" or tag == "button" or (tag == "input" and input_type in {"button", "submit", "image"})
+    return is_button and (
+        _has_english_word(blob, "update", "modify", "edit", "save")
+        or any(token in blob for token in ("更新", "変更", "編集", "保存"))
+    )
+
+
 def _is_search_action(item: Dict[str, Any]) -> bool:
     if _is_form(item):
         return False
@@ -329,6 +428,10 @@ class PageProfileBuilder:
         submit_actions: List[Dict[str, Any]] = []
         download_actions: List[Dict[str, Any]] = []
         close_actions: List[Dict[str, Any]] = []
+        delete_actions: List[Dict[str, Any]] = []
+        back_actions: List[Dict[str, Any]] = []
+        create_actions: List[Dict[str, Any]] = []
+        update_actions: List[Dict[str, Any]] = []
         tables: List[Dict[str, Any]] = []
         search_actions: List[Dict[str, Any]] = []
         navigation_links: List[Dict[str, Any]] = []
@@ -373,6 +476,14 @@ class PageProfileBuilder:
                 download_actions.append(self._action_entry(item, "download"))
             if _is_close_action(item):
                 close_actions.append(self._action_entry(item, "close_window"))
+            if _is_delete_action(item):
+                delete_actions.append(self._action_entry(item, "click"))
+            if _is_back_action(item):
+                back_actions.append(self._action_entry(item, "click"))
+            if _is_create_action(item):
+                create_actions.append(self._action_entry(item, "click"))
+            if _is_update_action(item):
+                update_actions.append(self._action_entry(item, "click"))
             if _is_search_action(item):
                 search_actions.append(self._action_entry(item, "search"))
             if _is_navigation_link(item):
@@ -405,6 +516,10 @@ class PageProfileBuilder:
             "template_download": bool(download_actions),
             "navigation_link": bool(navigation_links),
             "close_window": bool(close_actions),
+            "delete_action": bool(delete_actions),
+            "back_action": bool(back_actions),
+            "create_action": bool(create_actions),
+            "update_action": bool(update_actions),
             "text_input": has_text_input,
             "select": has_select,
             "search": bool(search_actions) and (has_text_input or has_select),
@@ -413,7 +528,7 @@ class PageProfileBuilder:
         }
 
         ready_selector = ""
-        for bucket in (files, submit_actions, download_actions, close_actions, forms, tables):
+        for bucket in (files, submit_actions, download_actions, create_actions, update_actions, back_actions, delete_actions, close_actions, forms, tables):
             if bucket and bucket[0].get("locator"):
                 ready_selector = bucket[0]["locator"]
                 break
@@ -432,10 +547,30 @@ class PageProfileBuilder:
             "download_actions": download_actions,
             "navigation_links": navigation_links,
             "close_actions": close_actions,
+            "delete_actions": self._dedupe_action_entries(delete_actions),
+            "back_actions": self._dedupe_action_entries(back_actions),
+            "create_actions": self._dedupe_action_entries(create_actions),
+            "update_actions": self._dedupe_action_entries(update_actions),
             "search_actions": search_actions,
             "tables": tables,
             "capabilities": capabilities,
         }
+
+    @staticmethod
+    def _dedupe_action_entries(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        result: List[Dict[str, Any]] = []
+        seen = set()
+        for item in items:
+            blob = " ".join(_as_text(item.get(key)) for key in ("label", "action", "onclick", "locator")).lower()
+            semantic = re.sub(r"'[^']*'|\"[^\"]*\"|\d+", "<arg>", blob)
+            semantic = re.sub(r"\s+", " ", semantic).strip()
+            if not semantic:
+                semantic = _as_text(item.get("locator"))
+            if semantic in seen:
+                continue
+            seen.add(semantic)
+            result.append(item)
+        return result
 
     def _collect_elements(self, page_mapping: Dict[str, Any]) -> List[Dict[str, Any]]:
         elements: List[Dict[str, Any]] = []
@@ -1069,6 +1204,26 @@ class PageCasePlanner:
             objective = "検索条件入力後の検索操作が移行前後で同等に動作することを確認する。"
             steps = "検索条件がある場合は自動化データを入力し、検索 locator を実行する。"
             expected = "Legacy/New とも検索後の遷移、メッセージ、結果領域が同等である。"
+        elif template_id == "create_action":
+            create_item = self._first(profile, "create_actions")
+            locator = _as_text(create_item.get("locator"))
+            if not locator:
+                return None, "missing create locator"
+            expected_type = "db_operation"
+            title = "登録/追加ボタン動作確認"
+            objective = "登録・追加系操作の前後で画面状態が仕様通り変化することを確認する。"
+            steps = "テスト用データを入力済みの状態で登録/追加 locator を実行し、操作前後の画面状態を比較する。"
+            expected = "Legacy/New とも各環境内の操作前後差分が同じ傾向となり、エラーや想定外遷移が発生しない。"
+        elif template_id == "update_action":
+            update_item = self._first(profile, "update_actions")
+            locator = _as_text(update_item.get("locator"))
+            if not locator:
+                return None, "missing update locator"
+            expected_type = "db_operation"
+            title = "更新/保存ボタン動作確認"
+            objective = "更新・保存系操作の前後で画面状態が仕様通り変化することを確認する。"
+            steps = "テスト対象データを編集済みの状態で更新/保存 locator を実行し、操作前後の画面状態を比較する。"
+            expected = "Legacy/New とも各環境内の操作前後差分が同じ傾向となり、エラーや想定外遷移が発生しない。"
         elif template_id == "result_table_verify":
             table_item = self._first(profile, "tables")
             locator = _as_text(table_item.get("locator") or "__page__")
@@ -1077,10 +1232,32 @@ class PageCasePlanner:
             objective = "結果 table/list の表示状態が移行前後で同等であることを確認する。"
             steps = "初期表示または検索後の結果領域をスクリーンショットで比較する。"
             expected = "列、行、メッセージ、空データ表示に重大差分がない。"
+        elif template_id == "back_action":
+            back_item = self._first(profile, "back_actions")
+            locator = _as_text(back_item.get("locator"))
+            if not locator:
+                return None, "missing back locator"
+            expected_type = "page_or_message"
+            title = "戻るボタン動作確認"
+            objective = "戻るボタン押下時に仕様通り前画面へ戻り、セッションや親画面状態が壊れないことを確認する。"
+            steps = "戻る locator をクリックし、遷移先画面または復帰後の画面状態を比較する。"
+            expected = "Legacy/New とも仕様通り前画面へ戻り、白画面・エラー・セッション破壊が発生しない。"
+        elif template_id == "delete_action":
+            delete_item = self._first(profile, "delete_actions")
+            locator = self._stable_delete_locator(delete_item) or _as_text(delete_item.get("locator"))
+            if not locator:
+                return None, "missing delete locator"
+            expected_type = "confirm_or_message"
+            title = "削除ボタン動作確認"
+            objective = "一覧行の削除ボタンが表示され、削除確認または削除処理の入口が移行前後で同等であることを確認する。"
+            steps = "テスト用データ行の削除 locator を操作し、確認ダイアログ、メッセージ、一覧更新を確認する。"
+            expected = "Legacy/New とも確認・削除後のメッセージ・一覧状態が同等で、対象外データを誤削除しない。"
+            test_data = "${DELETE_TEST_ROW}"
         else:
             return None, "not applicable to page profile"
 
         matched = [name for name, enabled in (profile.get("capabilities") or {}).items() if enabled]
+        automation_mode = "auto-db" if template_id in {"create_action", "update_action", "delete_action"} else "auto"
         return {
             "case_id": f"{_safe_case_id(page_id)}-{template_id}-001",
             "page_id": page_id,
@@ -1091,7 +1268,7 @@ class PageCasePlanner:
             "expected": expected,
             "severity": "High" if template_id not in {"result_table_verify"} else "Medium",
             "risk": "High" if template_id not in {"result_table_verify"} else "Medium",
-            "automation_mode": "auto",
+            "automation_mode": automation_mode,
             "enabled": "true",
             "case_type": template.get("case_type"),
             "action_type": template.get("action_type"),
@@ -1152,6 +1329,15 @@ class PageCasePlanner:
             return points, _as_text(action.get("locator"))
 
         return max(actions, key=score)
+
+    @staticmethod
+    def _stable_delete_locator(delete_item: Dict[str, Any]) -> str:
+        blob = " ".join(_as_text(delete_item.get(key)) for key in ("label", "onclick", "locator")).lower()
+        if "deletefile" in blob:
+            return 'input[onclick^="deleteFile("]'
+        if "削除" in blob:
+            return 'input[type="button"][value="削除"]'
+        return ""
 
     @staticmethod
     def _first(profile: Dict[str, Any], key: str) -> Dict[str, Any]:

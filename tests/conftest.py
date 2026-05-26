@@ -1,3 +1,5 @@
+import re
+
 import pytest
 from playwright.sync_api import sync_playwright
 from src.config_parser import Config
@@ -60,6 +62,12 @@ def pytest_addoption(parser):
         help="只执行指定 JSP 文件名的回归测试；指定后无视风险等级"
     )
     parser.addoption(
+        "--target-pages",
+        action="store",
+        default=None,
+        help="按队列执行多个 JSP。支持逗号、分号或换行分隔；指定后会逐页运行并汇总结果"
+    )
+    parser.addoption(
         "--manual",
         action="store_true",
         default=False,
@@ -102,6 +110,42 @@ def pytest_addoption(parser):
         help="可选：自动化遇到文件上传控件时使用的本地文件路径"
     )
     parser.addoption(
+        "--upload-profile-config",
+        action="store",
+        default=None,
+        help="可选：GUI 生成的上传文件 profile JSON，用于按页面/case/locator 选择上传文件"
+    )
+    parser.addoption(
+        "--regression-output-dir",
+        action="store",
+        default=None,
+        help="可选：回归截图与页面报告输出目录；GUI 会按浏览器传入 output/regression/<browser>"
+    )
+    parser.addoption(
+        "--include-semi-auto",
+        action="store_true",
+        default=False,
+        help="执行 checklist 中 automation_mode=semi-auto 的用例"
+    )
+    parser.addoption(
+        "--include-destructive",
+        action="store_true",
+        default=False,
+        help="执行 checklist 中 destructive=true 的用例"
+    )
+    parser.addoption(
+        "--include-negative",
+        action="store_true",
+        default=False,
+        help="执行负面/错误注入用例；默认关闭"
+    )
+    parser.addoption(
+        "--negative-profile",
+        action="store",
+        default=None,
+        help="负面测试 profile 名称，支持逗号分隔"
+    )
+    parser.addoption(
         "--run-migration",
         action="store_true",
         default=False,
@@ -134,6 +178,14 @@ def target_page(request):
     return request.config.getoption("--target-page")
 
 @pytest.fixture(scope="session")
+def target_pages(request):
+    raw_queue = request.config.getoption("--target-pages")
+    if raw_queue:
+        return [item.strip() for item in re.split(r"[\r\n,;]+", raw_queue) if item.strip()]
+    single = request.config.getoption("--target-page")
+    return [single.strip()] if single and single.strip() else []
+
+@pytest.fixture(scope="session")
 def manual(request):
     return request.config.getoption("--manual")
 
@@ -152,6 +204,30 @@ def force_route_map(request):
 @pytest.fixture(scope="session")
 def upload_file(request):
     return request.config.getoption("--upload-file")
+
+@pytest.fixture(scope="session")
+def upload_profile_config(request):
+    return request.config.getoption("--upload-profile-config")
+
+@pytest.fixture(scope="session")
+def regression_output_dir(request):
+    return request.config.getoption("--regression-output-dir")
+
+@pytest.fixture(scope="session")
+def include_semi_auto(request):
+    return request.config.getoption("--include-semi-auto")
+
+@pytest.fixture(scope="session")
+def include_destructive(request):
+    return request.config.getoption("--include-destructive")
+
+@pytest.fixture(scope="session")
+def include_negative(request):
+    return request.config.getoption("--include-negative")
+
+@pytest.fixture(scope="session")
+def negative_profile(request):
+    return request.config.getoption("--negative-profile")
 
 @pytest.fixture(scope="session")
 def login_entry(request):
@@ -241,6 +317,25 @@ def _authenticated_page(browser, base_url):
         # 部分环境使用预置会话或基础认证，登录页缺失时不阻断页面创建。
         pass
     return context, page
+
+@pytest.fixture
+def page_pair_factory(browser, login_entry):
+    def factory():
+        contexts = []
+        legacy_context, legacy_page = _authenticated_page(browser, login_entry["legacy_url"])
+        new_context, new_page = _authenticated_page(browser, login_entry["new_url"])
+        contexts.extend([legacy_context, new_context])
+
+        def close():
+            for context in contexts:
+                try:
+                    context.close()
+                except Exception:
+                    pass
+
+        return legacy_page, new_page, close
+
+    return factory
 
 
 @pytest.fixture(scope="session")

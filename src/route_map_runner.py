@@ -2,13 +2,13 @@ import argparse
 import json
 import re
 import sys
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import Any, Dict, List, Optional
 
 from playwright.sync_api import Page, sync_playwright
 
 from src.config_parser import Config
-from src.route_runtime_verifier import verify_candidate_route, write_usable_route_map
+from src.route_runtime_verifier import record_manual_route, verify_candidate_route, write_usable_route_map
 
 
 CHROMIUM_ARGS = [
@@ -96,6 +96,30 @@ def _safe_file_stem(value: Any, default: str = "target") -> str:
     text = re.sub(r"\.[A-Za-z0-9]+$", "", text)
     text = re.sub(r"[^A-Za-z0-9_.-]+", "_", text).strip("_")
     return text[:120] or default
+
+
+def _target_page_name(value: Any) -> str:
+    text = str(value or "").strip().replace("/", "\\")
+    name = PureWindowsPath(text).name
+    if name.lower().endswith(".do"):
+        name = name[:-3] + ".jsp"
+    return name.lower()
+
+
+def _manual_route_candidate(target: str, *, reason: str) -> Dict[str, Any]:
+    target_name = _target_page_name(target)
+    route_id = f"manual_{_safe_file_stem(target_name or target, 'target')}"
+    return {
+        "route_id": route_id,
+        "target_page": target,
+        "target_page_name": target_name or target,
+        "target_node": target,
+        "nodes": [],
+        "length": 0,
+        "status": "manual_candidate",
+        "manual_route": True,
+        "reason": reason,
+    }
 
 
 def _persist_runtime_profile(result: Dict[str, Any], args: argparse.Namespace, login_entry_name: str) -> Optional[Path]:
@@ -227,8 +251,28 @@ def _select_routes(catalog: Dict[str, Any], *, target: Optional[str], limit: Opt
 def run_route_map(args: argparse.Namespace) -> Path:
     _make_process_dpi_aware()
 
-    catalog = _load_candidates(args.candidates)
+    candidates_missing = not args.candidates.exists()
+    if not candidates_missing:
+        catalog = _load_candidates(args.candidates)
+    else:
+        if not (args.manual_route or (args.manual_data and args.target)):
+            raise FileNotFoundError(f"candidate file not found: {args.candidates}")
+        catalog = {
+            "schema": "moonlight.route_candidates.v1",
+            "routes": [],
+            "warnings": [{"target": args.target, "warnings": [f"candidate file not found: {args.candidates}"]}],
+        }
     routes = _select_routes(catalog, target=args.target, limit=args.limit, start_index=args.start_index)
+    selected_route_count = len(routes)
+    manual_route_reason = ""
+    if args.manual_route:
+        manual_route_reason = "用户指定 --manual-route"
+        if not args.target:
+            raise ValueError("--manual-route requires --target")
+        routes = [_manual_route_candidate(args.target, reason=manual_route_reason)]
+    elif not routes and args.manual_data and args.target:
+        manual_route_reason = "候选路径数为 0，自动进入全程人工录制"
+        routes = [_manual_route_candidate(args.target, reason=manual_route_reason)]
     login_entry = Config.select_login_entry(args.login_entry, interactive=True)
     entry_url = login_entry[f"{args.side}_url"]
 
@@ -237,7 +281,9 @@ def run_route_map(args: argparse.Namespace) -> Path:
     args.capture_dir.mkdir(parents=True, exist_ok=True)
 
     print(f"[路径建图] 环境={args.side} 入口={login_entry['name']} URL={entry_url}")
-    print(f"[路径建图] 候选路径数={len(routes)} 输出={args.output}")
+    print(f"[路径建图] 候选路径数={selected_route_count} 输出={args.output}")
+    if manual_route_reason:
+        print(f"[路径建图] {manual_route_reason}")
     if args.upload_file:
         print(f"[路径建图] 上传文件={args.upload_file}")
 
@@ -252,15 +298,26 @@ def run_route_map(args: argparse.Namespace) -> Path:
 
                 try:
                     page = _prepare_page(browser, page, entry_url, args.timeout, auto_login=args.auto_login)
-                    result = verify_candidate_route(
-                        page,
-                        route,
-                        capture_dir=args.capture_dir / f"{index:04d}_{route_id}",
-                        browser_name=args.browser,
-                        timeout=args.timeout,
-                        manual_data=args.manual_data,
-                        upload_file=str(args.upload_file) if args.upload_file else None,
-                    )
+                    route_capture_dir = args.capture_dir / f"{index:04d}_{route_id}"
+                    if route.get("manual_route"):
+                        result = record_manual_route(
+                            page,
+                            route,
+                            capture_dir=route_capture_dir,
+                            browser_name=args.browser,
+                            timeout=args.timeout,
+                            upload_file=str(args.upload_file) if args.upload_file else None,
+                        )
+                    else:
+                        result = verify_candidate_route(
+                            page,
+                            route,
+                            capture_dir=route_capture_dir,
+                            browser_name=args.browser,
+                            timeout=args.timeout,
+                            manual_data=args.manual_data,
+                            upload_file=str(args.upload_file) if args.upload_file else None,
+                        )
                 except KeyboardInterrupt:
                     raise
                 except Exception as exc:
@@ -312,6 +369,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--timeout", type=int, default=15000)
     parser.add_argument("--auto-login", action="store_true", help="打开入口后自动填写账号密码并点击登录；默认关闭。")
     parser.add_argument("--manual-data", action="store_true", help="允许在输入、检索、选择、上传等场景由人工判断或接管。")
+    parser.add_argument("--manual-route", action="store_true", help="不依赖静态候选路径，从入口开始全程人工录制一条可回放路径。")
     parser.add_argument("--upload-file", type=Path, default=None, help="可选：人工录制或路径回放中遇到文件上传时使用的真实本地文件。")
     return parser
 

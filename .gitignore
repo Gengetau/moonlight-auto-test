@@ -6,9 +6,10 @@ output/
 data/
 output/
 *.html
-generated/
-__pycache__/
 *.pyc
 test_data/upload/
 mappings/
 .env
+generated/
+src/__pycache__/
+tests/__pycache__/

@@ -219,11 +219,6 @@ def _install_manual_recorder(page: Page, *, route_id: str, index: int) -> Dict[s
             pass
         events.append(event)
 
-    try:
-        page.expose_binding(binding_name, record)
-    except PlaywrightError:
-        pass
-
     script = """
     bindingName => {
       if (window.__moonlightManualRecorderBinding === bindingName) return;
@@ -308,14 +303,29 @@ def _install_manual_recorder(page: Page, *, route_id: str, index: int) -> Dict[s
     """
 
     try:
-        page.add_init_script(f"({script})({json.dumps(binding_name)})")
+        page.context.expose_binding(binding_name, record)
     except PlaywrightError:
-        pass
-    for frame in page.frames:
         try:
-            frame.evaluate(script, binding_name)
+            page.expose_binding(binding_name, record)
         except PlaywrightError:
+            pass
+
+    try:
+        page.context.add_init_script(f"({script})({json.dumps(binding_name)})")
+    except PlaywrightError:
+        try:
+            page.add_init_script(f"({script})({json.dumps(binding_name)})")
+        except PlaywrightError:
+            pass
+
+    for item_page in _pages_for_context(page) or [page]:
+        if _page_is_closed(item_page):
             continue
+        for frame in item_page.frames:
+            try:
+                frame.evaluate(script, binding_name)
+            except PlaywrightError:
+                continue
     return {"binding_name": binding_name, "events": events}
 
 
@@ -815,6 +825,107 @@ def _manual_step_fields(manual_result: Dict[str, Any], *, replay_mode: str) -> D
         "manual_replay": manual_result.get("manual_replay") or [],
         "manual_replay_mode": replay_mode,
     }
+
+
+def record_manual_route(
+    page: Page,
+    route: Dict[str, Any],
+    *,
+    capture_dir: Path,
+    browser_name: str = "chrome",
+    timeout: int = 15000,
+    upload_file: Optional[str] = None,
+) -> Dict[str, Any]:
+    """
+    Record a whole route from the current entry page to the target page.
+
+    This is used when static Struts analysis cannot produce any candidate path.
+    The operator performs the full navigation in the browser, and the recorded
+    DOM events are saved as one replayable full-route step.
+    """
+    capture_dir.mkdir(parents=True, exist_ok=True)
+    route_id = route.get("route_id") or _route_signature(route) or "manual_route"
+    target_page = str(route.get("target_page") or "")
+    target_page_name = str(route.get("target_page_name") or target_page)
+    before = _capture_state(page, capture_dir, f"{_safe_id(route_id)}_manual_route_before")
+    pages_before = _pages_for_context(page)
+    recorder = _install_manual_recorder(page, route_id=str(route_id), index=0)
+
+    while True:
+        print()
+        print("[路径建图] 全程人工路径录制")
+        print(f"  路径ID: {route_id}")
+        print(f"  目标页: {target_page or target_page_name}")
+        print("  请在浏览器中从当前入口开始，完整操作到目标页面。")
+        print("  可以完成登录、菜单展开、搜索条件输入、文件上传、弹窗选择等所有必要步骤。")
+        print("  到达目标页面并确认状态正确后，按 Enter 或输入 m 保存录制。")
+        print("  输入 s 标记不可达，输入 q 中止路径建图。")
+        raw = input("> ").strip().lower()
+        if raw == "q":
+            raise InterruptedError("用户中止路径建图")
+        if raw == "s":
+            return {
+                "route_id": route_id,
+                "target_page": target_page,
+                "target_page_name": target_page_name,
+                "source_route": route,
+                "steps": [],
+                "status": "UNREACHABLE_ROUTE",
+                "reason": "用户判定全程人工路径不可达",
+                "state_before": before,
+                "visible_controls": _visible_controls(page),
+            }
+        if raw in {"", "m"}:
+            try:
+                page.wait_for_load_state("domcontentloaded", timeout=5000)
+            except (PlaywrightTimeoutError, PlaywrightError):
+                pass
+            takeover_page = _takeover_page_after_action(page, pages_before, {}, timeout)
+            if takeover_page is not None:
+                page = takeover_page
+            after = _capture_state(page, capture_dir, f"{_safe_id(route_id)}_manual_route_final")
+            manual_events = list(recorder.get("events") or [])
+            manual_replay = _manual_replay_from_events(manual_events, upload_file=upload_file)
+            print(f"  已记录人工事件 {len(manual_events)} 个，可回放动作 {len(manual_replay)} 个。")
+            result: Dict[str, Any] = {
+                "route_id": route_id,
+                "target_page": target_page,
+                "target_page_name": target_page_name,
+                "source_route": route,
+                "steps": [
+                    {
+                        "index": 1,
+                        "action": "__manual_full_route__",
+                        "locator": None,
+                        "status": "PASS",
+                        "manual": True,
+                        "manual_replay_mode": "full_route",
+                        "manual_events": manual_events,
+                        "manual_replay": manual_replay,
+                        "reason": "全程人工路径录制",
+                        "popup_taken_over": takeover_page is not None,
+                        "active_page_url": page.url if not _page_is_closed(page) else None,
+                    }
+                ],
+                "manual_route": True,
+                "manual_events": manual_events,
+                "manual_replay": manual_replay,
+                "manual_replay_mode": "full_route",
+                "manual_steps": 1,
+                "status": "manual_verified",
+                "state_before": before,
+                "state": after,
+                "visible_controls": _visible_controls(page),
+                "runtime_profile": capture_runtime_page_profile(
+                    page,
+                    target_page=target_page,
+                    target_page_name=target_page_name,
+                    route_id=str(route_id),
+                ),
+            }
+            result["page_state_id"] = _page_state_id(result)
+            return result
+        print("  输入无效，请选择 Enter、m、s 或 q。")
 
 
 def find_runtime_action_locator(page: Page, action: str, timeout: int = 1500) -> Optional[str]:

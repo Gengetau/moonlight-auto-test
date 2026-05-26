@@ -228,6 +228,65 @@ class RouteNavigator:
                 pass
 
         action_nodes = list(_iter_action_nodes(source_route))
+        full_route_replay = list(route.get("manual_replay") or [])
+        if not full_route_replay:
+            for recorded_step in route.get("steps") or []:
+                if recorded_step.get("manual_replay_mode") == "full_route":
+                    full_route_replay = list(recorded_step.get("manual_replay") or [])
+                    break
+
+        if route.get("manual_route") or (full_route_replay and not action_nodes):
+            if not full_route_replay:
+                result.update(
+                    {
+                        "status": "BLOCKED",
+                        "blocked_at": 1,
+                        "reason": "Manual full-route map has no replayable events",
+                        "state": _capture_state(page, route_capture_dir, f"{_safe_id(route_id)}_manual_route_empty"),
+                        "visible_controls": _visible_controls(page),
+                    }
+                )
+                return page, result
+
+            page, replay_result = _execute_manual_replay(
+                page,
+                full_route_replay,
+                capture_dir=route_capture_dir,
+                test_id=f"{_safe_id(route_id)}_manual_full_route",
+                browser_name=self.browser_name,
+                timeout=self.timeout,
+                upload_file=self.upload_file,
+            )
+            result["steps"].append(
+                {
+                    "index": 1,
+                    "action": "__manual_full_route__",
+                    "locator": None,
+                    "status": replay_result.get("status"),
+                    "manual_replay_used": True,
+                    "manual_replay_mode": "full_route",
+                    "manual_replay_steps": replay_result.get("steps") or [],
+                    "reason": replay_result.get("reason"),
+                    "active_page_url": page.url if not _page_is_closed(page) else None,
+                }
+            )
+            if replay_result.get("status") != "PASS":
+                result.update(
+                    {
+                        "status": "BLOCKED",
+                        "blocked_at": 1,
+                        "reason": replay_result.get("reason") or "Manual full-route replay failed",
+                        "state": replay_result.get("state") or _capture_state(page, route_capture_dir, f"{_safe_id(route_id)}_manual_full_route_failed"),
+                        "visible_controls": _visible_controls(page),
+                    }
+                )
+                return page, result
+
+            result["state"] = _capture_state(page, route_capture_dir, f"{_safe_id(route_id)}_final")
+            result["visible_controls"] = _visible_controls(page)
+            result["url"] = (result.get("state") or {}).get("url") or (page.url if not _page_is_closed(page) else None)
+            return page, result
+
         recorded_steps = _route_steps_by_index(route)
         for index, action_node in enumerate(action_nodes, start=1):
             action = action_node["name"]

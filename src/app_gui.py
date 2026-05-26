@@ -6,6 +6,7 @@ import threading
 from pathlib import Path
 import json
 import sys
+import re
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
@@ -117,9 +118,9 @@ class MoonlightGUI:
 
         ttk.Label(frame, text="Regression Configuration", style="SubHeader.TLabel").grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 10))
 
-        ttk.Label(frame, text="Target Page (e.g. AbstListEdit.jsp):").grid(row=1, column=0, sticky="w", pady=5)
-        self.reg_target = ttk.Entry(frame, width=40)
-        self.reg_target.grid(row=1, column=1, sticky="w", padx=10)
+        ttk.Label(frame, text="Target Page Queue:").grid(row=1, column=0, sticky="nw", pady=5)
+        self.reg_targets = scrolledtext.ScrolledText(frame, width=44, height=4, bg="#111111", fg="#e0e0e0", font=("Consolas", 9))
+        self.reg_targets.grid(row=1, column=1, sticky="w", padx=10)
 
         ttk.Label(frame, text="Login Entry (from .env):").grid(row=2, column=0, sticky="w", pady=5)
         self.reg_entry = ttk.Combobox(frame, values=self.login_entry_names, width=20, state="readonly")
@@ -198,15 +199,18 @@ class MoonlightGUI:
         self.route_auto_login = tk.BooleanVar(value=False)
         ttk.Checkbutton(frame, text="Auto Login", variable=self.route_auto_login).grid(row=9, column=1, sticky="w", pady=5, padx=10)
 
+        self.route_manual_route = tk.BooleanVar(value=False)
+        ttk.Checkbutton(frame, text="Manual Full Route", variable=self.route_manual_route).grid(row=10, column=1, sticky="w", pady=5, padx=10)
+
         self.route_use_upload_file = tk.BooleanVar(value=False)
-        ttk.Checkbutton(frame, text="Use Upload File", variable=self.route_use_upload_file).grid(row=10, column=1, sticky="w", pady=5, padx=10)
+        ttk.Checkbutton(frame, text="Use Upload File", variable=self.route_use_upload_file).grid(row=11, column=1, sticky="w", pady=5, padx=10)
 
-        ttk.Label(frame, text="Upload File:").grid(row=11, column=0, sticky="w", pady=5)
+        ttk.Label(frame, text="Upload File:").grid(row=12, column=0, sticky="w", pady=5)
         self.route_upload_file = ttk.Entry(frame, width=40)
-        self.route_upload_file.grid(row=11, column=1, sticky="w", padx=10)
-        ttk.Button(frame, text="Browse", command=lambda: self.browse_file(self.route_upload_file, [("All files", "*.*")])).grid(row=11, column=2, sticky="w")
+        self.route_upload_file.grid(row=12, column=1, sticky="w", padx=10)
+        ttk.Button(frame, text="Browse", command=lambda: self.browse_file(self.route_upload_file, [("All files", "*.*")])).grid(row=12, column=2, sticky="w")
 
-        ttk.Button(frame, text="🛡️ Verify Selected Route", command=self.run_route_verify).grid(row=12, column=1, sticky="w", pady=10, padx=10)
+        ttk.Button(frame, text="🛡️ Verify Selected Route", command=self.run_route_verify).grid(row=13, column=1, sticky="w", pady=10, padx=10)
 
     def browse_dir(self, entry_widget):
         directory = filedialog.askdirectory()
@@ -261,6 +265,10 @@ class MoonlightGUI:
         safe = "".join(char if char.isalnum() or char in ("-", "_") else "_" for char in text)
         return safe or "target"
 
+    @staticmethod
+    def parse_target_queue(value):
+        return [item.strip() for item in re.split(r"[\r\n,;]+", str(value or "")) if item.strip()]
+
     def run_command(self, cmd, success_msg="Task completed successfully!"):
         def target():
             self.log(f"> Running: {cmd}")
@@ -306,12 +314,16 @@ class MoonlightGUI:
         self.run_command(cmd, "Excel Checklist exported to generated/ folder.")
 
     def run_regression(self):
-        target = self.reg_target.get().strip()
+        target_pages = self.parse_target_queue(self.reg_targets.get("1.0", tk.END))
         entry = self.reg_entry.get().strip()
         browser = BROWSER_OPTIONS.get(self.reg_browser.get(), "chrome_port")
         checklist = self.reg_checklist.get().strip()
         cmd = f"{self.quote(self.pytest_cmd)} tests/test_migration.py --run-migration --test-browser={browser}"
-        if target: cmd += f" --target-page={target}"
+        if target_pages:
+            if len(target_pages) == 1:
+                cmd += f" --target-page={self.quote(target_pages[0])}"
+            else:
+                cmd += f" --target-pages={self.quote(','.join(target_pages))}"
         if self.reg_risk.get(): cmd += " --risk-only"
         if self.reg_manual.get(): cmd += " --manual"
         if entry: cmd += f" --login-entry={entry}"
@@ -357,10 +369,12 @@ class MoonlightGUI:
         stem = self.route_file_stem(target)
         cand = route_dir / f"route_candidates_{stem}.json"
         out = route_dir / f"usable_route_map_{side}_{stem}.json"
-        if not Path(cand).exists():
+        if not self.route_manual_route.get() and not Path(cand).exists():
             messagebox.showerror("Error", f"Candidates file missing: {cand}")
             return
         cmd = f"{self.quote(self.python_cmd)} -m src.route_map_runner --candidates {self.quote(cand)} --target {self.quote(target)} --side {side} --browser {browser} --output {self.quote(out)} --manual-data"
+        if self.route_manual_route.get():
+            cmd += " --manual-route"
         if login_entry:
             cmd += f" --login-entry {self.quote(login_entry)}"
         if self.route_auto_login.get():

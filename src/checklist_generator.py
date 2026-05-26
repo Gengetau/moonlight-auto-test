@@ -73,6 +73,7 @@ class TestCase:
     generated_by: str = ""
     matched_capabilities: str = ""
     destructive: str = "false"
+    priority: str = ""
 
 
 def as_text(value: Any, default: str = "") -> str:
@@ -171,7 +172,7 @@ def runtime_profile_paths(search_dir: Path = DEFAULT_RUNTIME_PROFILE_DIR) -> Lis
     if not search_dir.exists():
         return []
     return sorted(
-        (path for path in search_dir.glob("*.json") if path.is_file()),
+        (path for path in search_dir.rglob("*.json") if path.is_file()),
         key=lambda path: path.stat().st_mtime,
         reverse=True,
     )
@@ -222,6 +223,26 @@ def select_runtime_profile_for_page(page: Dict[str, Any], profiles: Sequence[Dic
     selected.setdefault("static_page_id", page_name_of(page))
     selected["profile_source"] = "runtime_profile"
     return selected
+
+
+def runtime_profile_identity(profile: Dict[str, Any]) -> str:
+    path = as_text(profile.get("runtime_profile_path"))
+    if path:
+        try:
+            return str(Path(path).resolve()).lower()
+        except OSError:
+            return path.replace("\\", "/").lower()
+    return "|".join(
+        as_text(profile.get(key)).lower()
+        for key in ("side", "login_entry", "route_id", "target_page", "target_page_name", "page_id")
+    )
+
+
+def runtime_profile_page_input(profile: Dict[str, Any]) -> Dict[str, Any]:
+    page = dict(profile)
+    page.setdefault("profile_source", "runtime_profile")
+    page.setdefault("page_id", page.get("target_page") or page.get("target_page_name") or page.get("source"))
+    return page
 
 
 def page_risk(page: Dict[str, Any]) -> str:
@@ -942,27 +963,57 @@ def planned_case_to_test_case(case: Dict[str, Any]) -> TestCase:
         generated_by=as_text(case.get("generated_by"), "PageCasePlanner"),
         matched_capabilities=capabilities,
         destructive=as_text(case.get("destructive"), "false"),
+        priority=as_text(case.get("priority")),
     )
 
 
-def plan_page_specific_cases(scan_data: Dict[str, Any]) -> Tuple[List[TestCase], List[Dict[str, Any]], List[Dict[str, Any]]]:
+def case_priority_order(case: TestCase) -> Tuple[int, str]:
+    try:
+        return int(case.priority), case.priority
+    except (TypeError, ValueError):
+        return 1000 + SEVERITY_ORDER.get(case.severity, 99), case.severity
+
+
+def plan_page_specific_cases(
+    scan_data: Dict[str, Any],
+    *,
+    runtime_profile_dir: Path = DEFAULT_RUNTIME_PROFILE_DIR,
+    include_runtime_profile_dir: bool = False,
+) -> Tuple[List[TestCase], List[Dict[str, Any]], List[Dict[str, Any]]]:
     planner = PageCasePlanner()
     cases: List[TestCase] = []
     skipped_templates: List[Dict[str, Any]] = []
     profiles: List[Dict[str, Any]] = []
-    runtime_profiles = [] if scan_data.get("schema") == RUNTIME_PROFILE_SCHEMA else load_runtime_profiles()
+    runtime_profiles = [] if scan_data.get("schema") == RUNTIME_PROFILE_SCHEMA else load_runtime_profiles(runtime_profile_dir)
+    consumed_runtime_profiles = set()
 
     for page in page_entries(scan_data):
-        profile_input = select_runtime_profile_for_page(page, runtime_profiles) or page
+        selected_profile = select_runtime_profile_for_page(page, runtime_profiles)
+        profile_input = selected_profile or page
+        if selected_profile:
+            consumed_runtime_profiles.add(runtime_profile_identity(selected_profile))
         planned_cases, skipped, profile = planner.plan(profile_input)
         cases.extend(planned_case_to_test_case(case) for case in planned_cases)
         skipped_templates.extend(skipped)
         profiles.append(profile)
 
+    if include_runtime_profile_dir:
+        for runtime_profile in runtime_profiles:
+            identity = runtime_profile_identity(runtime_profile)
+            if identity in consumed_runtime_profiles:
+                continue
+            profile_input = runtime_profile_page_input(runtime_profile)
+            planned_cases, skipped, profile = planner.plan(profile_input)
+            cases.extend(planned_case_to_test_case(case) for case in planned_cases)
+            skipped_templates.extend(skipped)
+            profiles.append(profile)
+            consumed_runtime_profiles.add(identity)
+
     cases.sort(
         key=lambda item: (
             item.page,
             item.destructive == "true",
+            case_priority_order(item),
             SEVERITY_ORDER.get(item.severity, 99),
             item.case_type,
             item.case_id,
@@ -972,9 +1023,18 @@ def plan_page_specific_cases(scan_data: Dict[str, Any]) -> Tuple[List[TestCase],
     return cases, skipped_templates, profiles
 
 
-def generate_cases(scan_data: Dict[str, Any]) -> List[TestCase]:
+def generate_cases(
+    scan_data: Dict[str, Any],
+    *,
+    runtime_profile_dir: Path = DEFAULT_RUNTIME_PROFILE_DIR,
+    include_runtime_profile_dir: bool = False,
+) -> List[TestCase]:
     if uses_page_specific_planner(scan_data):
-        cases, _, _ = plan_page_specific_cases(scan_data)
+        cases, _, _ = plan_page_specific_cases(
+            scan_data,
+            runtime_profile_dir=runtime_profile_dir,
+            include_runtime_profile_dir=include_runtime_profile_dir,
+        )
         return cases
 
     cases: List[TestCase] = []
@@ -1076,7 +1136,14 @@ def render_markdown(scan_data: Dict[str, Any], cases: Sequence[TestCase]) -> str
     return "\n".join(lines) + "\n"
 
 
-def write_excel(path: Path, scan_data: Dict[str, Any], cases: Sequence[TestCase]) -> None:
+def write_excel(
+    path: Path,
+    scan_data: Dict[str, Any],
+    cases: Sequence[TestCase],
+    *,
+    runtime_profile_dir: Path = DEFAULT_RUNTIME_PROFILE_DIR,
+    include_runtime_profile_dir: bool = False,
+) -> None:
     try:
         from openpyxl import Workbook
         from openpyxl.styles import Alignment, Font, PatternFill
@@ -1092,11 +1159,15 @@ def write_excel(path: Path, scan_data: Dict[str, Any], cases: Sequence[TestCase]
     skipped_templates: List[Dict[str, Any]] = []
     page_profiles: List[Dict[str, Any]] = []
     if uses_page_specific_planner(scan_data):
-        _, skipped_templates, page_profiles = plan_page_specific_cases(scan_data)
+        _, skipped_templates, page_profiles = plan_page_specific_cases(
+            scan_data,
+            runtime_profile_dir=runtime_profile_dir,
+            include_runtime_profile_dir=include_runtime_profile_dir,
+        )
     summary_rows = [
         ("生成时间", datetime.now().strftime("%Y-%m-%d %H:%M:%S")),
         ("扫描根路径", as_text(scan_data.get("root"), as_text(scan_data.get("source"), "<unknown>"))),
-        ("页面数量", len(pages)),
+        ("页面数量", len(page_profiles) if page_profiles else len(pages)),
         ("form", totals.get("form", 0)),
         ("file", totals.get("file", 0)),
         ("button", totals.get("button", 0)),
@@ -1258,7 +1329,7 @@ def write_excel(path: Path, scan_data: Dict[str, Any], cases: Sequence[TestCase]
             case_id,
             case.parent_case_id,
             case.viewpoint_id,
-            case.severity,
+            case.priority or case.severity,
             case.page,
             case.line,
             case.kind,
@@ -1310,10 +1381,26 @@ def load_scan(path: Path) -> Dict[str, Any]:
         raise SystemExit(f"Invalid JSON input: {path} ({exc})") from exc
 
 
-def write_report(scan_data: Dict[str, Any], output: Optional[Path]) -> None:
-    cases = generate_cases(scan_data)
+def write_report(
+    scan_data: Dict[str, Any],
+    output: Optional[Path],
+    *,
+    runtime_profile_dir: Path = DEFAULT_RUNTIME_PROFILE_DIR,
+    include_runtime_profile_dir: bool = True,
+) -> None:
+    cases = generate_cases(
+        scan_data,
+        runtime_profile_dir=runtime_profile_dir,
+        include_runtime_profile_dir=include_runtime_profile_dir,
+    )
     if output and output.suffix.lower() == ".xlsx":
-        write_excel(output, scan_data, cases)
+        write_excel(
+            output,
+            scan_data,
+            cases,
+            runtime_profile_dir=runtime_profile_dir,
+            include_runtime_profile_dir=include_runtime_profile_dir,
+        )
         return
     report = render_markdown(scan_data, cases)
     if output:
@@ -1327,10 +1414,26 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Generate a JSP migration test checklist from jsp_scanner/page_mapping JSON.")
     parser.add_argument("input", type=Path, help="elements.json or page_mapping.json generated by moonlight tools")
     parser.add_argument("-o", "--output", type=Path, help="Report output path. Use .md or .xlsx. Defaults to stdout Markdown.")
+    parser.add_argument(
+        "--runtime-profile-dir",
+        type=Path,
+        default=DEFAULT_RUNTIME_PROFILE_DIR,
+        help="Runtime page profile JSON directory. Defaults to generated/valid/runtime_profile.",
+    )
+    parser.add_argument(
+        "--no-runtime-profile-dir",
+        action="store_true",
+        help="Do not append existing runtime_profile/*.json pages when generating the checklist.",
+    )
     args = parser.parse_args()
     if not args.input.exists():
         raise SystemExit(f"Input JSON does not exist: {args.input}")
-    write_report(load_scan(args.input), args.output)
+    write_report(
+        load_scan(args.input),
+        args.output,
+        runtime_profile_dir=args.runtime_profile_dir,
+        include_runtime_profile_dir=not args.no_runtime_profile_dir,
+    )
 
 
 if __name__ == "__main__":
