@@ -9,6 +9,8 @@ import json
 import pandas as pd
 import re
 import streamlit.components.v1 as components
+import queue
+import threading
 from pathlib import Path
 from datetime import datetime
 import sys
@@ -27,11 +29,13 @@ from src.gui_command_builder import (
     build_regression_command,
     browser_key,
     html_report_path,
+    load_negative_profile_options,
+    load_upload_case_options,
     load_page_options,
+    negative_profile_labels,
     page_option_labels,
     regression_output_dir,
-    safe_page_key,
-    split_case_types,
+    upload_case_option_labels,
     upload_profile_config_path,
 )
 
@@ -108,24 +112,14 @@ def write_upload_profile_config(page_config):
             {
                 "name": profile.get("name") or Path(str(file_path)).stem,
                 "file": str(file_path),
+                "case_id": profile.get("case_id") or "",
+                "case_ids": [profile.get("case_id")] if profile.get("case_id") else [],
+                "test_title": profile.get("test_title") or "",
                 "page_patterns": [page_config["target_page"]],
-                "case_types": split_case_types(profile.get("case_types")),
+                "case_types": [profile.get("case_type") or "upload_submit"],
                 "locator": profile.get("locator") or "",
+                "submit_locator": profile.get("submit_locator") or "",
                 "negative": bool(profile.get("negative")),
-            }
-        )
-
-    default_upload_file = page_config.get("upload_file")
-    if default_upload_file:
-        profiles.append(
-            {
-                "name": f"{safe_page_key(page_config['target_page'])}_default",
-                "file": str(default_upload_file),
-                "page_patterns": [page_config["target_page"]],
-                "case_types": [],
-                "locator": "",
-                "negative": False,
-                "default": True,
             }
         )
 
@@ -359,6 +353,188 @@ def run_command(cmd, live_output=True):
     process.wait()
     return process.returncode, full_output
 
+
+def _interactive_env():
+    env = os.environ.copy()
+    env["PYTHONUNBUFFERED"] = "1"
+    env["PYTHONIOENCODING"] = "utf-8"
+    return env
+
+
+def _reader_thread(process, output_queue):
+    try:
+        while True:
+            chunk = process.stdout.read(1)
+            if chunk == "":
+                break
+            output_queue.put(chunk)
+    finally:
+        output_queue.put(None)
+
+
+def start_interactive_command(session_key, cmd):
+    stop_interactive_command(session_key)
+    output_queue = queue.Queue()
+    process = subprocess.Popen(
+        cmd,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        shell=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        bufsize=1,
+        env=_interactive_env(),
+    )
+    thread = threading.Thread(target=_reader_thread, args=(process, output_queue), daemon=True)
+    thread.start()
+    st.session_state[session_key] = {
+        "cmd": cmd,
+        "process": process,
+        "queue": output_queue,
+        "thread": thread,
+        "output": "",
+        "closed": False,
+        "postprocessed": False,
+        "started_at": time.time(),
+    }
+
+
+def interactive_session(session_key):
+    return st.session_state.get(session_key)
+
+
+def drain_interactive_output(session_key):
+    session = interactive_session(session_key)
+    if not session:
+        return None
+    output_queue = session.get("queue")
+    if output_queue is None:
+        return session
+    while True:
+        try:
+            item = output_queue.get_nowait()
+        except queue.Empty:
+            break
+        if item is None:
+            session["closed"] = True
+            continue
+        session["output"] += item
+    return session
+
+
+def send_interactive_input(session_key, value):
+    session = drain_interactive_output(session_key)
+    if not session:
+        return
+    process = session.get("process")
+    if not process or process.poll() is not None or process.stdin is None:
+        return
+    try:
+        process.stdin.write(f"{value}\n")
+        process.stdin.flush()
+        session["output"] += f"\n[WEB INPUT] {value if value else '<Enter>'}\n"
+    except OSError as exc:
+        session["output"] += f"\n[WEB INPUT ERROR] {exc}\n"
+
+
+def stop_interactive_command(session_key):
+    session = st.session_state.get(session_key)
+    if not session:
+        return
+    process = session.get("process")
+    if process and process.poll() is None:
+        try:
+            process.terminate()
+        except OSError:
+            pass
+
+
+def render_interactive_console(session_key, *, output_path=None):
+    session = drain_interactive_output(session_key)
+    if not session:
+        return None
+
+    process = session.get("process")
+    return_code = process.poll() if process else None
+    if return_code is None:
+        st.info("路径验证进程运行中。请在这里输入，不需要回到 PowerShell。")
+    elif return_code == 0:
+        st.success(f"路径验证进程已结束：exit={return_code}")
+    else:
+        st.error(f"路径验证进程失败：exit={return_code}")
+
+    st.caption(f"Command: {session.get('cmd')}")
+    st.caption(
+        "页面接管列表说明：日志里的 [0]、[1] 是当前浏览器里可接管的页面或弹窗；"
+        "输入序号会切到该页并刷新。frame 行只是页面内部 frame URL，不需要单独选择。"
+    )
+    st.code(session.get("output") or "(no output yet)")
+
+    col_enter, col_retry, col_manual, col_skip, col_quit = st.columns(5)
+    with col_enter:
+        if st.button("Send Enter", key=f"{session_key}_send_enter", disabled=return_code is not None):
+            send_interactive_input(session_key, "")
+            st.rerun()
+    with col_retry:
+        if st.button("Send r", key=f"{session_key}_send_r", disabled=return_code is not None):
+            send_interactive_input(session_key, "r")
+            st.rerun()
+    with col_manual:
+        if st.button("Send m/save", key=f"{session_key}_send_m", disabled=return_code is not None):
+            send_interactive_input(session_key, "m")
+            st.rerun()
+    with col_skip:
+        if st.button("Send s", key=f"{session_key}_send_s", disabled=return_code is not None):
+            send_interactive_input(session_key, "s")
+            st.rerun()
+    with col_quit:
+        if st.button("Send q", key=f"{session_key}_send_q", disabled=return_code is not None):
+            send_interactive_input(session_key, "q")
+            st.rerun()
+
+    col_input, col_send = st.columns([4, 1])
+    with col_input:
+        custom_input = st.text_input(
+            "Custom input",
+            value="",
+            placeholder="页面序号、m、s、q，留空表示 Enter",
+            key=f"{session_key}_custom_input",
+            disabled=return_code is not None,
+        )
+    with col_send:
+        if st.button("Send", key=f"{session_key}_send_custom", disabled=return_code is not None):
+            send_interactive_input(session_key, custom_input)
+            st.rerun()
+
+    col_refresh, col_stop, col_clear = st.columns(3)
+    with col_refresh:
+        if st.button("Refresh output", key=f"{session_key}_refresh"):
+            st.rerun()
+    with col_stop:
+        if st.button("Stop process", key=f"{session_key}_stop", disabled=return_code is not None):
+            stop_interactive_command(session_key)
+            st.rerun()
+    with col_clear:
+        if st.button("Clear session", key=f"{session_key}_clear", disabled=return_code is None):
+            st.session_state.pop(session_key, None)
+            st.rerun()
+
+    if output_path and return_code == 0 and Path(output_path).exists():
+        st.success(f"Route map saved: {output_path}")
+
+    return return_code
+
+
+def normalize_interactive_return_code(session, rendered_value):
+    if rendered_value is None or isinstance(rendered_value, int):
+        return rendered_value
+    process = session.get("process") if session else None
+    if process:
+        return process.poll()
+    return None
+
 # Sidebar
 with st.sidebar:
     st.image("https://img.icons8.com/color/96/000000/moon.png", width=80)
@@ -375,6 +551,7 @@ with st.sidebar:
 NEW_URL=http://new.example.com
 TEST_USERNAME=mika
 TEST_PASSWORD=secret
+DOWNLOAD_DIR=~/Downloads
 """
             Path(".env").write_text(sample, encoding="utf-8")
             st.rerun()
@@ -407,6 +584,14 @@ with tabs[0]:
         render_report_links(current_report, key_prefix="latest")
 
     st.markdown("### Page Cards")
+    queue_browser_label = st.selectbox(
+        "Browser for all page cards",
+        list(BROWSER_OPTIONS.keys()),
+        index=0,
+        key="reg_queue_browser",
+    )
+    queue_browser = BROWSER_OPTIONS[queue_browser_label]
+
     if "reg_page_card_count" not in st.session_state:
         st.session_state["reg_page_card_count"] = 1
 
@@ -458,12 +643,6 @@ with tabs[0]:
 
             col_a, col_b, col_c = st.columns(3)
             with col_a:
-                browser_label = st.selectbox(
-                    "Browser",
-                    list(BROWSER_OPTIONS.keys()),
-                    index=0,
-                    key=f"reg_page_browser_{index}",
-                )
                 login_entry = st.selectbox(
                     "Login Entry",
                     LOGIN_ENTRY_NAMES,
@@ -480,35 +659,83 @@ with tabs[0]:
                 include_semi_auto = st.checkbox("Include semi-auto", value=False, key=f"reg_page_semi_{index}")
                 include_destructive = st.checkbox("Include destructive", value=False, key=f"reg_page_destructive_{index}")
                 include_negative = st.checkbox("Include negative", value=False, key=f"reg_page_negative_{index}")
-                negative_profile = st.text_input("Negative profile", value="", key=f"reg_page_negative_profile_{index}")
-                if include_negative and not negative_profile.strip():
-                    st.warning("Negative cases require a matching negative profile.")
+                negative_options = load_negative_profile_options(checklist_path, target_page)
+                negative_labels = negative_profile_labels(negative_options)
+                selected_negative_labels = st.multiselect(
+                    "Negative profiles",
+                    negative_labels,
+                    default=[],
+                    disabled=not include_negative,
+                    key=f"reg_page_negative_profiles_{index}",
+                )
+                negative_profile = ",".join(selected_page_from_label(label) for label in selected_negative_labels)
+                if include_negative and not negative_profile:
+                    st.warning("请选择至少一个 Negative profile。")
+                elif include_negative:
+                    selected_descriptions = [
+                        (next((item for item in negative_options if item.get("profile") == selected_page_from_label(label)), {}) or {}).get("description", "")
+                        for label in selected_negative_labels
+                    ]
+                    st.caption(" / ".join(item for item in selected_descriptions if item))
 
-            st.markdown("#### Upload Files")
-            default_upload = st.file_uploader("Page default upload file", key=f"reg_page_default_upload_{index}")
-            profile_count = st.number_input("Upload profile count", min_value=0, max_value=5, value=0, step=1, key=f"reg_page_profile_count_{index}")
+            st.markdown("#### Upload Files by Case")
+            upload_cases = load_upload_case_options(checklist_path, target_page)
+            upload_case_labels = upload_case_option_labels(upload_cases)
+            upload_case_by_id = {str(case.get("case_id") or ""): case for case in upload_cases}
+            if target_page and not upload_cases:
+                st.caption("No upload cases found in the selected checklist for this page.")
+            profile_count_key = f"reg_page_profile_count_{index}"
+            if int(st.session_state.get(profile_count_key, 0) or 0) > len(upload_cases):
+                st.session_state[profile_count_key] = len(upload_cases)
+            profile_count = st.number_input(
+                "Upload file count",
+                min_value=0,
+                max_value=len(upload_cases),
+                value=0,
+                step=1,
+                key=profile_count_key,
+            )
             upload_profiles = []
             for profile_index in range(int(profile_count)):
-                p_col1, p_col2, p_col3 = st.columns([1, 1, 1])
+                p_col1, p_col2 = st.columns([2, 1])
                 with p_col1:
-                    profile_name = st.text_input("Profile name", value=f"profile_{profile_index + 1}", key=f"reg_profile_name_{index}_{profile_index}")
-                    profile_file = st.file_uploader("Profile file", key=f"reg_profile_file_{index}_{profile_index}")
+                    selected_upload_case_label = st.selectbox(
+                        "Upload case_id",
+                        upload_case_labels,
+                        index=None,
+                        placeholder="Select upload case_id",
+                        key=f"reg_profile_case_id_{index}_{profile_index}",
+                    )
+                    selected_upload_case_id = selected_page_from_label(selected_upload_case_label)
+                    upload_case = upload_case_by_id.get(selected_upload_case_id, {})
                 with p_col2:
-                    profile_case_types = st.text_input("Case types", value="upload_submit", key=f"reg_profile_cases_{index}_{profile_index}")
-                    profile_locator = st.text_input("Locator", value="", key=f"reg_profile_locator_{index}_{profile_index}")
-                with p_col3:
-                    profile_negative = st.checkbox("Negative file", value=False, key=f"reg_profile_negative_{index}_{profile_index}")
+                    profile_file = st.file_uploader("Upload file", key=f"reg_profile_file_{index}_{profile_index}")
+                if upload_case:
+                    st.caption(
+                        " / ".join(
+                            item
+                            for item in [
+                                upload_case.get("test_title"),
+                                f"locator: {upload_case.get('locator')}" if upload_case.get("locator") else "",
+                                f"submit: {upload_case.get('submit_locator')}" if upload_case.get("submit_locator") else "",
+                            ]
+                            if item
+                        )
+                    )
                 upload_profiles.append(
                     {
-                        "name": profile_name,
+                        "name": selected_upload_case_id or f"upload_case_{profile_index + 1}",
+                        "case_id": selected_upload_case_id,
+                        "test_title": upload_case.get("test_title") or "",
                         "uploaded_file": profile_file,
-                        "case_types": profile_case_types,
-                        "locator": profile_locator,
-                        "negative": profile_negative,
+                        "case_type": upload_case.get("case_type") or "upload_submit",
+                        "locator": upload_case.get("locator") or "",
+                        "submit_locator": upload_case.get("submit_locator") or "",
+                        "negative": False,
                     }
                 )
 
-            browser = BROWSER_OPTIONS[browser_label]
+            browser = queue_browser
             page_config = {
                 "index": index,
                 "enabled": enabled,
@@ -524,14 +751,12 @@ with tabs[0]:
                 "include_destructive": include_destructive,
                 "include_negative": include_negative,
                 "negative_profile": negative_profile,
-                "default_upload": default_upload,
                 "upload_profiles_raw": upload_profiles,
                 "html_path": html_report_path(browser, target_page),
                 "regression_output_dir": regression_output_dir(browser),
             }
             preview_config = dict(page_config)
-            preview_config["upload_file"] = "<uploaded page default>" if default_upload else ""
-            if upload_profiles:
+            if any(profile.get("uploaded_file") for profile in upload_profiles):
                 preview_config["upload_profile_config"] = upload_profile_config_path(browser, target_page)
             if target_page:
                 try:
@@ -556,12 +781,9 @@ with tabs[0]:
         for page_config in enabled_configs:
             runtime_config = dict(page_config)
             upload_profiles = []
-            if page_config.get("default_upload") is not None:
-                upload_path = save_uploaded_file(page_config["default_upload"], subdir=f"gui_regression/{browser_key(page_config['browser'])}")
-                runtime_config["upload_file"] = str(upload_path)
             for profile in page_config.get("upload_profiles_raw") or []:
                 uploaded_file = profile.get("uploaded_file")
-                if uploaded_file is None:
+                if uploaded_file is None or not profile.get("case_id"):
                     continue
                 file_path = save_uploaded_file(uploaded_file, subdir=f"gui_regression/{browser_key(page_config['browser'])}")
                 upload_profiles.append({**profile, "file": str(file_path)})
@@ -644,12 +866,24 @@ with tabs[1]:
                             st.stop()
                         upload_path = save_uploaded_file(v_selected_upload_file, subdir="gui_route")
                         cmd += f" --upload-file {quote(upload_path)}"
-                    st.warning("Manual Data mode enabled. Check terminal for interactions if needed.")
-                    code, _ = run_command(cmd)
-                    if code == 0 and Path("generated/valid/page_mapping.json").exists():
-                        st.info("Runtime profile saved. Regenerating checklist from current mapping/profile data...")
-                        checklist_cmd = f"{PYTHON_CMD} src/checklist_generator.py generated/valid/page_mapping.json -o generated/valid/migration_checklist.xlsx"
-                        run_command(checklist_cmd)
+                    start_interactive_command("route_verify_session", cmd)
+                    st.session_state["route_verify_session"]["route_output_path"] = out_file
+                    st.rerun()
+
+        route_session = interactive_session("route_verify_session")
+        if route_session:
+            route_output = route_session.get("route_output_path")
+            route_rendered_value = render_interactive_console("route_verify_session", output_path=route_output)
+            route_code = normalize_interactive_return_code(route_session, route_rendered_value)
+            if (
+                route_code == 0
+                and not route_session.get("postprocessed")
+                and Path("generated/valid/page_mapping.json").exists()
+            ):
+                st.info("Runtime profile saved. Regenerating checklist from current mapping/profile data...")
+                checklist_cmd = f"{PYTHON_CMD} src/checklist_generator.py generated/valid/page_mapping.json -o generated/valid/migration_checklist.xlsx"
+                run_command(checklist_cmd)
+                route_session["postprocessed"] = True
 
 # --- TAB: Scanner & Mapper ---
 with tabs[2]:

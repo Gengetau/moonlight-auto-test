@@ -11,6 +11,7 @@ class Config:
     USERNAME = os.getenv("TEST_USERNAME", "testuser")
     PASSWORD = os.getenv("TEST_PASSWORD", "password")
     USER_DATA_DIR = os.getenv("USER_DATA_DIR", "./output/user_data")
+    DOWNLOAD_DIR = os.getenv("DOWNLOAD_DIR", os.path.expanduser("~/Downloads"))
 
     @staticmethod
     def _split_env_list(value: str):

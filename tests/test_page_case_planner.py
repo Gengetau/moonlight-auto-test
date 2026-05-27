@@ -114,8 +114,9 @@ def test_search_form_and_result_table_generates_search_and_table_cases():
 def test_plain_page_generates_initial_display_and_skips_other_templates():
     cases, skipped, profile = PageCasePlanner().plan({"page_id": "Plain.jsp", "elements": []})
 
-    assert {case["case_type"] for case in cases} == {"initial_display"}
+    assert {case["case_type"] for case in cases} == {"initial_display", "negative_js_error"}
     assert {case.get("viewpoint_id") for case in cases if case.get("parent_case_id")} == {"layout_text", "script_error"}
+    assert next(case for case in cases if case["case_type"] == "negative_js_error")["automation_mode"] == "auto-negative"
     assert profile["capabilities"]["initial_display"] is True
     assert any(item["template_id"] == "upload_select" and item["missing_capabilities"] == "file_upload" for item in skipped)
 
@@ -326,3 +327,41 @@ def test_runtime_profile_ignores_container_tables_when_selecting_upload_controls
     assert by_type["link_navigation"]["locator"] == 'a[href="../help/search_format/search_format_projectListUpload.html"]'
     assert "result_table_verify" not in by_type
     assert profile["capabilities"]["result_table"] is False
+
+
+def test_runtime_profile_generates_negative_http_and_network_cases():
+    cases, _, profile = PageCasePlanner().plan(
+        {
+            "schema": "moonlight.runtime_page_profile.v1",
+            "page_id": "NegativeUpload.jsp",
+            "controls": [
+                {
+                    "tag": "input",
+                    "type": "file",
+                    "name": "uploadFile",
+                    "selector": "input[name=\"uploadFile\"]",
+                    "action": "/patlics/NegativeUploadConf.do",
+                    "ownerFormName": "UploadForm",
+                    "visible": True,
+                },
+                {
+                    "tag": "input",
+                    "type": "button",
+                    "value": "確認",
+                    "selector": "input[onclick*=\"NegativeUploadConf\"]",
+                    "onclick": "submitForm('UploadForm','./NegativeUploadConf.do','')",
+                    "action": "/patlics/NegativeUploadConf.do",
+                    "ownerFormName": "UploadForm",
+                    "visible": True,
+                },
+            ],
+        }
+    )
+
+    by_type = {case["case_type"]: case for case in cases}
+
+    assert profile["capabilities"]["form_submit"] is True
+    assert by_type["negative_http_500"]["automation_mode"] == "auto-negative"
+    assert by_type["negative_http_500"]["expected_value"] == "**/NegativeUploadConf.do*"
+    assert by_type["negative_http_500"]["main_step"]
+    assert by_type["negative_network_abort"]["expected_type"] == "network_abort"

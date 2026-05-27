@@ -78,6 +78,9 @@ TEST_PASSWORD=your_password
 
 # 浏览器阵地 (便携版路径，若使用系统浏览器可留空)
 CHROME_PORTABLE_PATH=/path/to/chrome_portable/chrome.exe
+
+# 下载动作保存目录。下载文件名保持浏览器 suggested filename 原样。
+DOWNLOAD_DIR=~/Downloads
 ```
 
 ---

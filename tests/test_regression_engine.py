@@ -7,12 +7,15 @@ from PIL import Image
 from src.action_executor import (
     _accept_dialog_safely,
     _capture_state,
+    _download_save_path,
     _opens_popup_hint,
+    _render_console_evidence_image,
     _resolve_upload_file_value,
     _safe_download_filename,
     build_steps_from_page_mapping,
     infer_semantic_action,
 )
+import src.regression_engine as regression_engine_module
 from src.assert_engine import compare_visual_screenshot
 from src.regression_engine import RegressionEngine
 from src.route_navigator import RouteMapCatalog
@@ -225,6 +228,8 @@ def test_infer_semantic_action_uses_scanner_hints():
     assert infer_semantic_action(None, {"kind": "file", "action_hint": "upload"}) == "upload"
     assert infer_semantic_action("click", {"raw": '<form:select path="country">'}) == "select"
     assert infer_semantic_action(None, {"kind": "link", "raw": '<html:link href="/next">'}) == "navigate"
+    assert infer_semantic_action("negative_http_500", {}) == "negative_http_500"
+    assert infer_semantic_action("negative_js_error", {}) == "negative_js_error"
 
 
 def test_action_dedupe_prefers_locator_change_over_full_action_fallback(tmp_path):
@@ -273,6 +278,30 @@ def test_download_filename_is_windows_safe():
     assert name == "a_onclick_x_chrome_port.xls"
 
 
+def test_download_save_path_uses_env_and_preserves_suggested_filename(tmp_path, monkeypatch):
+    monkeypatch.setenv("DOWNLOAD_DIR", str(tmp_path))
+
+    path = _download_save_path("プロジェクトリストアップロード.tsv")
+
+    assert path == tmp_path / "プロジェクトリストアップロード.tsv"
+
+
+def test_console_evidence_image_renders_events(tmp_path):
+    image_path = _render_console_evidence_image(
+        [
+            {"time": "12:00:01", "type": "CONSOLE", "level": "error", "detail": "error: boom", "url": "http://example/js"},
+            {"time": "12:00:02", "type": "HTTP_ERROR", "level": "http_error", "detail": "HTTP 500", "status": 500, "url": "http://example/api"},
+        ],
+        tmp_path,
+        "case_001",
+    )
+
+    assert Path(image_path).exists()
+    with Image.open(image_path) as image:
+        assert image.width >= 1000
+        assert image.height >= 200
+
+
 def test_accept_dialog_safely_ignores_already_handled_dialog():
     class Dialog:
         def accept(self):
@@ -315,8 +344,9 @@ def test_upload_profile_resolver_prefers_checklist_then_profile_then_global(tmp_
     mapping_path.write_text(json.dumps({"page_mappings": []}), encoding="utf-8")
     checklist_file = tmp_path / "checklist.tsv"
     profile_file = tmp_path / "profile.tsv"
+    case_profile_file = tmp_path / "case_profile.tsv"
     fallback_file = tmp_path / "fallback.tsv"
-    for path in (checklist_file, profile_file, fallback_file):
+    for path in (checklist_file, profile_file, case_profile_file, fallback_file):
         path.write_text("id\tname\n1\tmoonlight\n", encoding="utf-8")
     profile_config = tmp_path / "upload_profiles.json"
     profile_config.write_text(
@@ -326,6 +356,15 @@ def test_upload_profile_resolver_prefers_checklist_then_profile_then_global(tmp_
                     {
                         "name": "valid_project_list_tsv",
                         "file": str(profile_file),
+                        "page_patterns": ["ProjectListUploadDisp.jsp"],
+                        "case_types": ["upload_submit"],
+                        "locator": "input[name='uploadFile']",
+                        "negative": False,
+                    },
+                    {
+                        "name": "case_specific_upload",
+                        "case_id": "project-upload-valid",
+                        "file": str(case_profile_file),
                         "page_patterns": ["ProjectListUploadDisp.jsp"],
                         "case_types": ["upload_submit"],
                         "locator": "input[name='uploadFile']",
@@ -342,12 +381,60 @@ def test_upload_profile_resolver_prefers_checklist_then_profile_then_global(tmp_
         upload_file=str(fallback_file),
         upload_profile_config=str(profile_config),
     )
-    action_case = {"page_id": "ProjectListUploadDisp.jsp", "case_type": "upload_submit", "action_type": "upload_submit"}
+    action_case = {"page_id": "ProjectListUploadDisp.jsp", "case_id": "project-upload-valid", "case_type": "upload_submit", "action_type": "upload_submit"}
     step = {"action_type": "upload", "locator": "input[name='uploadFile']"}
 
     assert engine._resolve_upload_value(str(checklist_file), action_case, step, "input[name='uploadFile']") == str(checklist_file)
-    assert engine._resolve_upload_value(r"C:\fakepath\bad.tsv", action_case, step, "input[name='uploadFile']") == str(profile_file)
+    assert engine._resolve_upload_value(r"C:\fakepath\bad.tsv", action_case, step, "input[name='uploadFile']") == str(case_profile_file)
+    assert engine._resolve_upload_value(r"C:\fakepath\bad.tsv", {**action_case, "case_id": "other-upload"}, step, "input[name='uploadFile']") == str(profile_file)
     assert engine._resolve_upload_value("${UPLOAD_FILE}", {**action_case, "page_id": "Other.jsp"}, step, "input[name='uploadFile']") == str(fallback_file)
+
+
+def test_upload_submit_button_step_clicks_onclick_instead_of_request_submit(tmp_path, monkeypatch):
+    mapping_path = tmp_path / "page_mapping.json"
+    mapping_path.write_text(json.dumps({"page_mappings": []}), encoding="utf-8")
+    upload_file = tmp_path / "upload.tsv"
+    upload_file.write_text("id\tname\n1\tmoonlight\n", encoding="utf-8")
+    engine = RegressionEngine(mapping_path=str(mapping_path), output_dir=str(tmp_path / "out"), upload_file=str(upload_file))
+    calls = []
+
+    def fake_execute_action(page, action_type, locator, value=None, **kwargs):
+        context = kwargs.get("action_context") or {}
+        calls.append(
+            {
+                "action_type": action_type,
+                "locator": locator,
+                "semantic_action": infer_semantic_action(action_type, context),
+            }
+        )
+        return {"status": "PASS", "state": {"url": "http://example.test/after", "screenshot": str(tmp_path / "after.png")}}
+
+    monkeypatch.setattr(regression_engine_module, "execute_action", fake_execute_action)
+    action_case = {
+        "case_id": "upload-1",
+        "case_type": "upload_submit",
+        "action_type": "upload_submit",
+        "page_id": "Upload.jsp",
+        "pre_steps": [{"action_type": "upload", "locator": "input[name='uploadFile']", "value": "${UPLOAD_FILE}"}],
+        "main_step": {
+            "action_type": "submit",
+            "locator": "input[onclick*=\"submitForm('UploadForm','./UploadConfirm.do','')\"]",
+        },
+    }
+
+    result = engine._execute_action_case(
+        object(),
+        action_case,
+        side="legacy",
+        browser_name="chrome_port",
+        capture_dir=tmp_path,
+        test_id="upload_case",
+    )
+
+    assert result["status"] == "PASS"
+    assert calls[0]["semantic_action"] == "upload"
+    assert calls[1]["action_type"] == "click"
+    assert calls[1]["semantic_action"] == "click"
 
 
 def test_checklist_loader_filters_optional_modes(tmp_path):
@@ -384,6 +471,7 @@ def test_checklist_loader_filters_optional_modes(tmp_path):
     default_engine = RegressionEngine(mapping_path=str(mapping_path), output_dir=str(tmp_path / "out"), checklist_path=str(checklist))
     default_cases = default_engine._load_checklist_cases("Page.jsp")
     assert [case["label"] for case in default_cases] == ["auto-1"]
+    assert default_cases[0]["case_id"] == "auto-1"
     coverage = {row["case_id"]: row for row in default_engine._checklist_case_rows["page.jsp"]}
     assert set(coverage) == {"auto-1", "semi-1", "destroy-1", "neg-1"}
     assert coverage["auto-1"]["excluded_reason"] == ""
@@ -402,6 +490,53 @@ def test_checklist_loader_filters_optional_modes(tmp_path):
     )
     full_cases = full_engine._load_checklist_cases("Page.jsp")
     assert {case["label"] for case in full_cases} == {"auto-1", "semi-1", "destroy-1", "neg-1"}
+
+
+def test_checklist_loader_preserves_negative_expected_value_and_steps(tmp_path):
+    pytest.importorskip("openpyxl")
+    from openpyxl import Workbook
+
+    mapping_path = tmp_path / "page_mapping.json"
+    mapping_path.write_text(json.dumps({"page_mappings": []}), encoding="utf-8")
+    checklist = tmp_path / "migration_checklist.xlsx"
+    pre_steps = json.dumps([{"action_type": "upload", "locator": "input[type='file']", "value": "${UPLOAD_FILE}"}])
+    main_step = json.dumps({"action_type": "negative_http_500", "locator": "#submit", "expected_value": "**/UploadConf.do*"})
+
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "Checklist"
+    sheet.append(
+        [
+            "case_id",
+            "page_id",
+            "automation_mode",
+            "case_type",
+            "action_type",
+            "locator",
+            "expected_type",
+            "expected_value",
+            "pre_steps",
+            "main_step",
+            "destructive",
+            "enabled",
+        ]
+    )
+    sheet.append(["neg-http", "Page.jsp", "auto-negative", "negative_http_500", "negative_http_500", "#submit", "http_error", "**/UploadConf.do*", pre_steps, main_step, "false", "true"])
+    workbook.save(checklist)
+
+    engine = RegressionEngine(
+        mapping_path=str(mapping_path),
+        output_dir=str(tmp_path / "out"),
+        checklist_path=str(checklist),
+        include_negative=True,
+        negative_profile="negative_http_500",
+    )
+    cases = engine._load_checklist_cases("Page.jsp")
+
+    assert len(cases) == 1
+    assert cases[0]["expected_value"] == "**/UploadConf.do*"
+    assert cases[0]["pre_steps"][0]["action_type"] == "upload"
+    assert cases[0]["main_step"]["action_type"] == "negative_http_500"
 
 
 def test_report_coverage_matrix_renders_checklist_case_rows(tmp_path):
@@ -467,6 +602,19 @@ def test_report_coverage_matrix_renders_checklist_case_rows(tmp_path):
                 "new_screenshot": str(screenshot),
                 "diff_screenshot": str(screenshot),
                 "visual": {"diff_percent": 0.0},
+                "download_filename_match": True,
+                "legacy_download_filename": "template.tsv",
+                "new_download_filename": "template.tsv",
+                "legacy_download_path": str(tmp_path / "template.tsv"),
+                "new_download_path": str(tmp_path / "template.tsv"),
+                "legacy_console_screenshot": str(screenshot),
+                "new_console_screenshot": str(screenshot),
+                "legacy_console_error_count": 1,
+                "new_console_error_count": 0,
+                "legacy_http_error_count": 0,
+                "new_http_error_count": 1,
+                "legacy_request_failed_count": 0,
+                "new_request_failed_count": 0,
             },
         ]
     )
@@ -478,6 +626,36 @@ def test_report_coverage_matrix_renders_checklist_case_rows(tmp_path):
     assert "auto-db" in html
     assert "destructive=true; requires --include-destructive" in html
     assert "download-001" in html
+    assert "Download filename match" in html
+    assert "template.tsv" in html
+    assert "Legacy Console" in html
+    assert "Console errors" in html
+    assert "HTTP errors" in html
+
+
+def test_download_compare_marks_filename_mismatch_as_diff(tmp_path):
+    mapping_path = tmp_path / "page_mapping.json"
+    mapping_path.write_text(json.dumps({"page_mappings": []}), encoding="utf-8")
+    screenshot = tmp_path / "shot.png"
+    Image.new("RGB", (1, 1), "white").save(screenshot)
+
+    engine = RegressionEngine(mapping_path=str(mapping_path), output_dir=str(tmp_path))
+    compared = engine._compare_state(
+        "Download.jsp",
+        "High",
+        "download",
+        {"url": "https://legacy/app", "dom": "", "screenshot": str(screenshot)},
+        {"url": "https://new/app", "dom": "", "screenshot": str(screenshot)},
+        tmp_path / "diff.png",
+        action_type="download",
+        legacy_action={"status": "PASS", "saved_filename": "legacy.tsv", "download_path": str(tmp_path / "legacy.tsv")},
+        new_action={"status": "PASS", "saved_filename": "new.tsv", "download_path": str(tmp_path / "new.tsv")},
+    )
+
+    assert compared["status"] == "DIFF"
+    assert compared["download_filename_match"] is False
+    assert compared["legacy_download_filename"] == "legacy.tsv"
+    assert compared["new_download_filename"] == "new.tsv"
 
 
 def test_render_report_contains_semantic_diagnostics(tmp_path):
@@ -669,6 +847,7 @@ def test_database_operation_kind_covers_crud_actions():
     assert RegressionEngine._database_operation_kind({"case_type": "update_action", "label": "更新"}, "click", "click") == "update"
     assert RegressionEngine._database_operation_kind({"case_type": "delete_action", "label": "削除"}, "click", "click") == "delete"
     assert RegressionEngine._database_operation_kind({"case_type": "search_normal", "label": "検索"}, "search", "click") == "read"
+    assert RegressionEngine._database_operation_kind({"case_type": "upload_submit", "label": "アップロード確認"}, "upload_submit", "upload") is None
 
 
 def test_leaving_actions_require_target_reopen():

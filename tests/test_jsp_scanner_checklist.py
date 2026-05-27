@@ -180,8 +180,8 @@ def test_page_mapping_input_uses_full_mappings_and_missing_elements():
 
     assert [page["page_id"] for page in pages] == ["MatchedA.jsp", "MatchedB.jsp", "MatchedC.jsp"]
     assert {case.page for case in cases} == {"MatchedA.jsp", "MatchedB.jsp", "MatchedC.jsp"}
-    assert {case.case_type for case in cases} == {"initial_display"}
-    assert all(case.automation_mode == "auto" for case in cases)
+    assert {"initial_display", "negative_js_error"}.issubset({case.case_type for case in cases})
+    assert {"auto", "auto-negative"}.issuperset({case.automation_mode for case in cases})
     assert all(case.generated_by in {"PageCasePlanner", "CaseExpansionRules"} for case in cases)
 
 

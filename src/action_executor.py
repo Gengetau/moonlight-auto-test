@@ -7,9 +7,10 @@ from pathlib import Path, PureWindowsPath
 from typing import Any, Dict, Iterable, List, Optional, Tuple, Union
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
-from PIL import Image, ImageDraw, ImageGrab
+from PIL import Image, ImageDraw, ImageFont, ImageGrab
 
 from src.assert_engine import compare_visual_screenshot
+from src.config_parser import Config
 
 
 def _safe_name(value: Any) -> str:
@@ -23,6 +24,141 @@ def _safe_download_filename(filename: str, browser_name: str) -> str:
     safe_base = _safe_name(name)
     safe_ext = re.sub(r"[^A-Za-z0-9.]+", "", ext)[:20]
     return f"{safe_base}_{_safe_name(browser_name)}{safe_ext}"
+
+
+def _original_download_filename(filename: str) -> str:
+    text = str(filename or "download").strip() or "download"
+    # Browsers should provide a filename, but strip path components defensively
+    # without changing the actual basename.
+    windows_name = PureWindowsPath(text).name
+    return Path(windows_name).name or "download"
+
+
+def _configured_download_dir() -> Path:
+    raw_dir = os.getenv("DOWNLOAD_DIR") or getattr(Config, "DOWNLOAD_DIR", "") or "~/Downloads"
+    expanded = os.path.expandvars(os.path.expanduser(str(raw_dir)))
+    return Path(expanded)
+
+
+def _download_save_path(suggested_filename: str) -> Path:
+    return _configured_download_dir() / _original_download_filename(suggested_filename)
+
+
+def _console_font(size: int = 15):
+    candidates = [
+        r"C:\Windows\Fonts\consola.ttf",
+        r"C:\Windows\Fonts\YuGothM.ttc",
+        r"C:\Windows\Fonts\msgothic.ttc",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
+    ]
+    for candidate in candidates:
+        if Path(candidate).exists():
+            try:
+                return ImageFont.truetype(candidate, size=size)
+            except OSError:
+                continue
+    return ImageFont.load_default()
+
+
+def _wrap_console_line(text: str, limit: int = 150) -> List[str]:
+    raw = str(text or "")
+    if len(raw) <= limit:
+        return [raw]
+    lines = []
+    current = raw
+    while len(current) > limit:
+        split_at = current.rfind(" ", 0, limit)
+        if split_at < 40:
+            split_at = limit
+        lines.append(current[:split_at].rstrip())
+        current = current[split_at:].lstrip()
+    if current:
+        lines.append(current)
+    return lines
+
+
+def _render_console_evidence_image(events: List[Dict[str, Any]], output_dir: Path, name: str) -> str:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    image_path = output_dir / f"{name}_console.png"
+    font = _console_font(15)
+    small_font = _console_font(13)
+    width = 1280
+    line_height = 24
+    header_height = 54
+    lines: List[Tuple[str, str]] = []
+
+    if not events:
+        lines.append(("info", "No console/pageerror/requestfailed/http error events captured."))
+    for event in events:
+        timestamp = event.get("time") or ""
+        level = str(event.get("level") or event.get("type") or "info").lower()
+        event_type = event.get("type") or "EVENT"
+        detail = event.get("detail") or ""
+        status = f" status={event.get('status')}" if event.get("status") else ""
+        url = f" {event.get('url')}" if event.get("url") else ""
+        text = f"{timestamp} [{event_type}]{status} {detail}{url}".strip()
+        for wrapped in _wrap_console_line(text):
+            lines.append((level, wrapped))
+
+    height = max(240, header_height + (len(lines) + 1) * line_height + 24)
+    image = Image.new("RGB", (width, height), (31, 31, 31))
+    draw = ImageDraw.Draw(image)
+    draw.rectangle((0, 0, width, header_height), fill=(38, 38, 38))
+    draw.text((18, 16), "Console evidence", fill=(232, 234, 237), font=font)
+    draw.text(
+        (220, 18),
+        "Captured from Playwright console/pageerror/requestfailed/HTTP response events",
+        fill=(154, 160, 166),
+        font=small_font,
+    )
+    y = header_height + 14
+    colors = {
+        "error": (255, 128, 128),
+        "pageerror": (255, 128, 128),
+        "requestfailed": (255, 185, 117),
+        "http_error": (255, 185, 117),
+        "warning": (255, 214, 102),
+        "warn": (255, 214, 102),
+        "info": (207, 216, 220),
+        "log": (207, 216, 220),
+        "debug": (180, 190, 200),
+    }
+    for level, text in lines:
+        draw.text((18, y), text, fill=colors.get(level, (207, 216, 220)), font=font)
+        y += line_height
+    image.save(image_path)
+    return str(image_path)
+
+
+def _needs_console_evidence(action_context: Optional[Dict[str, Any]], action_type: str) -> bool:
+    context = action_context or {}
+    blob = " ".join(
+        str(value or "")
+        for value in (
+            action_type,
+            context.get("case_type"),
+            context.get("action_type"),
+            context.get("expected_type"),
+            context.get("test_title"),
+            context.get("label"),
+            context.get("objective"),
+        )
+    ).lower()
+    return any(token in blob for token in ("js_error", "javascript", "console", "http_500", "http error", "network_abort"))
+
+
+NEGATIVE_ACTIONS = {"negative_js_error", "negative_http_500", "negative_network_abort"}
+
+
+def _negative_url_pattern(action_context: Optional[Dict[str, Any]], value: Any = None) -> str:
+    context = action_context or {}
+    for key in ("url_pattern", "expected_value", "test_data", "value"):
+        candidate = context.get(key)
+        if candidate:
+            return str(candidate)
+    if value:
+        return str(value)
+    return "**/*"
 
 
 def _page_is_closed(page: Page) -> bool:
@@ -161,6 +297,9 @@ ACTION_ALIASES = {
     "file": "upload",
     "upload": "upload",
     "download": "download",
+    "negative_js_error": "negative_js_error",
+    "negative_http_500": "negative_http_500",
+    "negative_network_abort": "negative_network_abort",
     "wait": "wait",
     "snapshot": "wait",
 }
@@ -188,6 +327,9 @@ def infer_semantic_action(action_type: Optional[str], context: Optional[Dict[str
 
     if "set_value" in raw or "setvalue" in raw or "hidden" in raw:
         return "set_value"
+    for negative_action in NEGATIVE_ACTIONS:
+        if negative_action in raw or negative_action in evidence:
+            return negative_action
     if "clear" in raw:
         return "clear"
     if "press" in raw or "special_key" in raw:
@@ -561,20 +703,85 @@ def execute_action(
     before_frame_urls = _safe_frame_urls(page)
     result["before_url"] = before_url
     result["before_frame_urls"] = before_frame_urls
+    console_events: List[Dict[str, Any]] = []
+    event_handlers: List[Tuple[str, Any]] = []
+    temporary_routes: List[Tuple[str, Any]] = []
 
-    def _log_event(event_type: str, details: Any):
+    def _record_event(event_type: str, details: Any, *, level: str = "info", url: str = "", status: Optional[int] = None):
         # 内部闭包用于记录 Playwright 事件
+        event = {
+            "time": time.strftime("%H:%M:%S"),
+            "type": event_type,
+            "level": level,
+            "detail": str(details),
+            "url": str(url or ""),
+        }
+        if status is not None:
+            event["status"] = status
+        console_events.append(event)
         test_id_str = _safe_name(test_id or "global")
         log_dir = Path(capture_dir) if capture_dir else Path("./output/logs")
         log_dir.mkdir(parents=True, exist_ok=True)
         with open(log_dir / f"{test_id_str}_events.log", "a", encoding="utf-8") as f:
             f.write(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {event_type}: {details}\n")
 
+    def _console_location(message: Any) -> str:
+        try:
+            location = message.location
+        except Exception:
+            location = {}
+        if isinstance(location, dict):
+            return str(location.get("url") or "")
+        return ""
+
+    def _on_console(message: Any):
+        try:
+            message_type = str(message.type)
+        except Exception:
+            message_type = "log"
+        try:
+            message_text = message.text
+        except Exception as exc:
+            message_text = f"<unable to read console message: {exc}>"
+        _record_event("CONSOLE", f"{message_type}: {message_text}", level=message_type, url=_console_location(message))
+
+    def _on_pageerror(error: Any):
+        _record_event("JS_ERROR", str(error), level="pageerror")
+
+    def _on_requestfailed(request: Any):
+        try:
+            failure = request.failure
+        except Exception:
+            failure = ""
+        try:
+            request_url = request.url
+        except Exception:
+            request_url = ""
+        _record_event("REQ_FAILED", failure or request_url, level="requestfailed", url=request_url)
+
+    def _on_response(response: Any):
+        try:
+            status = int(response.status)
+        except Exception:
+            status = 0
+        if status < 400:
+            return
+        try:
+            response_url = response.url
+        except Exception:
+            response_url = ""
+        _record_event("HTTP_ERROR", f"HTTP {status}", level="http_error", url=response_url, status=status)
+
+    def _attach_event(event_name: str, handler: Any):
+        page.on(event_name, handler)
+        event_handlers.append((event_name, handler))
+
     try:
         # 注入 Runtime Debugger
-        page.on("console", lambda msg: _log_event("CONSOLE", f"{msg.type}: {msg.text}"))
-        page.on("pageerror", lambda err: _log_event("JS_ERROR", str(err)))
-        page.on("requestfailed", lambda req: _log_event("REQ_FAILED", f"{req.url} ({req.failure})"))
+        _attach_event("console", _on_console)
+        _attach_event("pageerror", _on_pageerror)
+        _attach_event("requestfailed", _on_requestfailed)
+        _attach_event("response", _on_response)
         if _should_accept_database_dialog(action_context):
             def _accept_dialog(dialog):
                 accept_status = _accept_dialog_safely(dialog)
@@ -584,7 +791,7 @@ def execute_action(
                     "accept_status": accept_status,
                 }
                 result.setdefault("dialogs", []).append(dialog_state)
-                _log_event("DIALOG", f"{dialog_state['type']}: {dialog_state['message']} ({accept_status})")
+                _record_event("DIALOG", f"{dialog_state['type']}: {dialog_state['message']} ({accept_status})", level="info")
 
             page.once("dialog", _accept_dialog)
 
@@ -595,7 +802,65 @@ def execute_action(
         semantic_action = result["semantic_action"]
         navigated_directly = False
 
-        if semantic_action in ("goto", "navigate") and re.match(r"^https?://|^/", str(selector or "")):
+        if semantic_action in NEGATIVE_ACTIONS:
+            action_dispatched = True
+            result["negative_action"] = semantic_action
+            if semantic_action == "negative_js_error":
+                page.evaluate(
+                    """() => {
+                        console.error('MOONLIGHT_NEGATIVE: simulated console error before submit');
+                        setTimeout(() => { throw new Error('MOONLIGHT_NEGATIVE: simulated JavaScript runtime error'); }, 0);
+                    }"""
+                )
+                page.wait_for_timeout(300)
+            elif semantic_action in {"negative_http_500", "negative_network_abort"}:
+                pattern = _negative_url_pattern(action_context, value)
+                result["negative_url_pattern"] = pattern
+                if semantic_action == "negative_http_500":
+                    def _mock_http_500(route):
+                        route.fulfill(
+                            status=500,
+                            content_type="text/html; charset=utf-8",
+                            body="<html><body><h1>MOONLIGHT_NEGATIVE simulated HTTP 500</h1></body></html>",
+                        )
+
+                    route_handler = _mock_http_500
+                else:
+                    def _mock_network_abort(route):
+                        route.abort("failed")
+
+                    route_handler = _mock_network_abort
+                page.route(pattern, route_handler)
+                temporary_routes.append((pattern, route_handler))
+
+            if selector and selector not in {"-", "__page__"}:
+                frame, frame_state = _frame_for_selector(page, selector, timeout=min(timeout, 5000))
+                result.update(frame_state)
+                locator = frame.locator(selector).first
+                locator.wait_for(state="attached", timeout=timeout)
+                try:
+                    locator.click(timeout=timeout)
+                except PlaywrightError:
+                    locator.evaluate(
+                        """element => {
+                            const tag = element.tagName && element.tagName.toLowerCase();
+                            if (tag === 'form') {
+                                if (element.requestSubmit) element.requestSubmit();
+                                else element.submit();
+                            } else {
+                                element.click();
+                            }
+                        }"""
+                    )
+            else:
+                result["selector_found"] = True
+                if semantic_action in {"negative_http_500", "negative_network_abort"}:
+                    page.evaluate(
+                        """pattern => fetch(String(pattern).replace(/^\\*\\*\\//, '/').replace(/\\*$/, ''), { cache: 'no-store' }).catch(() => null)""",
+                        result.get("negative_url_pattern") or "/",
+                    )
+            page.wait_for_timeout(800)
+        elif semantic_action in ("goto", "navigate") and re.match(r"^https?://|^/", str(selector or "")):
             action_dispatched = True
             page.goto(selector, wait_until="domcontentloaded", timeout=max(timeout, 30000))
             navigated_directly = True
@@ -674,12 +939,17 @@ def execute_action(
             locator = frame.locator(selector).first
             locator.wait_for(state="attached", timeout=timeout)
             action_dispatched = True
-            locator.evaluate(
+            result["submit_dispatch"] = locator.evaluate(
                 """element => {
-                    const form = element.tagName && element.tagName.toLowerCase() === "form" ? element : element.closest("form");
+                    const tag = element.tagName && element.tagName.toLowerCase();
+                    if (tag !== "form") {
+                        element.click();
+                        return "clicked_element";
+                    }
+                    const form = element;
                     if (form && form.requestSubmit) form.requestSubmit();
                     else if (form) form.submit();
-                    else element.click();
+                    return "submitted_form";
                 }"""
             )
         elif semantic_action == "download":
@@ -687,11 +957,15 @@ def execute_action(
                 with page.expect_download(timeout=45000) as download_info:
                     frame.locator(selector).first.click(timeout=timeout)
                 download = download_info.value
-                # 隔离三端下载文件
-                save_path = f"./output/downloads/{_safe_download_filename(download.suggested_filename, browser_name)}"
-                Path(save_path).parent.mkdir(parents=True, exist_ok=True)
-                download.save_as(save_path)
-                result["download_path"] = save_path
+                suggested_filename = download.suggested_filename or "download"
+                save_path = _download_save_path(suggested_filename)
+                save_path.parent.mkdir(parents=True, exist_ok=True)
+                download.save_as(str(save_path))
+                result["download_suggested_filename"] = suggested_filename
+                result["download_filename"] = _original_download_filename(suggested_filename)
+                result["saved_filename"] = save_path.name
+                result["download_dir"] = str(save_path.parent)
+                result["download_path"] = str(save_path)
             except PlaywrightError as e:
                 # Edge/Windows 安全拦截补丁
                 result.update({"status": "BLOCKED", "reason": f"Download blocked or failed: {e}"})
@@ -739,14 +1013,39 @@ def execute_action(
                 ),
             }
         )
+        result["console_events"] = console_events
+        result["console_error_count"] = sum(
+            1
+            for event in console_events
+            if str(event.get("level") or "").lower() in {"error", "pageerror"}
+            or str(event.get("type") or "").upper() == "JS_ERROR"
+        )
+        result["http_error_count"] = sum(1 for event in console_events if str(event.get("type") or "").upper() == "HTTP_ERROR")
+        result["request_failed_count"] = sum(1 for event in console_events if str(event.get("type") or "").upper() == "REQ_FAILED")
         if capture_dir:
             name = _safe_name(test_id or f"{action_type}_{int(time.time() * 1000)}")
             result["state"] = _capture_state(capture_page, Path(capture_dir), name)
+            if console_events or _needs_console_evidence(action_context, action_type):
+                result["console_evidence_screenshot"] = _render_console_evidence_image(
+                    console_events,
+                    Path(capture_dir),
+                    name,
+                )
             if capture_page is not page and not keep_popup:
                 try:
                     capture_page.close()
                 except PlaywrightError:
                     pass
+        for event_name, handler in event_handlers:
+            try:
+                page.remove_listener(event_name, handler)
+            except Exception:
+                pass
+        for pattern, handler in temporary_routes:
+            try:
+                page.unroute(pattern, handler)
+            except Exception:
+                pass
 
     return result
 

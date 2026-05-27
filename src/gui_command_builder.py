@@ -6,6 +6,28 @@ from typing import Any, Dict, Iterable, List, Optional
 
 DEFAULT_CHECKLIST_PATH = "generated/valid/migration_checklist.xlsx"
 DEFAULT_ROUTE_MAP_PATH = "generated/valid/route"
+DEFAULT_NEGATIVE_PROFILES = [
+    {
+        "profile": "negative_js_error",
+        "label": "JS error",
+        "description": "console.error + JavaScript runtime error",
+    },
+    {
+        "profile": "negative_http_500",
+        "label": "HTTP 500",
+        "description": "Mock target request as HTTP 500",
+    },
+    {
+        "profile": "negative_network_abort",
+        "label": "Network abort",
+        "description": "Abort target request",
+    },
+    {
+        "profile": "negative_file_upload",
+        "label": "Invalid file upload",
+        "description": "Invalid/negative file upload cases",
+    },
+]
 
 
 def quote(value: Any) -> str:
@@ -24,6 +46,11 @@ def safe_page_key(page_id: str) -> str:
 
 def split_case_types(value: Any) -> List[str]:
     return [item.strip() for item in re.split(r"[\r\n,;]+", str(value or "")) if item.strip()]
+
+
+def target_page_name(value: Any) -> str:
+    text = Path(str(value or "").replace("\\", "/")).name
+    return text.lower()
 
 
 def html_report_path(browser_name: str, page_id: str) -> Path:
@@ -164,4 +191,204 @@ def page_option_labels(options: Iterable[Dict[str, Any]]) -> List[str]:
             details.append("route: yes")
         suffix = f"    {' / '.join(details)}" if details else ""
         labels.append(f"{option['page_id']}{suffix}")
+    return labels
+
+
+def _column_index(headers: List[str], *names: str) -> Optional[int]:
+    wanted = {name.strip().lower() for name in names if str(name or "").strip()}
+    for index, header in enumerate(headers):
+        if header.strip().lower() in wanted:
+            return index
+    return None
+
+
+def _row_value(row: Iterable[Any], index: Optional[int]) -> str:
+    values = list(row)
+    if index is None or index >= len(values):
+        return ""
+    value = values[index]
+    return "" if value is None else str(value).strip()
+
+
+def _is_upload_case(
+    *,
+    case_type: Any,
+    action_type: Any,
+    title: Any,
+    submit_locator: Any,
+    main_step: Any,
+) -> bool:
+    case_lower = str(case_type or "").lower()
+    action_lower = str(action_type or "").lower()
+    title_text = str(title or "")
+    main_step_lower = str(main_step or "").lower()
+    if case_lower == "upload_submit" or action_lower == "upload_submit":
+        return True
+    if "アップロード確認" in title_text:
+        return True
+    if submit_locator:
+        return True
+    return "submit" in main_step_lower or "click" in main_step_lower
+
+
+def load_upload_case_options(checklist_path: Any, page_id: Any) -> List[Dict[str, str]]:
+    checklist = Path(str(checklist_path or ""))
+    target = target_page_name(page_id)
+    if not target or not checklist.exists():
+        return []
+
+    try:
+        from openpyxl import load_workbook
+    except Exception:
+        return []
+
+    try:
+        workbook = load_workbook(checklist, data_only=True, read_only=True)
+        sheet = workbook["Checklist"] if "Checklist" in workbook.sheetnames else workbook[workbook.sheetnames[0]]
+        rows = list(sheet.iter_rows(values_only=True))
+    except Exception:
+        return []
+
+    if not rows:
+        return []
+
+    headers = [str(value or "").strip().lower() for value in rows[0]]
+    page_col = _column_index(headers, "page_id", "page", "jsp")
+    case_id_col = _column_index(headers, "case_id", "id", "no")
+    title_col = _column_index(headers, "test_title", "title", "test_viewpoint")
+    mode_col = _column_index(headers, "automation_mode", "mode")
+    case_type_col = _column_index(headers, "case_type")
+    action_type_col = _column_index(headers, "action_type")
+    locator_col = _column_index(headers, "locator")
+    submit_locator_col = _column_index(headers, "submit_locator")
+    main_step_col = _column_index(headers, "main_step")
+    destructive_col = _column_index(headers, "destructive")
+    enabled_col = _column_index(headers, "enabled", "enable")
+
+    options: List[Dict[str, str]] = []
+    seen = set()
+    for row in rows[1:]:
+        row_page = _row_value(row, page_col)
+        if target_page_name(row_page) != target:
+            continue
+
+        case_id = _row_value(row, case_id_col)
+        title = _row_value(row, title_col)
+        case_type = _row_value(row, case_type_col)
+        action_type = _row_value(row, action_type_col)
+        submit_locator = _row_value(row, submit_locator_col)
+        main_step = _row_value(row, main_step_col)
+        locator = _row_value(row, locator_col)
+        if not _is_upload_case(
+            case_type=case_type,
+            action_type=action_type,
+            title=title,
+            submit_locator=submit_locator,
+            main_step=main_step,
+        ):
+            continue
+
+        option_id = case_id or title or f"upload_case_{len(options) + 1}"
+        key = option_id.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        options.append(
+            {
+                "case_id": option_id,
+                "test_title": title,
+                "automation_mode": _row_value(row, mode_col),
+                "case_type": case_type or action_type or "upload_submit",
+                "action_type": action_type or case_type or "upload_submit",
+                "locator": locator,
+                "submit_locator": submit_locator,
+                "destructive": _row_value(row, destructive_col) or "false",
+                "enabled": _row_value(row, enabled_col) or "true",
+            }
+        )
+    return options
+
+
+def upload_case_option_labels(cases: Iterable[Dict[str, Any]]) -> List[str]:
+    labels = []
+    for case in cases:
+        details = []
+        if case.get("test_title"):
+            details.append(str(case["test_title"]))
+        if case.get("automation_mode"):
+            details.append(f"mode: {case['automation_mode']}")
+        if case.get("locator"):
+            details.append(f"locator: {case['locator']}")
+        suffix = f"    {' / '.join(details)}" if details else ""
+        labels.append(f"{case.get('case_id') or 'upload_case'}{suffix}")
+    return labels
+
+
+def _is_negative_case_type(case_type: Any, action_type: Any) -> bool:
+    text = " ".join(str(value or "").lower() for value in (case_type, action_type))
+    return "negative" in text or text.startswith("error_")
+
+
+def load_negative_profile_options(checklist_path: Any, page_id: Any) -> List[Dict[str, str]]:
+    checklist = Path(str(checklist_path or ""))
+    target = target_page_name(page_id)
+    if not target or not checklist.exists():
+        return DEFAULT_NEGATIVE_PROFILES
+
+    try:
+        from openpyxl import load_workbook
+    except Exception:
+        return DEFAULT_NEGATIVE_PROFILES
+
+    try:
+        workbook = load_workbook(checklist, data_only=True, read_only=True)
+        sheet = workbook["Checklist"] if "Checklist" in workbook.sheetnames else workbook[workbook.sheetnames[0]]
+        rows = list(sheet.iter_rows(values_only=True))
+    except Exception:
+        return DEFAULT_NEGATIVE_PROFILES
+
+    if not rows:
+        return DEFAULT_NEGATIVE_PROFILES
+
+    headers = [str(value or "").strip().lower() for value in rows[0]]
+    page_col = _column_index(headers, "page_id", "page", "jsp")
+    case_type_col = _column_index(headers, "case_type")
+    action_type_col = _column_index(headers, "action_type")
+    title_col = _column_index(headers, "test_title", "title", "test_viewpoint")
+    mode_col = _column_index(headers, "automation_mode", "mode")
+
+    defaults = {item["profile"]: item for item in DEFAULT_NEGATIVE_PROFILES}
+    options: Dict[str, Dict[str, str]] = {}
+    for row in rows[1:]:
+        row_page = _row_value(row, page_col)
+        if target_page_name(row_page) != target:
+            continue
+        case_type = _row_value(row, case_type_col)
+        action_type = _row_value(row, action_type_col)
+        if not _is_negative_case_type(case_type, action_type):
+            continue
+        profile = (case_type or action_type).strip()
+        if not profile:
+            continue
+        default = defaults.get(profile, {})
+        options[profile] = {
+            "profile": profile,
+            "label": default.get("label") or profile,
+            "description": _row_value(row, title_col) or default.get("description") or _row_value(row, mode_col),
+        }
+
+    if not options:
+        return DEFAULT_NEGATIVE_PROFILES
+    for default in DEFAULT_NEGATIVE_PROFILES:
+        options.setdefault(default["profile"], dict(default))
+    return list(options.values())
+
+
+def negative_profile_labels(options: Iterable[Dict[str, Any]]) -> List[str]:
+    labels = []
+    for option in options:
+        label = option.get("label") or option.get("profile") or "negative"
+        description = option.get("description")
+        suffix = f"    {description}" if description else ""
+        labels.append(f"{option.get('profile') or label}{suffix}")
     return labels

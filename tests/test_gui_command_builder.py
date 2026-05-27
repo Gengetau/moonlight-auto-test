@@ -1,11 +1,17 @@
 import json
 from pathlib import Path
 
+import pytest
+
 from src.gui_command_builder import (
     build_regression_command,
     html_report_path,
+    load_negative_profile_options,
+    load_upload_case_options,
     load_page_options,
+    negative_profile_labels,
     regression_output_dir,
+    upload_case_option_labels,
 )
 
 
@@ -81,3 +87,104 @@ def test_load_page_options_merges_mapping_routes_and_recent_reports(tmp_path):
     assert by_page["ProjectListUploadDisp.jsp"]["risk"] == "High"
     assert by_page["ProjectListUploadErr.jsp"]["route_map_path"] == str(route_map)
     assert "recent" in by_page["UopcUploadListDispJP.jsp"]["sources"]
+
+
+def test_load_upload_case_options_filters_page_upload_cases(tmp_path):
+    pytest.importorskip("openpyxl")
+    from openpyxl import Workbook
+
+    checklist = tmp_path / "migration_checklist.xlsx"
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "Checklist"
+    sheet.append(
+        [
+            "case_id",
+            "page_id",
+            "test_title",
+            "automation_mode",
+            "case_type",
+            "action_type",
+            "locator",
+            "submit_locator",
+            "main_step",
+            "destructive",
+            "enabled",
+        ]
+    )
+    sheet.append(
+        [
+            "project-upload-valid",
+            "ProjectListUploadDisp.jsp",
+            "アップロード確認",
+            "auto",
+            "upload_submit",
+            "upload_submit",
+            "input[name='uploadFile']",
+            "input[value='アップロード']",
+            "",
+            "false",
+            "true",
+        ]
+    )
+    sheet.append(
+        [
+            "project-snapshot",
+            "ProjectListUploadDisp.jsp",
+            "初期表示",
+            "auto",
+            "snapshot",
+            "snapshot",
+            "__page__",
+            "",
+            "",
+            "false",
+            "true",
+        ]
+    )
+    sheet.append(
+        [
+            "other-upload",
+            "Other.jsp",
+            "アップロード確認",
+            "auto",
+            "upload_submit",
+            "upload_submit",
+            "input[type='file']",
+            "",
+            "",
+            "false",
+            "true",
+        ]
+    )
+    workbook.save(checklist)
+
+    cases = load_upload_case_options(checklist, "ProjectListUploadDisp.jsp")
+    labels = upload_case_option_labels(cases)
+
+    assert [case["case_id"] for case in cases] == ["project-upload-valid"]
+    assert cases[0]["locator"] == "input[name='uploadFile']"
+    assert "project-upload-valid" in labels[0]
+
+
+def test_load_negative_profile_options_reads_page_checklist_cases(tmp_path):
+    pytest.importorskip("openpyxl")
+    from openpyxl import Workbook
+
+    checklist = tmp_path / "checklist.xlsx"
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "Checklist"
+    sheet.append(["case_id", "page_id", "automation_mode", "case_type", "action_type", "test_title"])
+    sheet.append(["neg-js", "Upload.jsp", "auto-negative", "negative_js_error", "negative_js_error", "JS error evidence"])
+    sheet.append(["neg-http", "Upload.jsp", "auto-negative", "negative_http_500", "negative_http_500", "HTTP 500 evidence"])
+    sheet.append(["other", "Other.jsp", "auto-negative", "negative_network_abort", "negative_network_abort", "Other page"])
+    workbook.save(checklist)
+
+    options = load_negative_profile_options(checklist, "Upload.jsp")
+    profiles = {item["profile"]: item for item in options}
+    labels = negative_profile_labels(options)
+
+    assert "negative_js_error" in profiles
+    assert profiles["negative_http_500"]["description"] == "HTTP 500 evidence"
+    assert any(label.startswith("negative_js_error") for label in labels)

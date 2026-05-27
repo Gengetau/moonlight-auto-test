@@ -99,6 +99,30 @@ DEFAULT_CASE_TEMPLATES = [
         "priority": 900,
         "destructive": True,
     },
+    {
+        "template_id": "negative_js_error",
+        "case_type": "negative_js_error",
+        "action_type": "negative_js_error",
+        "requires": ["initial_display"],
+        "priority": 930,
+        "negative": True,
+    },
+    {
+        "template_id": "negative_http_500",
+        "case_type": "negative_http_500",
+        "action_type": "negative_http_500",
+        "requires": ["form_submit"],
+        "priority": 940,
+        "negative": True,
+    },
+    {
+        "template_id": "negative_network_abort",
+        "case_type": "negative_network_abort",
+        "action_type": "negative_network_abort",
+        "requires": ["form_submit"],
+        "priority": 950,
+        "negative": True,
+    },
 ]
 
 
@@ -1253,11 +1277,49 @@ class PageCasePlanner:
             steps = "テスト用データ行の削除 locator を操作し、確認ダイアログ、メッセージ、一覧更新を確認する。"
             expected = "Legacy/New とも確認・削除後のメッセージ・一覧状態が同等で、対象外データを誤削除しない。"
             test_data = "${DELETE_TEST_ROW}"
+        elif template_id == "negative_js_error":
+            trigger_item = self._best_negative_trigger(profile)
+            locator = _as_text(trigger_item.get("locator") or "__page__")
+            expected_type = "console_error"
+            expected_value = "CONSOLE:error,JS_ERROR"
+            title = "JS エラー検知確認"
+            objective = "Playwright から console.error と JavaScript runtime error を注入し、エラー証跡がレポートに残ることを確認する。"
+            steps = "対象画面で simulated JS error を発火し、必要に応じて代表 locator をクリックして console evidence を取得する。"
+            expected = "Legacy/New とも JS エラー検知結果と console evidence 画像がレポートに出力される。"
+        elif template_id in {"negative_http_500", "negative_network_abort"}:
+            file_item = self._first(profile, "files")
+            trigger_item = self._best_submit_for_file(profile, file_item) if file_item else self._best_negative_trigger(profile)
+            locator = _as_text(trigger_item.get("locator"))
+            if not locator:
+                return None, "missing trigger locator"
+            expected_value = self._route_pattern_for_action(trigger_item) or "**/*"
+            expected_type = "http_error" if template_id == "negative_http_500" else "network_abort"
+            if file_item:
+                file_locator = _as_text(file_item.get("locator"))
+                if file_locator:
+                    test_data = "${UPLOAD_FILE}"
+                    pre_steps = json.dumps([{"action_type": "upload", "locator": file_locator, "value": test_data}], ensure_ascii=False)
+                    main_step = json.dumps({"action_type": template.get("action_type"), "locator": locator, "expected_value": expected_value}, ensure_ascii=False)
+            if template_id == "negative_http_500":
+                title = "HTTP 500 応答時エラー処理確認"
+                objective = "submit/遷移リクエストを Playwright route で HTTP 500 に置き換え、画面状態と console/network 証跡を確認する。"
+                steps = "対象 submit locator に対して HTTP 500 mock を設定し、実操作後の画面と console evidence を取得する。"
+                expected = "白画面化、無限待機、ブラウザ停止が発生せず、HTTP 500 の証跡がレポートに残る。"
+            else:
+                title = "通信中断時エラー処理確認"
+                objective = "submit/遷移リクエストを Playwright route で abort し、通信失敗時の画面状態と証跡を確認する。"
+                steps = "対象 submit locator に対して network abort mock を設定し、実操作後の画面と console evidence を取得する。"
+                expected = "通信中断時もブラウザ停止や不正遷移が発生せず、request failed の証跡がレポートに残る。"
         else:
             return None, "not applicable to page profile"
 
         matched = [name for name, enabled in (profile.get("capabilities") or {}).items() if enabled]
-        automation_mode = "auto-db" if template_id in {"create_action", "update_action", "delete_action"} else "auto"
+        if template_id in {"create_action", "update_action", "delete_action"}:
+            automation_mode = "auto-db"
+        elif template_id in NEGATIVE_CASE_TYPES:
+            automation_mode = "auto-negative"
+        else:
+            automation_mode = "auto"
         return {
             "case_id": f"{_safe_case_id(page_id)}-{template_id}-001",
             "page_id": page_id,
@@ -1329,6 +1391,60 @@ class PageCasePlanner:
             return points, _as_text(action.get("locator"))
 
         return max(actions, key=score)
+
+    @staticmethod
+    def _best_negative_trigger(profile: Dict[str, Any]) -> Dict[str, Any]:
+        buckets = [
+            profile.get("submit_actions") or [],
+            profile.get("search_actions") or [],
+            profile.get("navigation_links") or [],
+            profile.get("create_actions") or [],
+            profile.get("update_actions") or [],
+        ]
+        actions = [item for bucket in buckets for item in bucket if isinstance(item, dict)]
+        if not actions:
+            return {}
+
+        def score(action: Dict[str, Any]) -> Tuple[int, str]:
+            blob = " ".join(_as_text(action.get(key)) for key in ("label", "action", "onclick", "locator")).lower()
+            points = 0
+            if any(token in blob for token in ("submit", "confirm", "conf", "検索", "確認", "送信")):
+                points += 100
+            if any(token in blob for token in ("search", "list", "main")):
+                points += 20
+            if any(token in blob for token in ("logout", "logoff", "close", "window.close", "削除", "delete")):
+                points -= 250
+            if "download" in blob or "template" in blob:
+                points -= 120
+            return points, _as_text(action.get("locator"))
+
+        return max(actions, key=score)
+
+    @staticmethod
+    def _route_pattern_for_action(action: Dict[str, Any]) -> str:
+        values = [
+            action.get("action"),
+            action.get("onclick"),
+            action.get("href"),
+            action.get("locator"),
+        ]
+        for value in values:
+            text = _as_text(value)
+            if not text:
+                continue
+            candidates = re.findall(r"['\"]([^'\"]+\.(?:do|jsp|action)(?:\?[^'\"]*)?)['\"]", text, flags=re.IGNORECASE)
+            if not candidates and re.search(r"\.(?:do|jsp|action)(?:\?|$)", text, flags=re.IGNORECASE):
+                candidates = [text]
+            for candidate in candidates:
+                cleaned = candidate.strip().replace("\\", "/")
+                cleaned = cleaned.split("?", 1)[0].strip()
+                cleaned = cleaned.lstrip("./")
+                if not cleaned:
+                    continue
+                leaf = cleaned.rsplit("/", 1)[-1]
+                if leaf:
+                    return f"**/{leaf}*"
+        return ""
 
     @staticmethod
     def _stable_delete_locator(delete_item: Dict[str, Any]) -> str:

@@ -827,6 +827,137 @@ def _manual_step_fields(manual_result: Dict[str, Any], *, replay_mode: str) -> D
     }
 
 
+def _page_url_candidates(page: Page) -> List[str]:
+    urls: List[str] = []
+    try:
+        if page.url:
+            urls.append(str(page.url))
+    except PlaywrightError:
+        pass
+    try:
+        for frame in page.frames:
+            url = str(frame.url or "")
+            if url and url not in urls:
+                urls.append(url)
+    except PlaywrightError:
+        pass
+    return urls
+
+
+def _manual_route_target_needles(route: Optional[Dict[str, Any]]) -> List[str]:
+    route = route or {}
+    needles: List[str] = []
+
+    def add(value: Any) -> None:
+        text = str(value or "").strip().replace("\\", "/")
+        if not text:
+            return
+        variants = [text, text.lstrip("/")]
+        if text.lower().endswith(".jsp"):
+            variants.append(re.sub(r"\.jsp$", ".do", text, flags=re.IGNORECASE))
+        if text.lower().endswith(".do"):
+            variants.append(re.sub(r"\.do$", ".jsp", text, flags=re.IGNORECASE))
+        for variant in variants:
+            lower = variant.lower()
+            if lower and lower not in needles:
+                needles.append(lower)
+
+    for key in ("target_page", "target_page_name", "target_node"):
+        add(route.get(key))
+    return needles
+
+
+def _interactive_manual_route_takeover(page: Page, route: Optional[Dict[str, Any]], timeout: int) -> Page:
+    needles = _manual_route_target_needles(route)
+    while True:
+        try:
+            page.wait_for_timeout(200)
+        except PlaywrightError:
+            pass
+
+        pages = _pages_for_context(page) or [page]
+        print("[路径建图] 页面接管/刷新")
+        print(f"  已探测到 {len(pages)} 个 Playwright 页面对象：")
+        matched_index = -1
+        for index, item_page in enumerate(pages):
+            urls = _page_url_candidates(item_page)
+            summary = urls[0] if urls else "about:blank"
+            print(f"    [{index}] {summary[:160]}")
+            for frame_url in urls[1:6]:
+                print(f"        frame: {frame_url[:150]}")
+            haystack = " ".join(url.lower() for url in urls)
+            if needles and any(needle in haystack for needle in needles):
+                matched_index = index
+
+        if matched_index >= 0:
+            print(f"  已自动匹配目标页面，接管 [{matched_index}]。")
+            selected = pages[matched_index]
+        else:
+            print("  未能自动匹配目标页面。")
+            raw_choice = input("  请输入要接管/刷新的页面序号；直接 Enter 重新扫描；q 中止: ").strip().lower()
+            if raw_choice == "q":
+                raise InterruptedError("用户中止路径建图")
+            if not raw_choice:
+                continue
+            if not raw_choice.isdigit() or not (0 <= int(raw_choice) < len(pages)):
+                print("  输入无效，请输入列表中的页面序号。")
+                continue
+            selected = pages[int(raw_choice)]
+
+        try:
+            selected.bring_to_front()
+            selected.wait_for_load_state("domcontentloaded", timeout=min(timeout, 5000))
+            return selected
+        except (PlaywrightTimeoutError, PlaywrightError) as exc:
+            print(f"  接管失败: {exc}，请重试。")
+
+
+def _refresh_manual_route_page(
+    page: Page,
+    pages_before: List[Page],
+    timeout: int,
+    route: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    before_ids = {id(item) for item in pages_before}
+    page = _interactive_manual_route_takeover(page, route, timeout)
+
+    status = "PASS"
+    reason = ""
+    try:
+        page.bring_to_front()
+    except PlaywrightError as exc:
+        status = "WARN"
+        reason = f"bring_to_front failed: {exc}"
+
+    try:
+        page.wait_for_load_state("domcontentloaded", timeout=min(timeout, 5000))
+    except (PlaywrightTimeoutError, PlaywrightError):
+        pass
+
+    try:
+        page.reload(wait_until="domcontentloaded", timeout=max(timeout, 10000))
+    except (PlaywrightTimeoutError, PlaywrightError) as exc:
+        try:
+            page.keyboard.press("F5")
+            page.wait_for_load_state("domcontentloaded", timeout=min(timeout, 10000))
+        except (PlaywrightTimeoutError, PlaywrightError) as fallback_exc:
+            status = "WARN"
+            reason = f"reload failed: {exc}; F5 failed: {fallback_exc}"
+
+    try:
+        page.wait_for_load_state("networkidle", timeout=min(timeout, 5000))
+    except (PlaywrightTimeoutError, PlaywrightError):
+        pass
+
+    return {
+        "page": page,
+        "status": status,
+        "reason": reason,
+        "popup_taken_over": id(page) not in before_ids,
+        "url": None if _page_is_closed(page) else page.url,
+    }
+
+
 def record_manual_route(
     page: Page,
     route: Dict[str, Any],
@@ -850,6 +981,7 @@ def record_manual_route(
     before = _capture_state(page, capture_dir, f"{_safe_id(route_id)}_manual_route_before")
     pages_before = _pages_for_context(page)
     recorder = _install_manual_recorder(page, route_id=str(route_id), index=0)
+    manual_refreshes: List[Dict[str, Any]] = []
 
     while True:
         print()
@@ -858,7 +990,8 @@ def record_manual_route(
         print(f"  目标页: {target_page or target_page_name}")
         print("  请在浏览器中从当前入口开始，完整操作到目标页面。")
         print("  可以完成登录、菜单展开、搜索条件输入、文件上传、弹窗选择等所有必要步骤。")
-        print("  到达目标页面并确认状态正确后，按 Enter 或输入 m 保存录制。")
+        print("  如果弹窗页面空白、停止或未加载完成，按 Enter/r 进入页面接管列表，选择后刷新；可多按几次。")
+        print("  到达目标页面并确认状态正确后，输入 m 保存录制。")
         print("  输入 s 标记不可达，输入 q 中止路径建图。")
         raw = input("> ").strip().lower()
         if raw == "q":
@@ -875,7 +1008,18 @@ def record_manual_route(
                 "state_before": before,
                 "visible_controls": _visible_controls(page),
             }
-        if raw in {"", "m"}:
+        if raw in {"", "r", "retry", "refresh"}:
+            refresh_result = _refresh_manual_route_page(page, pages_before, timeout, route=route)
+            page = refresh_result.pop("page")
+            manual_refreshes.append(refresh_result)
+            print(
+                "  已刷新/重新接管当前页面: "
+                f"status={refresh_result.get('status')} "
+                f"popup={refresh_result.get('popup_taken_over')} "
+                f"url={refresh_result.get('url')}"
+            )
+            continue
+        if raw in {"m", "save", "done"}:
             try:
                 page.wait_for_load_state("domcontentloaded", timeout=5000)
             except (PlaywrightTimeoutError, PlaywrightError):
@@ -905,12 +1049,15 @@ def record_manual_route(
                         "reason": "全程人工路径录制",
                         "popup_taken_over": takeover_page is not None,
                         "active_page_url": page.url if not _page_is_closed(page) else None,
+                        "manual_refreshes": manual_refreshes,
                     }
                 ],
                 "manual_route": True,
                 "manual_events": manual_events,
                 "manual_replay": manual_replay,
                 "manual_replay_mode": "full_route",
+                "manual_refreshes": manual_refreshes,
+                "manual_refresh_count": len(manual_refreshes),
                 "manual_steps": 1,
                 "status": "manual_verified",
                 "state_before": before,
@@ -925,7 +1072,7 @@ def record_manual_route(
             }
             result["page_state_id"] = _page_state_id(result)
             return result
-        print("  输入无效，请选择 Enter、m、s 或 q。")
+        print("  输入无效，请选择 Enter/r、m、s 或 q。")
 
 
 def find_runtime_action_locator(page: Page, action: str, timeout: int = 1500) -> Optional[str]:

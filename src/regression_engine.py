@@ -767,8 +767,10 @@ class RegressionEngine:
         submit_locator_col = col("submit_locator", "submit selector", "提交locator")
         test_data_col = col("test_data", "value", "测试数据", "テストデータ")
         operation_col = col("operation", "操作", "操作内容")
+        pre_steps_col = col("pre_steps", "pre steps")
         main_step_col = col("main_step", "main step")
         expected_type_col = col("expected_type", "期待種別")
+        expected_value_col = col("expected_value", "期待値")
         destructive_col = col("destructive", "破壊的", "destructive?")
         generated_by_col = col("generated_by")
         enabled_col = col("enabled", "enable", "有效", "有効")
@@ -784,8 +786,10 @@ class RegressionEngine:
             "locator_col": locator_col,
             "submit_locator_col": submit_locator_col,
             "operation_col": operation_col,
+            "pre_steps_col": pre_steps_col,
             "main_step_col": main_step_col,
             "expected_type_col": expected_type_col,
+            "expected_value_col": expected_value_col,
             "destructive_col": destructive_col,
             "enabled_col": enabled_col,
         }
@@ -868,8 +872,10 @@ class RegressionEngine:
             test_data = cell(test_data_col)
             label = test_title or case_id or case_type
             operation = cell(operation_col)
+            pre_steps_text = cell(pre_steps_col)
             main_step_text = cell(main_step_col)
             expected_type = cell(expected_type_col)
+            expected_value = cell(expected_value_col)
             destructive = self._truthy(destructive_value)
             negative_case = self._is_negative_case(case_type, action_type)
 
@@ -909,9 +915,11 @@ class RegressionEngine:
                 main_locator = submit_locator or main_step.get("submit_locator") or main_step.get("locator") or self._submit_locator_from_mapping(mapping, upload_locator=locator)
                 main_action_type = main_step.get("action_type") or ("click" if main_locator and not str(main_locator).strip().lower().startswith("form") else "submit")
                 case: Dict[str, Any] = {
+                    "case_id": case_id,
                     "case_type": "upload_submit",
                     "action_type": "upload_submit",
                     "label": label,
+                    "test_title": test_title,
                     "page_id": row_page,
                     "source": "checklist",
                     "expected_type": expected_type,
@@ -936,32 +944,43 @@ class RegressionEngine:
                 cases.append(self._normalize_action_case(case))
                 stats["loadable_upload_submit"] += 1
             else:
+                parsed_pre_steps = self._parse_steps_json(pre_steps_text)
+                parsed_main_step = self._parse_step_json(main_step_text)
                 if action_lower in {"snapshot", "page_snapshot", "visual_check", "wait", "initial_display"}:
                     locator = locator or "__page__"
                     legacy_locator = legacy_locator or locator
                     new_locator = new_locator or locator
+                elif parsed_pre_steps or parsed_main_step:
+                    locator = locator or parsed_main_step.get("locator") or "__page__"
+                    legacy_locator = legacy_locator or parsed_main_step.get("legacy_locator") or locator
+                    new_locator = new_locator or parsed_main_step.get("new_locator") or locator or legacy_locator
                 elif not legacy_locator and not new_locator:
                     stats["locator_missing"] += 1
                     add_sample("locator_missing", page=row_page, case_id=case_id, mode=mode)
                     checklist_coverage["excluded_reason"] = "locator is missing"
                     continue
-                cases.append(
-                    self._normalize_action_case(
-                        {
-                            "case_type": case_type,
-                            "action_type": action_type,
-                            "label": label,
-                            "page_id": row_page,
-                            "legacy_locator": legacy_locator,
-                            "new_locator": new_locator or legacy_locator,
-                            "locator": locator,
-                            "value": test_data,
-                            "expected_type": expected_type,
-                            "destructive": str(destructive).lower(),
-                            "source": "checklist",
-                        }
-                    )
-                )
+                case_payload = {
+                    "case_id": case_id,
+                    "case_type": case_type,
+                    "action_type": action_type,
+                    "label": label,
+                    "test_title": test_title,
+                    "page_id": row_page,
+                    "legacy_locator": legacy_locator,
+                    "new_locator": new_locator or legacy_locator,
+                    "locator": locator,
+                    "value": test_data,
+                    "test_data": test_data,
+                    "expected_type": expected_type,
+                    "expected_value": expected_value,
+                    "destructive": str(destructive).lower(),
+                    "source": "checklist",
+                }
+                if parsed_pre_steps:
+                    case_payload["pre_steps"] = parsed_pre_steps
+                if parsed_main_step:
+                    case_payload["main_step"] = parsed_main_step
+                cases.append(self._normalize_action_case(case_payload))
                 stats["loadable_action"] += 1
 
         debug["status"] = "loaded" if cases else "no_cases"
@@ -997,6 +1016,8 @@ class RegressionEngine:
     ) -> bool:
         case_lower = str(case_type or "").lower()
         action_lower = str(action_type or "").lower()
+        if "negative" in case_lower or "negative" in action_lower:
+            return False
         label_text = str(label or "")
         operation_lower = str(operation or "").lower()
         main_step_lower = str(main_step_text or "").lower()
@@ -1023,6 +1044,18 @@ class RegressionEngine:
         except Exception:
             return {}
         return parsed if isinstance(parsed, dict) else {}
+
+    @staticmethod
+    def _parse_steps_json(value: Any) -> List[Dict[str, Any]]:
+        if not value:
+            return []
+        try:
+            parsed = json.loads(str(value))
+        except Exception:
+            return []
+        if not isinstance(parsed, list):
+            return []
+        return [item for item in parsed if isinstance(item, dict)]
 
     @staticmethod
     def _submit_locator_from_mapping(mapping: Optional[Dict[str, Any]], upload_locator: Any = "") -> str:
@@ -1120,11 +1153,32 @@ class RegressionEngine:
 
     def _upload_value_from_profiles(self, action_case: Dict[str, Any], step: Dict[str, Any], locator: Any) -> Optional[Any]:
         page_id = str(action_case.get("page_id") or "").lower()
+        case_id = str(action_case.get("case_id") or step.get("case_id") or "").lower()
         case_type = str(action_case.get("case_type") or step.get("case_type") or step.get("action_type") or "").lower()
         locator_text = str(locator or step.get("locator") or "").strip()
         negative_case = self._is_negative_case(action_case.get("case_type"), step.get("action_type") or action_case.get("action_type"))
 
-        def matches(profile: Dict[str, Any]) -> bool:
+        def case_id_patterns(profile: Dict[str, Any]) -> List[str]:
+            raw_patterns: List[Any] = []
+            if profile.get("case_id"):
+                raw_patterns.append(profile.get("case_id"))
+            raw_patterns.extend(profile.get("case_ids") or [])
+            patterns: List[str] = []
+            for raw in raw_patterns:
+                for item in re.split(r"[\r\n,;]+", str(raw or "")):
+                    item = item.strip().lower()
+                    if item and item not in patterns:
+                        patterns.append(item)
+            return patterns
+
+        def matches(profile: Dict[str, Any], *, require_case_id: bool) -> bool:
+            patterns = case_id_patterns(profile)
+            if require_case_id and not patterns:
+                return False
+            if not require_case_id and patterns:
+                return False
+            if patterns and (not case_id or not any(fnmatch.fnmatch(case_id, pattern) for pattern in patterns)):
+                return False
             profile_negative = self._truthy(profile.get("negative"))
             if profile_negative and not negative_case:
                 return False
@@ -1139,18 +1193,19 @@ class RegressionEngine:
                 return False
             return True
 
-        for profile in self.upload_profiles:
-            if not matches(profile):
-                continue
-            files = profile.get("files")
-            if isinstance(files, list):
-                existing = self._existing_upload_value(files)
+        for require_case_id in (True, False):
+            for profile in self.upload_profiles:
+                if not matches(profile, require_case_id=require_case_id):
+                    continue
+                files = profile.get("files")
+                if isinstance(files, list):
+                    existing = self._existing_upload_value(files)
+                    if existing:
+                        return existing
+                file_value = profile.get("file")
+                existing = self._existing_upload_value(file_value)
                 if existing:
                     return existing
-            file_value = profile.get("file")
-            existing = self._existing_upload_value(file_value)
-            if existing:
-                return existing
         return None
 
     def _execute_action_case(
@@ -1184,13 +1239,10 @@ class RegressionEngine:
             action_type = step.get("action_type") or step.get("action_hint") or step.get("kind") or action_case.get("action_type") or "click"
             locator = self._action_side_locator(step, side)
             value = step.get("value") or step.get("test_data") or action_case.get("value")
-            if (
-                str(action_case.get("case_type") or "").lower() == "upload_submit"
-                and str(action_type or "").lower() == "submit"
-                and locator
-                and not str(locator).strip().lower().startswith("form")
-            ):
+            if str(action_type or "").lower() == "submit" and locator and not str(locator).strip().lower().startswith("form"):
                 action_type = "click"
+                step["action_type"] = "click"
+                step["action_hint"] = "click"
             semantic_action = infer_semantic_action(action_type, step)
             action_lower = str(action_type or semantic_action).strip().lower()
             if semantic_action == "upload":
@@ -1506,6 +1558,14 @@ class RegressionEngine:
                     "popup_detected": bool(legacy_action.get("popup_detected") or new_action.get("popup_detected")),
                     "frame_changed": bool(legacy_action.get("frame_changed") or new_action.get("frame_changed")),
                     "validation_only": bool(legacy_action.get("validation_only") and new_action.get("validation_only")),
+                    "legacy_console_screenshot": legacy_action.get("console_evidence_screenshot"),
+                    "new_console_screenshot": new_action.get("console_evidence_screenshot"),
+                    "legacy_console_error_count": legacy_action.get("console_error_count"),
+                    "new_console_error_count": new_action.get("console_error_count"),
+                    "legacy_http_error_count": legacy_action.get("http_error_count"),
+                    "new_http_error_count": new_action.get("http_error_count"),
+                    "legacy_request_failed_count": legacy_action.get("request_failed_count"),
+                    "new_request_failed_count": new_action.get("request_failed_count"),
                     "legacy_action": legacy_action,
                     "new_action": new_action,
                     "plan_source": plan_source,
@@ -1586,6 +1646,7 @@ class RegressionEngine:
             "link_navigation",
             "upload_select",
             "upload_without_file",
+            "upload_submit",
         }:
             return None
 
@@ -2105,6 +2166,15 @@ class RegressionEngine:
             visual["data_variance_tolerated"] = True
             visual["reason"] = "Visual diff appears to be table/list data variance between environments."
 
+        download_compare = {}
+        if action_type.lower() == "download":
+            download_compare = self._download_compare_fields(
+                extra.get("legacy_action") or {},
+                extra.get("new_action") or {},
+            )
+            if download_compare.get("download_filename_match") is False:
+                status = "DIFF"
+
         return {
             "page_id": page_id,
             "risk": risk,
@@ -2124,7 +2194,38 @@ class RegressionEngine:
                 "legacy": legacy_state.get("frame_candidates", []),
                 "new": new_state.get("frame_candidates", []),
             },
+            **download_compare,
             **extra,
+        }
+
+    @staticmethod
+    def _download_action_filename(action: Dict[str, Any]) -> str:
+        for key in ("saved_filename", "download_filename", "download_suggested_filename", "suggested_filename"):
+            value = action.get(key)
+            if value:
+                return Path(str(value).replace("\\", "/")).name
+        path = action.get("download_path")
+        if path:
+            return Path(str(path)).name
+        return ""
+
+    @classmethod
+    def _download_compare_fields(cls, legacy_action: Dict[str, Any], new_action: Dict[str, Any]) -> Dict[str, Any]:
+        legacy_filename = cls._download_action_filename(legacy_action)
+        new_filename = cls._download_action_filename(new_action)
+        filename_match: Optional[bool]
+        if legacy_filename and new_filename:
+            filename_match = legacy_filename == new_filename
+        else:
+            filename_match = None
+        return {
+            "download_filename_match": filename_match,
+            "legacy_download_filename": legacy_filename,
+            "new_download_filename": new_filename,
+            "legacy_download_suggested_filename": legacy_action.get("download_suggested_filename"),
+            "new_download_suggested_filename": new_action.get("download_suggested_filename"),
+            "legacy_download_path": legacy_action.get("download_path"),
+            "new_download_path": new_action.get("download_path"),
         }
 
     @staticmethod
@@ -2299,6 +2400,7 @@ class RegressionEngine:
     {self._figure('Legacy', item.get('legacy_screenshot'), report_dir)}
     {self._figure('New', item.get('new_screenshot'), report_dir)}
     {self._figure('Diff', item.get('diff_screenshot'), report_dir)}
+    {self._render_console_figures(item, report_dir)}
   </div>
   <div class="details">
     <div class="detail-grid">
@@ -2308,8 +2410,10 @@ class RegressionEngine:
       <b>New</b><span>{html.escape(str(item.get('new_url') or '-'))}</span>
       <b>Upload file</b><span>{html.escape(str(item.get('upload_file') or '-'))}</span>
       <b>Submit locator</b><span>{html.escape(str(item.get('submit_locator') or '-'))}</span>
+      {self._render_download_detail_rows(item)}
       <b>After URL</b><span>{html.escape(str(item.get('legacy_after_url') or '-'))} / {html.escape(str(item.get('new_after_url') or '-'))}</span>
       <b>Runtime</b><span>navigation={item.get('navigation_detected')} / popup={item.get('popup_detected')} / frame={item.get('frame_changed')} / validation_only={item.get('validation_only')}</span>
+      {self._render_console_detail_rows(item)}
       <b>Reason</b><span>{html.escape(str(reason))}</span>
     </div>
     {self._render_diagnostics(item)}
@@ -2342,6 +2446,7 @@ class RegressionEngine:
     {self._figure('New Before', item.get('new_before_screenshot'), report_dir)}
     {self._figure('New After', item.get('new_after_screenshot'), report_dir)}
     {self._figure('New Before/After Diff', item.get('new_diff_screenshot'), report_dir)}
+    {self._render_console_figures(item, report_dir)}
   </div>
   <div class="details">
     <div class="detail-grid">
@@ -2355,6 +2460,7 @@ class RegressionEngine:
       <b>Legacy after</b><span>{html.escape(str(item.get('legacy_after_url') or '-'))}</span>
       <b>New before</b><span>{html.escape(str(item.get('new_before_url') or '-'))}</span>
       <b>New after</b><span>{html.escape(str(item.get('new_after_url') or '-'))}</span>
+      {self._render_console_detail_rows(item)}
       <b>Reason</b><span>{html.escape(str(reason))}</span>
     </div>
     {self._render_diagnostics(item)}
@@ -2369,6 +2475,59 @@ class RegressionEngine:
         except ValueError:
             rel = Path(path).resolve()
         return f'<figure><figcaption>{html.escape(label)}</figcaption><img src="{html.escape(rel.as_posix())}" alt="{html.escape(label)}"></figure>'
+
+    @staticmethod
+    def _render_download_detail_rows(item: Dict[str, Any]) -> str:
+        has_download = any(
+            item.get(key)
+            for key in (
+                "download_filename_match",
+                "legacy_download_filename",
+                "new_download_filename",
+                "legacy_download_path",
+                "new_download_path",
+            )
+        )
+        if not has_download:
+            return ""
+        return (
+            f"<b>Download filename match</b><span>{html.escape(str(item.get('download_filename_match') if item.get('download_filename_match') is not None else '-'))}</span>"
+            f"<b>Legacy download file</b><span>{html.escape(str(item.get('legacy_download_filename') or '-'))}</span>"
+            f"<b>New download file</b><span>{html.escape(str(item.get('new_download_filename') or '-'))}</span>"
+            f"<b>Download path</b><span>{html.escape(str(item.get('legacy_download_path') or '-'))} / {html.escape(str(item.get('new_download_path') or '-'))}</span>"
+        )
+
+    def _render_console_figures(self, item: Dict[str, Any], report_dir: Path) -> str:
+        if not item.get("legacy_console_screenshot") and not item.get("new_console_screenshot"):
+            return ""
+        return (
+            self._figure("Legacy Console", item.get("legacy_console_screenshot"), report_dir)
+            + self._figure("New Console", item.get("new_console_screenshot"), report_dir)
+        )
+
+    @staticmethod
+    def _render_console_detail_rows(item: Dict[str, Any]) -> str:
+        has_console = any(
+            item.get(key) is not None
+            for key in (
+                "legacy_console_error_count",
+                "new_console_error_count",
+                "legacy_http_error_count",
+                "new_http_error_count",
+                "legacy_request_failed_count",
+                "new_request_failed_count",
+            )
+        )
+        if not has_console:
+            return ""
+        return (
+            f"<b>Console errors</b><span>Legacy={html.escape(str(item.get('legacy_console_error_count') if item.get('legacy_console_error_count') is not None else '-'))} / "
+            f"New={html.escape(str(item.get('new_console_error_count') if item.get('new_console_error_count') is not None else '-'))}</span>"
+            f"<b>HTTP errors</b><span>Legacy={html.escape(str(item.get('legacy_http_error_count') if item.get('legacy_http_error_count') is not None else '-'))} / "
+            f"New={html.escape(str(item.get('new_http_error_count') if item.get('new_http_error_count') is not None else '-'))}</span>"
+            f"<b>Request failed</b><span>Legacy={html.escape(str(item.get('legacy_request_failed_count') if item.get('legacy_request_failed_count') is not None else '-'))} / "
+            f"New={html.escape(str(item.get('new_request_failed_count') if item.get('new_request_failed_count') is not None else '-'))}</span>"
+        )
 
     @staticmethod
     def _blocked_reason(item: Dict[str, Any]) -> Optional[str]:
@@ -2494,6 +2653,19 @@ class RegressionEngine:
             "new_blocked_reason": new_action.get("reason"),
             "upload_file": item.get("upload_file"),
             "submit_locator": item.get("submit_locator"),
+            "download_filename_match": item.get("download_filename_match"),
+            "legacy_download_filename": item.get("legacy_download_filename"),
+            "new_download_filename": item.get("new_download_filename"),
+            "legacy_download_path": item.get("legacy_download_path"),
+            "new_download_path": item.get("new_download_path"),
+            "legacy_console_screenshot": item.get("legacy_console_screenshot"),
+            "new_console_screenshot": item.get("new_console_screenshot"),
+            "legacy_console_error_count": item.get("legacy_console_error_count"),
+            "new_console_error_count": item.get("new_console_error_count"),
+            "legacy_http_error_count": item.get("legacy_http_error_count"),
+            "new_http_error_count": item.get("new_http_error_count"),
+            "legacy_request_failed_count": item.get("legacy_request_failed_count"),
+            "new_request_failed_count": item.get("new_request_failed_count"),
             "legacy_after_url": item.get("legacy_after_url"),
             "new_after_url": item.get("new_after_url"),
             "navigation_detected": item.get("navigation_detected"),
