@@ -1,3 +1,5 @@
+import json
+
 from src.page_case_planner import PageCasePlanner
 
 
@@ -73,6 +75,66 @@ def test_file_download_and_close_without_submit_does_not_generate_upload_submit(
     assert "upload_without_file" not in case_types
     assert profile["capabilities"]["template_download"] is True
     assert profile["capabilities"]["close_window"] is True
+
+
+def test_file_output_button_generates_file_download_not_template_or_form_download():
+    cases, _, profile = PageCasePlanner().plan(
+        {
+            "schema": "moonlight.runtime_page_profile.v1",
+            "page_id": "JpGazettePDFDownloadDisp.jsp",
+            "controls": [
+                {
+                    "tag": "form",
+                    "name": "fmPDFDownload",
+                    "selector": "form[name=\"fmPDFDownload\"]",
+                    "visible": True,
+                },
+                {
+                    "tag": "input",
+                    "type": "checkbox",
+                    "name": "cbKind",
+                    "value": "10",
+                    "selector": "input[name=\"cbKind\"][value=\"10\"]",
+                    "visible": True,
+                },
+                {
+                    "tag": "input",
+                    "type": "button",
+                    "name": "btSave",
+                    "value": "出　　力",
+                    "text": "出　　力",
+                    "onclick": "fnDownload('/JpGazettePDFDownload.do?method=forList')",
+                    "selector": "input[name=\"btSave\"][type=\"button\"]",
+                    "visible": True,
+                },
+                {
+                    "tag": "input",
+                    "type": "button",
+                    "name": "btCancel",
+                    "value": "キャンセル",
+                    "onclick": "fnCancel()",
+                    "selector": "input[name=\"btCancel\"][type=\"button\"]",
+                    "visible": True,
+                },
+            ],
+        }
+    )
+
+    by_type = {case["case_type"]: case for case in cases}
+
+    assert "download_template" not in by_type
+    assert by_type["file_download"]["locator"] == 'input[name="btSave"][type="button"]'
+    assert by_type["file_download"]["action_type"] == "download"
+    assert by_type["file_download"]["expected_type"] == "download"
+    assert profile["capabilities"]["template_download"] is False
+    assert profile["capabilities"]["file_download"] is True
+    assert profile["capabilities"]["output_options"] is True
+    assert profile["option_controls"][0]["locator"] == 'input[name="cbKind"][type="checkbox"][value="10"]'
+    assert [item["locator"] for item in profile["file_download_actions"]] == ['input[name="btSave"][type="button"]']
+    assert profile["capabilities"]["back_action"] is True
+    option_case = next(case for case in cases if case.get("viewpoint_id") == "option_matrix_representative")
+    assert json.loads(option_case["pre_steps"])[0]["action_type"] == "check"
+    assert json.loads(option_case["main_step"]) == {"action_type": "download", "locator": 'input[name="btSave"][type="button"]'}
 
 
 def test_search_form_and_result_table_generates_search_and_table_cases():

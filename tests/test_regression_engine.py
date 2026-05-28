@@ -8,6 +8,7 @@ from src.action_executor import (
     _accept_dialog_safely,
     _capture_state,
     _download_save_path,
+    _negative_visual_evidence_payload,
     _opens_popup_hint,
     _render_console_evidence_image,
     _resolve_upload_file_value,
@@ -173,6 +174,8 @@ def test_render_report_contains_side_by_side_sections(tmp_path):
     assert "Legacy" in html
     assert "New" in html
     assert "Diff" in html
+    assert "Result JSON" in html
+    assert (Path(report).parent / "regression_results.json").exists()
     assert "Checklist Cases" in html
     assert "No checklist cases were loaded for this report." in html
 
@@ -230,6 +233,10 @@ def test_infer_semantic_action_uses_scanner_hints():
     assert infer_semantic_action(None, {"kind": "link", "raw": '<html:link href="/next">'}) == "navigate"
     assert infer_semantic_action("negative_http_500", {}) == "negative_http_500"
     assert infer_semantic_action("negative_js_error", {}) == "negative_js_error"
+    assert infer_semantic_action("check", {"kind": "checkbox"}) == "check"
+    assert infer_semantic_action("uncheck", {"kind": "checkbox"}) == "uncheck"
+    assert infer_semantic_action("file_download", {"locator": 'input[name="btSave"][type="button"]'}) == "download"
+    assert infer_semantic_action("download_template", {"kind": "link"}) == "download"
 
 
 def test_action_dedupe_prefers_locator_change_over_full_action_fallback(tmp_path):
@@ -286,6 +293,16 @@ def test_download_save_path_uses_env_and_preserves_suggested_filename(tmp_path, 
     assert path == tmp_path / "プロジェクトリストアップロード.tsv"
 
 
+def test_download_save_path_does_not_overwrite_existing_file(tmp_path, monkeypatch):
+    monkeypatch.setenv("DOWNLOAD_DIR", str(tmp_path))
+    existing = tmp_path / "report.pdf"
+    existing.write_text("legacy", encoding="utf-8")
+
+    path = _download_save_path("report.pdf")
+
+    assert path == tmp_path / "report (1).pdf"
+
+
 def test_console_evidence_image_renders_events(tmp_path):
     image_path = _render_console_evidence_image(
         [
@@ -300,6 +317,20 @@ def test_console_evidence_image_renders_events(tmp_path):
     with Image.open(image_path) as image:
         assert image.width >= 1000
         assert image.height >= 200
+
+
+def test_negative_visual_evidence_payload_names_visible_error_state():
+    payload = _negative_visual_evidence_payload(
+        "negative_http_500",
+        detail="UploadConf failed",
+        url="**/UploadConf.do*",
+        phase="after trigger",
+    )
+
+    assert payload["title"] == "Simulated HTTP 500"
+    assert payload["phase"] == "after trigger"
+    assert payload["detail"] == "UploadConf failed"
+    assert payload["url"] == "**/UploadConf.do*"
 
 
 def test_accept_dialog_safely_ignores_already_handled_dialog():
@@ -437,6 +468,45 @@ def test_upload_submit_button_step_clicks_onclick_instead_of_request_submit(tmp_
     assert calls[1]["semantic_action"] == "click"
 
 
+def test_scenario_stops_after_step_closes_page(tmp_path, monkeypatch):
+    mapping_path = tmp_path / "page_mapping.json"
+    mapping_path.write_text(json.dumps({"page_mappings": []}), encoding="utf-8")
+    engine = RegressionEngine(mapping_path=str(mapping_path), output_dir=str(tmp_path / "out"))
+    calls = []
+
+    def fake_execute_action(page, action_type, locator, value=None, **kwargs):
+        calls.append((action_type, locator))
+        return {
+            "status": "PASS",
+            "page_closed_after_action": True,
+            "download_filename": "report.pdf",
+            "state": {"url": "about:closed", "page_closed": True, "screenshot": str(tmp_path / "closed.png")},
+        }
+
+    monkeypatch.setattr(regression_engine_module, "execute_action", fake_execute_action)
+    action_case = {
+        "case_id": "download-misgenerated",
+        "case_type": "upload_submit",
+        "action_type": "upload_submit",
+        "page_id": "Download.jsp",
+        "pre_steps": [{"action_type": "download", "locator": "#download"}],
+        "main_step": {"action_type": "submit", "locator": "form[name='DownloadForm']"},
+    }
+
+    result = engine._execute_action_case(
+        object(),
+        action_case,
+        side="legacy",
+        browser_name="edge",
+        capture_dir=tmp_path,
+        test_id="download_case",
+    )
+
+    assert result["status"] == "PASS"
+    assert result["page_closed_after_action"] is True
+    assert calls == [("download", "#download")]
+
+
 def test_checklist_loader_filters_optional_modes(tmp_path):
     pytest.importorskip("openpyxl")
     from openpyxl import Workbook
@@ -537,6 +607,126 @@ def test_checklist_loader_preserves_negative_expected_value_and_steps(tmp_path):
     assert cases[0]["expected_value"] == "**/UploadConf.do*"
     assert cases[0]["pre_steps"][0]["action_type"] == "upload"
     assert cases[0]["main_step"]["action_type"] == "negative_http_500"
+
+
+def test_checklist_loader_keeps_download_case_out_of_upload_submit(tmp_path):
+    pytest.importorskip("openpyxl")
+    from openpyxl import Workbook
+
+    mapping_path = tmp_path / "page_mapping.json"
+    mapping_path.write_text(json.dumps({"page_mappings": []}), encoding="utf-8")
+    checklist = tmp_path / "migration_checklist.xlsx"
+    pre_steps = json.dumps([{"action_type": "upload", "locator": 'input[name="btSave"][type="button"]', "value": ""}])
+    main_step = json.dumps({"action_type": "submit", "locator": "form[name='fmPDFDownload']"})
+
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "Checklist"
+    sheet.append(
+        [
+            "case_id",
+            "page_id",
+            "automation_mode",
+            "case_type",
+            "action_type",
+            "locator",
+            "expected_type",
+            "pre_steps",
+            "main_step",
+            "destructive",
+            "enabled",
+            "test_title",
+        ]
+    )
+    sheet.append(
+        [
+            "jpgazettepdfdownloaddisp-file_download-001",
+            "JpGazettePDFDownloadDisp.jsp",
+            "auto",
+            "upload_submit",
+            "upload_submit",
+            'input[name="btSave"][type="button"]',
+            "download",
+            pre_steps,
+            main_step,
+            "false",
+            "true",
+            "ファイル出力ダウンロード確認",
+        ]
+    )
+    workbook.save(checklist)
+
+    engine = RegressionEngine(mapping_path=str(mapping_path), output_dir=str(tmp_path / "out"), checklist_path=str(checklist))
+    cases = engine._load_checklist_cases("JpGazettePDFDownloadDisp.jsp")
+
+    assert len(cases) == 1
+    assert cases[0]["case_type"] == "file_download"
+    assert cases[0]["action_type"] == "file_download"
+    assert cases[0]["legacy_locator"] == 'input[name="btSave"][type="button"]'
+    assert "pre_steps" not in cases[0]
+    assert "main_step" not in cases[0]
+
+
+def test_checklist_loader_preserves_download_option_steps(tmp_path):
+    pytest.importorskip("openpyxl")
+    from openpyxl import Workbook
+
+    mapping_path = tmp_path / "page_mapping.json"
+    mapping_path.write_text(json.dumps({"page_mappings": []}), encoding="utf-8")
+    checklist = tmp_path / "migration_checklist.xlsx"
+    pre_steps = json.dumps(
+        [
+            {"action_type": "check", "locator": 'input[name="cbKind"][type="checkbox"][value="11"]'},
+            {"action_type": "uncheck", "locator": 'input[name="cbKind"][type="checkbox"][value="10"]'},
+        ]
+    )
+    main_step = json.dumps({"action_type": "download", "locator": 'input[name="btSave"][type="button"]'})
+
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "Checklist"
+    sheet.append(
+        [
+            "case_id",
+            "page_id",
+            "automation_mode",
+            "case_type",
+            "action_type",
+            "locator",
+            "expected_type",
+            "pre_steps",
+            "main_step",
+            "destructive",
+            "enabled",
+            "test_title",
+        ]
+    )
+    sheet.append(
+        [
+            "jpgazettepdfdownloaddisp-file_download-001-option",
+            "JpGazettePDFDownloadDisp.jsp",
+            "auto",
+            "file_download",
+            "download",
+            'input[name="btSave"][type="button"]',
+            "download",
+            pre_steps,
+            main_step,
+            "false",
+            "true",
+            "出力条件代表パターン確認",
+        ]
+    )
+    workbook.save(checklist)
+
+    engine = RegressionEngine(mapping_path=str(mapping_path), output_dir=str(tmp_path / "out"), checklist_path=str(checklist))
+    cases = engine._load_checklist_cases("JpGazettePDFDownloadDisp.jsp")
+
+    assert len(cases) == 1
+    assert cases[0]["pre_steps"][0]["action_type"] == "check"
+    assert cases[0]["pre_steps"][1]["action_type"] == "uncheck"
+    assert cases[0]["main_step"]["action_type"] == "download"
+    assert cases[0]["main_step"]["locator"] == 'input[name="btSave"][type="button"]'
 
 
 def test_report_coverage_matrix_renders_checklist_case_rows(tmp_path):
@@ -656,6 +846,52 @@ def test_download_compare_marks_filename_mismatch_as_diff(tmp_path):
     assert compared["download_filename_match"] is False
     assert compared["legacy_download_filename"] == "legacy.tsv"
     assert compared["new_download_filename"] == "new.tsv"
+
+
+def test_download_compare_uses_suggested_filename_before_unique_saved_name(tmp_path):
+    mapping_path = tmp_path / "page_mapping.json"
+    mapping_path.write_text(json.dumps({"page_mappings": []}), encoding="utf-8")
+    engine = RegressionEngine(mapping_path=str(mapping_path), output_dir=str(tmp_path))
+
+    compared = engine._compare_state(
+        "Download.jsp",
+        "Low",
+        "file_download",
+        {"url": "about:closed", "dom": "", "screenshot": ""},
+        {"url": "about:closed", "dom": "", "screenshot": ""},
+        tmp_path / "diff.png",
+        action_type="file_download",
+        legacy_action={"status": "PASS", "download_filename": "report.pdf", "saved_filename": "report.pdf"},
+        new_action={"status": "PASS", "download_filename": "report.pdf", "saved_filename": "report (1).pdf"},
+    )
+
+    assert compared["status"] == "PASS"
+    assert compared["download_filename_match"] is True
+    assert compared["legacy_download_filename"] == "report.pdf"
+    assert compared["new_download_filename"] == "report.pdf"
+
+
+def test_file_download_compare_uses_download_filename_fields(tmp_path):
+    mapping_path = tmp_path / "page_mapping.json"
+    mapping_path.write_text(json.dumps({"page_mappings": []}), encoding="utf-8")
+    engine = RegressionEngine(mapping_path=str(mapping_path), output_dir=str(tmp_path))
+
+    compared = engine._compare_state(
+        "Download.jsp",
+        "High",
+        "file output",
+        {"url": "about:closed", "dom": "", "screenshot": ""},
+        {"url": "about:closed", "dom": "", "screenshot": ""},
+        tmp_path / "diff.png",
+        action_type="file_download",
+        legacy_action={"status": "PASS", "saved_filename": "output.pdf", "download_path": str(tmp_path / "output.pdf")},
+        new_action={"status": "PASS", "saved_filename": "output.pdf", "download_path": str(tmp_path / "output.pdf")},
+    )
+
+    assert compared["status"] == "PASS"
+    assert compared["visual"]["status"] == "SKIPPED"
+    assert compared["download_filename_match"] is True
+    assert compared["legacy_download_filename"] == "output.pdf"
 
 
 def test_render_report_contains_semantic_diagnostics(tmp_path):
@@ -893,3 +1129,128 @@ def test_leaving_actions_require_target_reopen():
         {"status": "PASS"},
         {"status": "PASS"},
     )
+
+
+def test_reopen_prefers_open_route_step_page_before_login_recovery(tmp_path):
+    class Context:
+        def __init__(self):
+            self.pages = []
+
+    class Page:
+        def __init__(self, url, *, closed=False):
+            self.url = url
+            self._closed = closed
+            self.frames = []
+            self.context = None
+            self.front = 0
+
+        def is_closed(self):
+            return self._closed
+
+        def bring_to_front(self):
+            self.front += 1
+
+        def wait_for_load_state(self, state, timeout=None):
+            return None
+
+    context = Context()
+    closed_popup = Page("about:closed", closed=True)
+    parent = Page("http://example.test/patlics/JpBiblioListForEasySearch.do")
+    login = Page("http://example.test/patlics/login.jsp")
+    for page in (closed_popup, parent, login):
+        page.context = context
+    context.pages = [closed_popup, login, parent]
+
+    mapping_path = tmp_path / "page_mapping.json"
+    mapping_path.write_text(json.dumps({"page_mappings": []}), encoding="utf-8")
+    engine = RegressionEngine(mapping_path=str(mapping_path), output_dir=str(tmp_path))
+
+    selected, nav = engine._takeover_recovery_page(
+        closed_popup,
+        {"steps": [{"active_page_url": "http://example.test/patlics/JpBiblioListForEasySearch.do"}]},
+    )
+
+    assert selected is parent
+    assert nav["status"] == "PASS"
+    assert nav["strategy"] == "context_sibling_takeover"
+    assert nav["route_step_detected"] is True
+    assert parent.front == 1
+
+
+def test_closing_action_report_uses_reopened_target_state(tmp_path, monkeypatch):
+    class Page:
+        def __init__(self, url):
+            self.url = url
+
+    mapping_path = tmp_path / "page_mapping.json"
+    mapping_path.write_text(json.dumps({"page_mappings": []}), encoding="utf-8")
+    engine = RegressionEngine(mapping_path=str(mapping_path), output_dir=str(tmp_path))
+
+    def fake_capture_state(page, output_dir, name):
+        return {
+            "screenshot": str(Path(output_dir) / f"{name}.png"),
+            "url": getattr(page, "url", ""),
+            "dom": name,
+            "text": name,
+        }
+
+    def fake_compare_state(page_id, risk, action, legacy_state, new_state, diff_path, **extra):
+        return {
+            "page_id": page_id,
+            "risk": risk,
+            "action": action,
+            "status": "PASS",
+            "legacy_screenshot": legacy_state.get("screenshot"),
+            "new_screenshot": new_state.get("screenshot"),
+            **extra,
+        }
+
+    monkeypatch.setattr(regression_engine_module, "_capture_state", fake_capture_state)
+    engine._build_action_plan = lambda page_id, mapping: (
+        [
+            {
+                "case_type": "file_download",
+                "label": "download",
+                "legacy_locator": "#download",
+                "new_locator": "#download",
+            }
+        ],
+        "test",
+    )
+    engine._execute_action_case = lambda page, action_case, **kwargs: {
+        "status": "PASS",
+        "page_closed_after_action": True,
+        "state": {
+            "screenshot": str(tmp_path / "closed.png"),
+            "url": "about:closed",
+            "dom": "<page-closed />",
+            "page_closed": True,
+        },
+    }
+    engine._reopen_target_pair = lambda legacy_page, new_page, mapping, page_dir, browser_name, *, reason: (
+        Page("http://legacy/target.jsp"),
+        Page("http://new/target.jsp"),
+        {"status": "PASS", "reason": reason},
+    )
+    engine._compare_state = fake_compare_state
+
+    results = engine._run_captured_page_pair(
+        Page("http://legacy/start.jsp"),
+        Page("http://new/start.jsp"),
+        {"page_id": "Download.jsp", "risk": "Low"},
+        tmp_path,
+        "chrome",
+        {"status": "PASS"},
+        {"status": "PASS"},
+        manual=False,
+    )
+
+    action_result = next(item for item in results if item["action"] == "download")
+    assert action_result["legacy_screenshot"].endswith("01_download_legacy_after_reopen.png")
+    assert action_result["new_screenshot"].endswith("01_download_new_after_reopen.png")
+    assert action_result["legacy_action"]["state_before_reopen"]["page_closed"] is True
+    assert action_result["post_action_reopen"]["status"] == "PASS"
+    log_text = (tmp_path / "full_test_log.jsonl").read_text(encoding="utf-8")
+    assert '"event": "action_executed"' in log_text
+    assert '"event": "target_reopen_finished"' in log_text
+    assert '"event": "compare_result"' in log_text
