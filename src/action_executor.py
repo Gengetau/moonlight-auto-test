@@ -466,14 +466,27 @@ def _capture_browser_screen(page: Page, screenshot: Path, timeout: int = 15000) 
     """
     Capture browser evidence with URL bar at 1920x1080.
 
-    Default mode is composited to avoid legacy/new foreground-window cross
-    contamination. Set MOONLIGHT_BROWSER_SCREEN_MODE=native to use a real OS
-    screen grab instead.
+    Default mode is native playwright screenshot without browser chrome.
+    Set MOONLIGHT_BROWSER_SCREEN_MODE=composited to use synthetic URL bar.
+    Set MOONLIGHT_BROWSER_SCREEN_MODE=native_os to use a real OS screen grab.
     """
-    mode = str(os.environ.get("MOONLIGHT_BROWSER_SCREEN_MODE") or "composited").strip().lower()
-    if mode in {"native", "os", "imagegrab"}:
+    mode = str(os.environ.get("MOONLIGHT_BROWSER_SCREEN_MODE") or "playwright_native").strip().lower()
+    if mode in {"native_os", "os", "imagegrab"}:
         return _capture_native_browser_screen(page, screenshot, timeout=timeout)
-    return _capture_composited_browser_screen(page, screenshot, timeout=timeout)
+    if mode == "composited":
+        return _capture_composited_browser_screen(page, screenshot, timeout=timeout)
+    
+    # playwright_native mode (Default)
+    try:
+        page.screenshot(path=str(screenshot), full_page=False, timeout=timeout)
+        return {
+            "ok": True,
+            "screenshot_scope": "playwright_native",
+            "screenshot_resolution": "viewport",
+            "includes_browser_chrome": False,
+        }
+    except Exception as exc:
+        return {"ok": False, "reason": str(exc)}
 
 
 ACTION_ALIASES = {

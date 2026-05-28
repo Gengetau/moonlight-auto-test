@@ -715,6 +715,12 @@ class RegressionEngine:
                         capture_dir=page_dir,
                         side="legacy",
                     )
+                    # 确保在后续查找元素前页面状态稳定且切换到正确 Page/Frame
+                    if legacy_nav.get("status") == "PASS":
+                        try:
+                            legacy_page.wait_for_load_state("networkidle", timeout=5000)
+                        except:
+                            pass
                 else:
                     legacy_nav.update({"strategy": "direct_url", "target_reached": True})
 
@@ -726,6 +732,12 @@ class RegressionEngine:
                         capture_dir=page_dir,
                         side="new",
                     )
+                    # 确保在后续查找元素前页面状态稳定且切换到正确 Page/Frame
+                    if new_nav.get("status") == "PASS":
+                        try:
+                            new_page.wait_for_load_state("networkidle", timeout=5000)
+                        except:
+                            pass
                 else:
                     new_nav.update({"strategy": "direct_url", "target_reached": True})
                 self._write_full_test_log(
