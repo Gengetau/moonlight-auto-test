@@ -81,7 +81,8 @@ def _capture_frame_controls(frame, frame_index: int) -> Dict[str, Any]:
       const includeElement = el => {
         const tag = el.tagName.toLowerCase();
         if (isVisible(el)) return true;
-        return (tag === 'form' || tag === 'table') && hasVisibleControl(el);
+        // 允许捕获带 onclick 的不可见容器，只要它包含可见控件（例如某些 Struts 装饰器）
+        return (tag === 'form' || tag === 'table' || el.getAttribute('onclick')) && hasVisibleControl(el);
       };
       const pathSelector = el => {
         const path = [];
@@ -127,6 +128,7 @@ def _capture_frame_controls(frame, frame_index: int) -> Dict[str, Any]:
           for (const attr of Array.from(el.attributes || [])) {
             attrs[attr.name] = attr.value;
           }
+          const rect = el.getBoundingClientRect();
           const ownerForm = el.form || el.closest('form');
           const tag = el.tagName.toLowerCase();
           const directAction = el.getAttribute('action') || '';
@@ -162,6 +164,7 @@ def _capture_frame_controls(frame, frame_index: int) -> Dict[str, Any]:
                 }))
               : [],
             visible: isVisible(el),
+            rect: { x: rect.x, y: rect.y, w: rect.width, h: rect.height },
             attributes: attrs,
             raw: (el.outerHTML || '').slice(0, 1500)
           };
