@@ -140,6 +140,170 @@ def login_entry_names():
     return names or ["entry-1"]
 
 
+REG_QUEUE_RECORDS_PATH = Path("generated/gui/regression_queue_records.json")
+
+
+def _page_option_label_for(page_id):
+    target = str(page_id or "").strip().lower()
+    if not target:
+        return ""
+    for label in PAGE_OPTION_LABELS:
+        if selected_page_from_label(label).lower() == target:
+            return label
+    return str(page_id or "").strip()
+
+
+def _negative_labels_for_profiles(options, profiles):
+    wanted = {str(profile or "").strip() for profile in profiles if str(profile or "").strip()}
+    labels = []
+    for label in negative_profile_labels(options):
+        if selected_page_from_label(label) in wanted:
+            labels.append(label)
+    return labels
+
+
+def _upload_case_label_for(case_labels, case_id):
+    target = str(case_id or "").strip().lower()
+    if not target:
+        return ""
+    for label in case_labels:
+        if selected_page_from_label(label).lower() == target:
+            return label
+    return ""
+
+
+def load_reg_queue_records():
+    if not REG_QUEUE_RECORDS_PATH.exists():
+        return []
+    try:
+        payload = json.loads(REG_QUEUE_RECORDS_PATH.read_text(encoding="utf-8"))
+    except Exception:
+        return []
+    records = payload.get("records") if isinstance(payload, dict) else []
+    return records if isinstance(records, list) else []
+
+
+def save_reg_queue_records(records):
+    REG_QUEUE_RECORDS_PATH.parent.mkdir(parents=True, exist_ok=True)
+    REG_QUEUE_RECORDS_PATH.write_text(
+        json.dumps(
+            {
+                "schema": "moonlight.gui.regression_queue_records.v1",
+                "records": records[:50],
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+
+
+def collect_reg_card_state(index):
+    target_page = (
+        st.session_state.get(f"reg_page_target_value_{index}")
+        or selected_page_from_label(st.session_state.get(f"reg_page_target_{index}", ""))
+    )
+    upload_profiles = []
+    profile_count = int(st.session_state.get(f"reg_page_profile_count_{index}", 0) or 0)
+    for profile_index in range(profile_count):
+        case_id = selected_page_from_label(st.session_state.get(f"reg_profile_case_id_{index}_{profile_index}", ""))
+        if case_id:
+            upload_profiles.append({"case_id": case_id})
+    negative_profiles = [
+        selected_page_from_label(label)
+        for label in st.session_state.get(f"reg_page_negative_profiles_{index}", [])
+        if selected_page_from_label(label)
+    ]
+    return {
+        "enabled": bool(st.session_state.get(f"reg_page_enabled_{index}", True)),
+        "target_page": str(target_page or ""),
+        "login_entry": st.session_state.get(f"reg_page_login_{index}", LOGIN_ENTRY_NAMES[0]),
+        "checklist_path": st.session_state.get(f"reg_page_checklist_{index}", DEFAULT_CHECKLIST_PATH),
+        "route_map_path": st.session_state.get(f"reg_page_route_{index}", DEFAULT_ROUTE_MAP_PATH),
+        "force_route_map": bool(st.session_state.get(f"reg_page_force_route_{index}", True)),
+        "manual": bool(st.session_state.get(f"reg_page_manual_{index}", False)),
+        "risk_only": bool(st.session_state.get(f"reg_page_risk_{index}", False)),
+        "include_semi_auto": bool(st.session_state.get(f"reg_page_semi_{index}", False)),
+        "include_destructive": bool(st.session_state.get(f"reg_page_destructive_{index}", False)),
+        "include_negative": bool(st.session_state.get(f"reg_page_negative_{index}", False)),
+        "negative_profiles": negative_profiles,
+        "upload_profiles": upload_profiles,
+    }
+
+
+def collect_reg_queue_state():
+    count = int(st.session_state.get("reg_page_card_count", 1) or 1)
+    return {
+        "browser_label": st.session_state.get("reg_queue_browser", list(BROWSER_OPTIONS.keys())[0]),
+        "card_count": count,
+        "cards": [collect_reg_card_state(index) for index in range(1, count + 1)],
+    }
+
+
+def _set_state(key, value):
+    if value is not None:
+        st.session_state[key] = value
+
+
+def apply_reg_card_state(index, card):
+    target_page = str(card.get("target_page") or "")
+    _set_state(f"reg_page_enabled_{index}", bool(card.get("enabled", True)))
+    _set_state(f"reg_page_target_value_{index}", target_page)
+    _set_state(f"reg_page_target_{index}", _page_option_label_for(target_page))
+    _set_state(f"reg_page_login_{index}", card.get("login_entry") or LOGIN_ENTRY_NAMES[0])
+    _set_state(f"reg_page_checklist_{index}", card.get("checklist_path") or DEFAULT_CHECKLIST_PATH)
+    _set_state(f"reg_page_route_{index}", card.get("route_map_path") or DEFAULT_ROUTE_MAP_PATH)
+    _set_state(f"reg_page_force_route_{index}", bool(card.get("force_route_map", True)))
+    _set_state(f"reg_page_manual_{index}", bool(card.get("manual", False)))
+    _set_state(f"reg_page_risk_{index}", bool(card.get("risk_only", False)))
+    _set_state(f"reg_page_semi_{index}", bool(card.get("include_semi_auto", False)))
+    _set_state(f"reg_page_destructive_{index}", bool(card.get("include_destructive", False)))
+    _set_state(f"reg_page_negative_{index}", bool(card.get("include_negative", False)))
+    st.session_state[f"reg_page_saved_negative_profiles_{index}"] = list(card.get("negative_profiles") or [])
+    upload_profiles = list(card.get("upload_profiles") or [])
+    _set_state(f"reg_page_profile_count_{index}", len(upload_profiles))
+    for profile_index, profile in enumerate(upload_profiles):
+        st.session_state[f"reg_profile_saved_case_id_{index}_{profile_index}"] = str(profile.get("case_id") or "")
+
+
+def apply_reg_queue_state(record):
+    queue = record.get("queue") if isinstance(record.get("queue"), dict) else record
+    cards = list(queue.get("cards") or [])
+    next_count = max(1, len(cards))
+    current_count = int(st.session_state.get("reg_page_card_count", 1) or 1)
+    for index in range(1, max(current_count, next_count) + 1):
+        clear_reg_page_card_state(index)
+    browser_label = queue.get("browser_label") if queue.get("browser_label") in BROWSER_OPTIONS else list(BROWSER_OPTIONS.keys())[0]
+    _set_state("reg_queue_browser", browser_label)
+    st.session_state["reg_page_card_count"] = next_count
+    st.session_state["reg_focus_card_index"] = 1
+    for index, card in enumerate(cards or [{}], start=1):
+        apply_reg_card_state(index, card)
+
+
+def save_current_reg_queue_record(name):
+    records = load_reg_queue_records()
+    record = {
+        "id": datetime.now().strftime("%Y%m%d%H%M%S"),
+        "name": name.strip() or datetime.now().strftime("Regression Queue %Y-%m-%d %H:%M"),
+        "saved_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "queue": collect_reg_queue_state(),
+    }
+    records = [item for item in records if item.get("name") != record["name"]]
+    save_reg_queue_records([record] + records)
+    return record
+
+
+def reg_queue_record_labels(records):
+    labels = []
+    for record in records:
+        queue = record.get("queue") or {}
+        cards = queue.get("cards") or []
+        name = record.get("name") or record.get("id") or "record"
+        labels.append(f"{record.get('id')}    {name} / {len(cards)} page(s) / {record.get('saved_at', '-')}")
+    return labels
+
+
 LOGIN_ENTRY_NAMES = login_entry_names()
 BROWSER_OPTIONS = {
     "Chrome portable": "chrome_port",
@@ -352,6 +516,21 @@ def run_command(cmd, live_output=True):
     
     process.wait()
     return process.returncode, full_output
+
+
+def run_command_in_powershell(cmd):
+    env = os.environ.copy()
+    env["PYTHONUNBUFFERED"] = "1"
+    env["PYTHONIOENCODING"] = "utf-8"
+    st.code(cmd)
+    st.info("请回到启动 Streamlit 的 PowerShell 窗口完成人工交互。Web UI 会等待命令结束。")
+    process = subprocess.Popen(
+        cmd,
+        shell=True,
+        env=env,
+    )
+    process.wait()
+    return process.returncode, ""
 
 
 def _interactive_env():
@@ -594,25 +773,85 @@ with tabs[0]:
 
     if "reg_page_card_count" not in st.session_state:
         st.session_state["reg_page_card_count"] = 1
+    if "reg_focus_card_index" not in st.session_state:
+        st.session_state["reg_focus_card_index"] = 1
+
+    st.markdown("#### Queue Records")
+    if st.session_state.get("reg_queue_record_status"):
+        st.success(st.session_state.pop("reg_queue_record_status"))
+    records = load_reg_queue_records()
+    record_labels = reg_queue_record_labels(records)
+    record_by_id = {str(record.get("id")): record for record in records}
+    rec_col1, rec_col2, rec_col3, rec_col4 = st.columns([2, 2, 1, 1])
+    with rec_col1:
+        record_name = st.text_input(
+            "Record name",
+            value="",
+            placeholder="例：admin upload + error cases",
+            key="reg_queue_record_name",
+        )
+    with rec_col2:
+        selected_record_label = st.selectbox(
+            "Saved records",
+            record_labels,
+            index=None,
+            placeholder="Select saved queue",
+            key="reg_queue_record_select",
+        )
+        selected_record_id = selected_page_from_label(selected_record_label)
+    with rec_col3:
+        if st.button("Save Queue", key="reg_queue_save"):
+            record = save_current_reg_queue_record(record_name)
+            st.session_state["reg_queue_record_status"] = f"Saved: {record['name']}"
+            st.rerun()
+    with rec_col4:
+        load_disabled = not selected_record_id or selected_record_id not in record_by_id
+        if st.button("Load", key="reg_queue_load", disabled=load_disabled):
+            apply_reg_queue_state(record_by_id[selected_record_id])
+            st.session_state["reg_queue_record_status"] = f"Loaded: {record_by_id[selected_record_id].get('name')}"
+            st.rerun()
+
+    if selected_record_id in record_by_id:
+        selected_record = record_by_id[selected_record_id]
+        q = selected_record.get("queue") or {}
+        st.caption(
+            f"Selected: {selected_record.get('name')} / browser={q.get('browser_label', '-')} / "
+            f"cards={len(q.get('cards') or [])} / saved_at={selected_record.get('saved_at', '-')}"
+        )
+        st.caption("记录会保存所有卡片配置和上传 case 选择；上传文件本体需要在运行前重新选择。")
+        if st.button("Delete Selected Record", key="reg_queue_delete"):
+            save_reg_queue_records([record for record in records if str(record.get("id")) != selected_record_id])
+            st.session_state["reg_queue_record_status"] = f"Deleted: {selected_record.get('name')}"
+            st.rerun()
 
     card_col1, card_col2, card_col3 = st.columns([1, 1, 4])
     with card_col1:
         if st.button("＋ Add Page", key="reg_add_page_card"):
             st.session_state["reg_page_card_count"] += 1
+            st.session_state["reg_focus_card_index"] = st.session_state["reg_page_card_count"]
             st.rerun()
     with card_col2:
         remove_disabled = st.session_state["reg_page_card_count"] <= 1
         if st.button("－ Remove Page", key="reg_remove_page_card", disabled=remove_disabled):
             clear_reg_page_card_state(st.session_state["reg_page_card_count"])
             st.session_state["reg_page_card_count"] = max(1, st.session_state["reg_page_card_count"] - 1)
+            st.session_state["reg_focus_card_index"] = st.session_state["reg_page_card_count"]
             st.rerun()
     with card_col3:
         st.caption(f"{st.session_state['reg_page_card_count']} page card(s)")
 
     page_configs = []
     for index in range(1, int(st.session_state["reg_page_card_count"]) + 1):
-        current_page_label = selected_page_from_label(st.session_state.get(f"reg_page_target_{index}", "")).strip() or "未选择 JSP"
-        with st.expander(f"{index}. {current_page_label}", expanded=index == 1):
+        target_value_key = f"reg_page_target_value_{index}"
+        target_select_key = f"reg_page_target_{index}"
+        stable_target = (
+            st.session_state.get(target_value_key)
+            or selected_page_from_label(st.session_state.get(target_select_key, ""))
+        )
+        if stable_target and not selected_page_from_label(st.session_state.get(target_select_key, "")):
+            st.session_state[target_select_key] = _page_option_label_for(stable_target)
+        current_page_label = str(stable_target or "").strip() or "未选择 JSP"
+        with st.expander(f"{index}. {current_page_label}", expanded=index == int(st.session_state.get("reg_focus_card_index", 1))):
             enabled = st.checkbox("Enabled", value=True, key=f"reg_page_enabled_{index}")
             target_selection = st.selectbox(
                 "Target JSP",
@@ -622,7 +861,8 @@ with tabs[0]:
                 accept_new_options=True,
                 key=f"reg_page_target_{index}",
             )
-            target_page = selected_page_from_label(target_selection).strip()
+            target_page = selected_page_from_label(target_selection).strip() or str(stable_target or "").strip()
+            st.session_state[target_value_key] = target_page
 
             option_meta = next((item for item in PAGE_OPTIONS if item["page_id"].lower() == target_page.lower()), None)
             if option_meta:
@@ -661,6 +901,12 @@ with tabs[0]:
                 include_negative = st.checkbox("Include negative", value=False, key=f"reg_page_negative_{index}")
                 negative_options = load_negative_profile_options(checklist_path, target_page)
                 negative_labels = negative_profile_labels(negative_options)
+                saved_negative_profiles = st.session_state.pop(f"reg_page_saved_negative_profiles_{index}", None)
+                if saved_negative_profiles is not None:
+                    st.session_state[f"reg_page_negative_profiles_{index}"] = _negative_labels_for_profiles(
+                        negative_options,
+                        saved_negative_profiles,
+                    )
                 selected_negative_labels = st.multiselect(
                     "Negative profiles",
                     negative_labels,
@@ -699,6 +945,11 @@ with tabs[0]:
             for profile_index in range(int(profile_count)):
                 p_col1, p_col2 = st.columns([2, 1])
                 with p_col1:
+                    saved_case_id = st.session_state.pop(f"reg_profile_saved_case_id_{index}_{profile_index}", None)
+                    if saved_case_id:
+                        saved_case_label = _upload_case_label_for(upload_case_labels, saved_case_id)
+                        if saved_case_label:
+                            st.session_state[f"reg_profile_case_id_{index}_{profile_index}"] = saved_case_label
                     selected_upload_case_label = st.selectbox(
                         "Upload case_id",
                         upload_case_labels,
@@ -866,24 +1117,15 @@ with tabs[1]:
                             st.stop()
                         upload_path = save_uploaded_file(v_selected_upload_file, subdir="gui_route")
                         cmd += f" --upload-file {quote(upload_path)}"
-                    start_interactive_command("route_verify_session", cmd)
-                    st.session_state["route_verify_session"]["route_output_path"] = out_file
-                    st.rerun()
-
-        route_session = interactive_session("route_verify_session")
-        if route_session:
-            route_output = route_session.get("route_output_path")
-            route_rendered_value = render_interactive_console("route_verify_session", output_path=route_output)
-            route_code = normalize_interactive_return_code(route_session, route_rendered_value)
-            if (
-                route_code == 0
-                and not route_session.get("postprocessed")
-                and Path("generated/valid/page_mapping.json").exists()
-            ):
-                st.info("Runtime profile saved. Regenerating checklist from current mapping/profile data...")
-                checklist_cmd = f"{PYTHON_CMD} src/checklist_generator.py generated/valid/page_mapping.json -o generated/valid/migration_checklist.xlsx"
-                run_command(checklist_cmd)
-                route_session["postprocessed"] = True
+                    code, _ = run_command_in_powershell(cmd)
+                    if code == 0:
+                        st.success(f"Route map saved: {out_file}")
+                        if Path("generated/valid/page_mapping.json").exists():
+                            st.info("Runtime profile saved. Regenerating checklist from current mapping/profile data...")
+                            checklist_cmd = f"{PYTHON_CMD} src/checklist_generator.py generated/valid/page_mapping.json -o generated/valid/migration_checklist.xlsx"
+                            run_command(checklist_cmd)
+                    else:
+                        st.error(f"Route verification failed: exit={code}")
 
 # --- TAB: Scanner & Mapper ---
 with tabs[2]:

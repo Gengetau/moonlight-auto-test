@@ -1,8 +1,9 @@
 import json
+import time
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
-from playwright.sync_api import Page
+from playwright.sync_api import Error as PlaywrightError, Page
 
 from src.action_executor import _capture_state, execute_action
 from src.route_runtime_verifier import (
@@ -90,6 +91,185 @@ def _route_steps_by_index(route: Dict[str, Any]) -> Dict[int, Dict[str, Any]]:
     return steps
 
 
+def _manual_replay_action_type(replay: Dict[str, Any]) -> str:
+    action_type = str(replay.get("action_type") or "click").lower()
+    selector = str(replay.get("selector") or "").lower()
+    replay_type = str(replay.get("type") or "").lower()
+    if action_type == "click" and (replay_type in {"checkbox", "radio"} or "type=\"checkbox\"" in selector or "type='checkbox'" in selector):
+        return "check"
+    return action_type
+
+
+def _mark_manual_replay_target(
+    page: Page,
+    replay: Dict[str, Any],
+    *,
+    replay_index: int,
+    test_id: str,
+) -> Tuple[str, Dict[str, Any]]:
+    selector = str(replay.get("selector") or "")
+    if not selector:
+        return selector, {"marked": False, "reason": "empty selector"}
+
+    value = str(replay.get("value") or "")
+    text = str(replay.get("text") or "")
+    action_type = _manual_replay_action_type(replay)
+    marker = f"ml-{_safe_id(test_id)}-{replay_index}-{int(time.time() * 1000)}"
+    marker_selector = f'[data-moonlight-manual-replay-id="{marker}"]'
+    script = """
+    ({ selector, marker, value, text, actionType, allowFallback }) => {
+      const normalize = raw => String(raw || '').replace(/\\s+/g, ' ').trim();
+      const wantedValue = normalize(value);
+      const wantedText = normalize(text);
+      const action = String(actionType || '').toLowerCase();
+      const wantsChoice = ['check', 'uncheck'].includes(action);
+      const wantsFill = ['fill', 'clear', 'set_value'].includes(action);
+      const wantsUpload = ['upload', 'file', 'set_input_files'].includes(action);
+      const isVisible = el => {
+        const style = window.getComputedStyle(el);
+        const rect = el.getBoundingClientRect();
+        return style && style.visibility !== 'hidden' && style.display !== 'none' && rect.width >= 0 && rect.height >= 0;
+      };
+      const isEditable = (el, tag, type) => {
+        if (tag === 'textarea') return true;
+        if (tag === 'input') return !['button', 'submit', 'reset', 'image', 'hidden', 'checkbox', 'radio', 'file'].includes(type);
+        if (el.isContentEditable) return true;
+        const role = (el.getAttribute('role') || '').toLowerCase();
+        return ['textbox', 'searchbox', 'combobox'].includes(role);
+      };
+      const isCompatible = (el, tag, type) => {
+        if (wantsChoice) return tag === 'input' && ['checkbox', 'radio'].includes(type);
+        if (wantsUpload) return tag === 'input' && type === 'file';
+        if (wantsFill) return isEditable(el, tag, type);
+        return true;
+      };
+      const scoreElement = (el, fromSelector) => {
+        const tag = (el.tagName || '').toLowerCase();
+        const type = (el.getAttribute('type') || '').toLowerCase();
+        if (!isCompatible(el, tag, type)) return null;
+        const elementValue = normalize(el.value || el.getAttribute('value') || '');
+        const elementText = normalize(el.innerText || el.textContent || el.getAttribute('title') || el.getAttribute('aria-label') || '');
+        const valueExact = !!wantedValue && elementValue === wantedValue;
+        const valuePartial = !!wantedValue && !valueExact && elementValue.includes(wantedValue);
+        const textExact = !!wantedText && elementText === wantedText;
+        const textPartial = !!wantedText && !textExact && elementText.includes(wantedText);
+        if (!fromSelector && (wantedValue || wantedText) && !valueExact && !valuePartial && !textExact && !textPartial) {
+          return null;
+        }
+        if (!fromSelector && !wantedValue && !wantedText) return null;
+        let score = fromSelector ? 1 : 0;
+        if (wantsChoice && tag === 'input' && ['checkbox', 'radio'].includes(type)) score += 80;
+        if (valueExact) score += 240;
+        else if (valuePartial) score += 90;
+        if (textExact) score += 220;
+        else if (textPartial) score += 80;
+        if (isVisible(el)) score += 10;
+        return { score, tag, type, value: elementValue, text: elementText.slice(0, 120), visible: isVisible(el) };
+      };
+
+      let selectorElements = [];
+      try { selectorElements = Array.from(document.querySelectorAll(selector)); } catch (_) {}
+      const fallbackElements = allowFallback && (wantedText || wantedValue || wantsChoice)
+        ? Array.from(document.querySelectorAll('input,select,textarea,button,a,td,span,div,[onclick]'))
+        : [];
+      const candidates = selectorElements.map(el => ({ el, fromSelector: true }))
+        .concat(selectorElements.length ? [] : fallbackElements.map(el => ({ el, fromSelector: false })));
+
+      let best = null;
+      for (const candidate of candidates) {
+        const scored = scoreElement(candidate.el, candidate.fromSelector);
+        if (!scored) continue;
+        if (!best || scored.score > best.score) best = { ...scored, el: candidate.el, fromSelector: candidate.fromSelector };
+      }
+      if (!best || best.score <= 0) {
+        return { marked: false, selector_count: selectorElements.length, reason: 'no scored target' };
+      }
+      best.el.setAttribute('data-moonlight-manual-replay-id', marker);
+      return {
+        marked: true,
+        selector_count: selectorElements.length,
+        score: best.score,
+        from_selector: best.fromSelector,
+        tag: best.tag,
+        type: best.type,
+        value: best.value,
+        text: best.text,
+        visible: best.visible,
+      };
+    }
+    """
+
+    diagnostics: List[Dict[str, Any]] = []
+
+    def _try_mark(allow_fallback: bool) -> Tuple[Optional[str], Optional[Dict[str, Any]], bool]:
+        saw_original_selector = False
+        for frame in page.frames:
+            try:
+                marked = frame.evaluate(
+                    script,
+                    {
+                        "selector": selector,
+                        "marker": marker,
+                        "value": value,
+                        "text": text,
+                        "actionType": action_type,
+                        "allowFallback": allow_fallback,
+                    },
+                )
+            except PlaywrightError as exc:
+                diagnostics.append({"frame_url": getattr(frame, "url", ""), "error": str(exc), "allow_fallback": allow_fallback})
+                continue
+            if marked:
+                marked["frame_url"] = getattr(frame, "url", "")
+                marked["allow_fallback"] = allow_fallback
+                if int(marked.get("selector_count") or 0) > 0:
+                    saw_original_selector = True
+            if marked and marked.get("marked"):
+                marked["original_selector"] = selector
+                marked["resolved_selector"] = marker_selector
+                return marker_selector, marked, saw_original_selector
+            if marked:
+                diagnostics.append(marked)
+        return None, None, saw_original_selector
+
+    marked_selector, marked_state, saw_original_selector = _try_mark(False)
+    if marked_selector and marked_state:
+        return marked_selector, marked_state
+    if saw_original_selector:
+        return selector, {
+            "marked": False,
+            "original_selector": selector,
+            "reason": "original selector exists but no compatible replay target was selected",
+            "diagnostics": diagnostics[:8],
+        }
+
+    marked_selector, marked_state, _ = _try_mark(True)
+    if marked_selector and marked_state:
+        return marked_selector, marked_state
+
+    return selector, {"marked": False, "original_selector": selector, "diagnostics": diagnostics[:8]}
+
+
+def _selector_exists_in_any_frame(page: Page, selector: str) -> bool:
+    if not selector:
+        return False
+    for frame in page.frames:
+        try:
+            if frame.locator(selector).count() > 0:
+                return True
+        except PlaywrightError:
+            continue
+    return False
+
+
+def _manual_replay_start_offset(page: Page, replay_steps: List[Dict[str, Any]]) -> int:
+    for index, replay in enumerate(replay_steps):
+        selector = str(replay.get("selector") or "")
+        if _selector_exists_in_any_frame(page, selector):
+            return index
+    return 0
+
+
 def _execute_manual_replay(
     page: Page,
     replay_steps: List[Dict[str, Any]],
@@ -102,8 +282,9 @@ def _execute_manual_replay(
 ) -> Tuple[Page, Dict[str, Any]]:
     result: Dict[str, Any] = {"status": "PASS", "steps": []}
     for replay_index, replay in enumerate(replay_steps, start=1):
-        selector = str(replay.get("selector") or "")
-        action_type = str(replay.get("action_type") or "click")
+        recorded_selector = str(replay.get("selector") or "")
+        selector = recorded_selector
+        action_type = _manual_replay_action_type(replay)
         value = replay.get("value") or None
         if str(action_type).lower() in {"upload", "file", "set_input_files"} and upload_file:
             value = upload_file
@@ -111,6 +292,12 @@ def _execute_manual_replay(
             result.update({"status": "BLOCKED", "reason": "Recorded manual replay step has no selector"})
             return page, result
 
+        selector, selector_resolution = _mark_manual_replay_target(
+            page,
+            replay,
+            replay_index=replay_index,
+            test_id=test_id,
+        )
         pages_before = _pages_for_context(page)
         action_result = execute_action(
             page,
@@ -125,6 +312,10 @@ def _execute_manual_replay(
                 "label": f"manual replay {replay_index}",
                 "action_type": action_type,
                 "locator": selector,
+                "manual_replay": True,
+                "recorded_selector": recorded_selector,
+                "recorded_text": replay.get("text") or "",
+                "recorded_value": replay.get("value") or "",
                 "keep_popup": True,
             },
         )
@@ -136,6 +327,8 @@ def _execute_manual_replay(
                 "index": replay_index,
                 "action_type": action_type,
                 "selector": selector,
+                "recorded_selector": recorded_selector,
+                "selector_resolution": selector_resolution,
                 "status": action_result.get("status"),
                 "reason": action_result.get("reason"),
                 "popup_taken_over": takeover_page is not None,
@@ -248,9 +441,11 @@ class RouteNavigator:
                 )
                 return page, result
 
+            manual_replay_start_offset = _manual_replay_start_offset(page, full_route_replay)
+            replay_steps = full_route_replay[manual_replay_start_offset:] if manual_replay_start_offset else full_route_replay
             page, replay_result = _execute_manual_replay(
                 page,
-                full_route_replay,
+                replay_steps,
                 capture_dir=route_capture_dir,
                 test_id=f"{_safe_id(route_id)}_manual_full_route",
                 browser_name=self.browser_name,
@@ -265,6 +460,7 @@ class RouteNavigator:
                     "status": replay_result.get("status"),
                     "manual_replay_used": True,
                     "manual_replay_mode": "full_route",
+                    "manual_replay_start_offset": manual_replay_start_offset,
                     "manual_replay_steps": replay_result.get("steps") or [],
                     "reason": replay_result.get("reason"),
                     "active_page_url": page.url if not _page_is_closed(page) else None,

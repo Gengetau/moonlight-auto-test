@@ -233,9 +233,11 @@ def _install_manual_recorder(page: Page, *, route_id: str, index: int) -> Dict[s
         const id = el.getAttribute('id');
         const name = el.getAttribute('name');
         const type = el.getAttribute('type');
+        const value = el.getAttribute('value');
         const href = el.getAttribute('href');
         const onclick = el.getAttribute('onclick');
         if (id) return `${tag}#${cssEscape(id)}`;
+        if (name && type && ['checkbox', 'radio'].includes(type) && value) return `${tag}[name="${attrEscape(name)}"][type="${attrEscape(type)}"][value="${attrEscape(value)}"]`;
         if (name && type) return `${tag}[name="${attrEscape(name)}"][type="${attrEscape(type)}"]`;
         if (name) return `${tag}[name="${attrEscape(name)}"]`;
         if (href && href !== '#') return `${tag}[href="${attrEscape(href)}"]`;
@@ -385,7 +387,7 @@ def _manual_replay_from_events(events: List[Dict[str, Any]], *, upload_file: Opt
             if tag == "select":
                 action_type = "select"
             elif input_type in {"checkbox", "radio"}:
-                action_type = "click"
+                action_type = "check" if bool(event.get("checked")) else "uncheck"
             elif input_type == "file":
                 action_type = "upload"
             value = event.get("value") or ""
@@ -398,6 +400,11 @@ def _manual_replay_from_events(events: List[Dict[str, Any]], *, upload_file: Opt
                     "value": value,
                     "event_type": event.get("event_type"),
                     "file_names": event.get("file_names") or [],
+                    "checked": event.get("checked"),
+                    "tag": tag,
+                    "type": input_type,
+                    "text": event.get("text") or "",
+                    "onclick": event.get("onclick") or "",
                 }
             )
 
@@ -424,6 +431,10 @@ def _manual_replay_from_events(events: List[Dict[str, Any]], *, upload_file: Opt
                     "value": "",
                     "event_type": event_type,
                     "text": event.get("text") or "",
+                    "tag": tag,
+                    "type": input_type,
+                    "onclick": event.get("onclick") or "",
+                    "href": event.get("href") or "",
                 }
             )
             continue
@@ -438,6 +449,10 @@ def _manual_replay_from_events(events: List[Dict[str, Any]], *, upload_file: Opt
                     "selector": selector,
                     "value": "",
                     "event_type": event_type,
+                    "tag": tag,
+                    "type": input_type,
+                    "text": event.get("text") or "",
+                    "onclick": event.get("onclick") or "",
                 }
             )
 

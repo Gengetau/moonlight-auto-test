@@ -107,6 +107,9 @@ def _capture_frame_controls(frame, frame_index: int) -> Dict[str, Any]:
         const onclick = el.getAttribute('onclick');
         const value = el.getAttribute('value');
         if (id) return `#${identEscape(id)}`;
+        if (name && type && ['checkbox', 'radio'].includes(String(type).toLowerCase()) && value) {
+          return `${tag}[name="${attrEscape(name)}"][type="${attrEscape(type)}"][value="${attrEscape(value)}"]`;
+        }
         if (name && type) return `${tag}[name="${attrEscape(name)}"][type="${attrEscape(type)}"]`;
         if (name) return `${tag}[name="${attrEscape(name)}"]`;
         if (href && href !== '#') return `${tag}[href="${attrEscape(href)}"]`;
@@ -148,6 +151,16 @@ def _capture_frame_controls(frame, frame_index: int) -> Dict[str, Any]:
             enctype: el.getAttribute('enctype') || (ownerForm ? ownerForm.getAttribute('enctype') || '' : ''),
             target: el.getAttribute('target') || (ownerForm ? ownerForm.getAttribute('target') || '' : ''),
             disabled: Boolean(el.disabled) || el.getAttribute('disabled') !== null,
+            checked: tag === 'input' ? Boolean(el.checked) : false,
+            selectedValue: tag === 'select' ? String(el.value || '') : '',
+            options: tag === 'select'
+              ? Array.from(el.options || []).map(option => ({
+                  value: option.value || '',
+                  text: (option.text || '').trim(),
+                  disabled: Boolean(option.disabled),
+                  selected: Boolean(option.selected),
+                }))
+              : [],
             visible: isVisible(el),
             attributes: attrs,
             raw: (el.outerHTML || '').slice(0, 1500)

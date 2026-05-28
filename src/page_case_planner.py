@@ -1,4 +1,5 @@
 import json
+import json
 import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -39,6 +40,13 @@ DEFAULT_CASE_TEMPLATES = [
         "action_type": "download",
         "requires": ["template_download"],
         "priority": 60,
+    },
+    {
+        "template_id": "file_download",
+        "case_type": "file_download",
+        "action_type": "download",
+        "requires": ["file_download"],
+        "priority": 65,
     },
     {
         "template_id": "link_navigation",
@@ -147,6 +155,10 @@ def _as_list(value: Any) -> List[Any]:
     return value if isinstance(value, list) else []
 
 
+def _css_attr(value: Any) -> str:
+    return _as_text(value).replace("\\", "\\\\").replace('"', '\\"')
+
+
 def _attributes(item: Dict[str, Any]) -> Dict[str, Any]:
     value = item.get("attributes")
     return value if isinstance(value, dict) else {}
@@ -181,6 +193,11 @@ def _field_name(item: Dict[str, Any]) -> str:
 def _locator(item: Dict[str, Any]) -> str:
     kind = _as_text(item.get("kind")).lower()
     tag = _as_text(item.get("tag")).lower()
+    input_type = _first_attr(item, "type").lower()
+    name = _first_attr(item, "name")
+    value = _first_attr(item, "value")
+    if tag == "input" and input_type in {"checkbox", "radio"} and name and value:
+        return f'input[name="{_css_attr(name)}"][type="{_css_attr(input_type)}"][value="{_css_attr(value)}"]'
     if kind == "file" or tag == "html:file":
         field = _field_name(item)
         if field:
@@ -227,6 +244,10 @@ def _search_blob(item: Dict[str, Any]) -> str:
     ]
     values.extend(attrs.values())
     return " ".join(_as_text(value) for value in values if value is not None).lower()
+
+
+def _compact_label(value: Any) -> str:
+    return re.sub(r"[\s\u3000]+", "", _as_text(value)).lower()
 
 
 def _has_english_word(blob: str, *words: str) -> bool:
@@ -308,6 +329,24 @@ def _is_text_input(item: Dict[str, Any]) -> bool:
     return tag in {"html:text", "html:password", "form:input"}
 
 
+def _is_choice_input(item: Dict[str, Any]) -> bool:
+    tag = _as_text(item.get("tag")).lower()
+    input_type = _first_attr(item, "type").lower()
+    return tag == "input" and input_type in {"checkbox", "radio"}
+
+
+def _is_clickable_control(item: Dict[str, Any]) -> bool:
+    kind = _as_text(item.get("kind")).lower()
+    tag = _as_text(item.get("tag")).lower()
+    input_type = _first_attr(item, "type").lower()
+    return (
+        kind in {"button", "link"}
+        or tag in {"a", "button"}
+        or (tag == "input" and input_type in {"button", "submit", "reset", "image"})
+        or bool(_first_attr(item, "onclick", "onClick") and tag not in {"form", "table"})
+    )
+
+
 def _is_submit_action(item: Dict[str, Any]) -> bool:
     if _is_download_action(item) or _is_close_action(item):
         return False
@@ -326,15 +365,37 @@ def _is_submit_action(item: Dict[str, Any]) -> bool:
 
 
 def _is_download_action(item: Dict[str, Any]) -> bool:
+    return _is_template_download_action(item) or _is_file_download_action(item)
+
+
+def _is_template_download_action(item: Dict[str, Any]) -> bool:
+    if not _is_clickable_control(item):
+        return False
     blob = _search_blob(item)
     action_type = _as_text(item.get("action_type") or item.get("action_hint") or item.get("case_type")).lower()
+    has_template_marker = any(marker in blob for marker in ("templatedownload", "template", "雛形", "テンプレート"))
+    has_download_marker = action_type == "download" or any(marker in blob for marker in ("download", "ダウンロード", "template", "テンプレート", "雛形"))
+    return has_template_marker and has_download_marker
+
+
+def _is_file_download_action(item: Dict[str, Any]) -> bool:
+    if not _is_clickable_control(item) or _is_template_download_action(item):
+        return False
+    blob = _search_blob(item)
+    action_type = _as_text(item.get("action_type") or item.get("action_hint") or item.get("case_type")).lower()
+    label = _compact_label(_label(item))
+    onclick = _as_text(_first_attr(item, "onclick", "onClick") or item.get("onclick")).lower()
+    if any(marker in blob for marker in ("window.close", "parent.close", "fncancel", "キャンセル", "取消", "戻る", "戻り")):
+        return False
+    if re.search(r"\b(?:cancel|back|bak|close)\b", blob):
+        return False
+    output_label = label in {"出力", "ファイル出力", "pdf出力"} or label.endswith("出力")
     return (
-        action_type == "download"
-        or "templatedownload" in blob
+        (action_type == "download" and output_label)
+        or "fndownload" in blob
         or "download" in blob
         or "ダウンロード" in blob
-        or "template" in blob
-        or "雛形" in blob
+        or (output_label and ("download" in onclick or "fndownload" in onclick or "download" in blob))
     )
 
 
@@ -451,12 +512,15 @@ class PageProfileBuilder:
         files: List[Dict[str, Any]] = []
         submit_actions: List[Dict[str, Any]] = []
         download_actions: List[Dict[str, Any]] = []
+        template_download_actions: List[Dict[str, Any]] = []
+        file_download_actions: List[Dict[str, Any]] = []
         close_actions: List[Dict[str, Any]] = []
         delete_actions: List[Dict[str, Any]] = []
         back_actions: List[Dict[str, Any]] = []
         create_actions: List[Dict[str, Any]] = []
         update_actions: List[Dict[str, Any]] = []
         tables: List[Dict[str, Any]] = []
+        option_controls: List[Dict[str, Any]] = []
         search_actions: List[Dict[str, Any]] = []
         navigation_links: List[Dict[str, Any]] = []
 
@@ -492,12 +556,22 @@ class PageProfileBuilder:
                 counts["input"] += 1
             if _is_table(item):
                 counts["table"] += 1
+            if _is_select(item) or _is_choice_input(item):
+                option_controls.append(self._control_entry(item))
             if _is_result_table(item):
                 tables.append(self._control_entry(item))
             if _is_submit_action(item):
                 submit_actions.append(self._action_entry(item, "submit"))
-            if _is_download_action(item):
-                download_actions.append(self._action_entry(item, "download"))
+            if _is_template_download_action(item):
+                entry = self._action_entry(item, "download")
+                entry["download_kind"] = "template"
+                template_download_actions.append(entry)
+                download_actions.append(entry)
+            elif _is_file_download_action(item):
+                entry = self._action_entry(item, "download")
+                entry["download_kind"] = "file_output"
+                file_download_actions.append(entry)
+                download_actions.append(entry)
             if _is_close_action(item):
                 close_actions.append(self._action_entry(item, "close_window"))
             if _is_delete_action(item):
@@ -537,7 +611,8 @@ class PageProfileBuilder:
             "file_upload": bool(files) or counts["file"] > 0,
             "form_submit": bool(submit_actions),
             "upload_submit": bool(files) and bool(submit_actions),
-            "template_download": bool(download_actions),
+            "template_download": bool(template_download_actions),
+            "file_download": bool(file_download_actions),
             "navigation_link": bool(navigation_links),
             "close_window": bool(close_actions),
             "delete_action": bool(delete_actions),
@@ -548,6 +623,7 @@ class PageProfileBuilder:
             "select": has_select,
             "search": bool(search_actions) and (has_text_input or has_select),
             "result_table": bool(tables),
+            "output_options": bool(option_controls),
             "popup": any(_is_popup_action(item) for item in elements) or any(form.get("target") and form.get("target").lower() not in {"_self", "self"} for form in forms),
         }
 
@@ -569,6 +645,8 @@ class PageProfileBuilder:
             "files": files,
             "submit_actions": submit_actions,
             "download_actions": download_actions,
+            "template_download_actions": template_download_actions,
+            "file_download_actions": file_download_actions,
             "navigation_links": navigation_links,
             "close_actions": close_actions,
             "delete_actions": self._dedupe_action_entries(delete_actions),
@@ -577,6 +655,7 @@ class PageProfileBuilder:
             "update_actions": self._dedupe_action_entries(update_actions),
             "search_actions": search_actions,
             "tables": tables,
+            "option_controls": option_controls,
             "capabilities": capabilities,
         }
 
@@ -733,17 +812,28 @@ class PageProfileBuilder:
             if value not in (None, ""):
                 attrs.setdefault(key, value)
 
+        selector = _as_text(control.get("selector"))
+        if tag == "input" and input_type in {"checkbox", "radio"} and control.get("name") and control.get("value"):
+            selector = (
+                f'input[name="{_css_attr(control.get("name"))}"]'
+                f'[type="{_css_attr(input_type)}"]'
+                f'[value="{_css_attr(control.get("value"))}"]'
+            )
+
         return {
             "kind": kind,
             "tag": tag,
             "attributes": attrs,
-            "locator": _as_text(control.get("selector")),
+            "locator": selector,
             "label": _as_text(control.get("text") or control.get("value") or control.get("name") or control.get("id")),
             "raw": "" if tag in {"form", "table"} else _as_text(control.get("raw")),
             "action": _as_text(control.get("action") or control.get("formAction") or control.get("ownerFormAction")),
             "action_type": self._runtime_action_type(control, kind),
             "frame_index": control.get("frame_index"),
             "frame_url": control.get("frame_url"),
+            "checked": bool(control.get("checked")),
+            "selected_value": _as_text(control.get("selectedValue")),
+            "options": control.get("options") if isinstance(control.get("options"), list) else [],
             "_source": source,
         }
 
@@ -764,9 +854,12 @@ class PageProfileBuilder:
         blob = " ".join(_as_text(value) for value in values if value is not None).lower()
         tag = _as_text(control.get("tag")).lower()
         input_type = _as_text(control.get("type")).lower()
+        is_clickable = kind in {"button", "link"} or tag in {"a", "button"} or (tag == "input" and input_type in {"button", "submit", "reset", "image"})
         if "window.close" in blob or "parent.close" in blob:
             return "close_window"
-        if "download" in blob or "template" in blob:
+        if "fncancel" in blob or "キャンセル" in blob or "取消" in blob or re.search(r"\b(?:cancel|back|bak|close)\b", blob):
+            return "click"
+        if is_clickable and ("download" in blob or "template" in blob or "ダウンロード" in blob or "fndownload" in blob):
             return "download"
         if "search" in blob:
             return "search"
@@ -837,9 +930,17 @@ class PageProfileBuilder:
         }
 
     def _control_entry(self, item: Dict[str, Any]) -> Dict[str, Any]:
+        attrs = _attributes(item)
         return {
             "locator": _locator(item) or "table",
             "label": _label(item),
+            "tag": _as_text(item.get("tag")).lower(),
+            "type": _first_attr(item, "type").lower(),
+            "name": _first_attr(item, "name"),
+            "value": _first_attr(item, "value"),
+            "checked": bool(item.get("checked")) or "checked" in {str(key).lower() for key in attrs},
+            "selected_value": _as_text(item.get("selected_value") or item.get("selectedValue")),
+            "options": item.get("options") if isinstance(item.get("options"), list) else [],
         }
 
 
@@ -984,6 +1085,8 @@ class CaseExpansionRules:
                     "priority_offset": 2,
                 },
             ]
+        if case_type == "file_download":
+            return self._file_download_option_specs(case, profile)
         if case_type == "link_navigation":
             return [
                 {
@@ -1057,6 +1160,133 @@ class CaseExpansionRules:
                 },
             ]
         return []
+
+    def _file_download_option_specs(self, case: Dict[str, Any], profile: Dict[str, Any]) -> List[Dict[str, Any]]:
+        controls = [item for item in profile.get("option_controls") or [] if isinstance(item, dict)]
+        download_locator = _as_text(case.get("locator"))
+        if not controls or not download_locator:
+            return []
+
+        variants = self._option_variants(controls)
+        specs: List[Dict[str, Any]] = []
+        for index, variant in enumerate(variants, start=1):
+            pre_steps = variant.get("pre_steps") or []
+            if not pre_steps:
+                continue
+            viewpoint_id = "option_matrix_representative" if index == 1 else f"option_matrix_{variant.get('id', index)}"
+            specs.append(
+                {
+                    "viewpoint_id": viewpoint_id,
+                    "title": f"出力条件代表パターン確認：{variant.get('title')}",
+                    "objective": "出力形式、番号形式、出力項目、チェックボックス等の代表条件でファイル出力が同等に行えることを確認する。",
+                    "steps": f"{variant.get('description')}。条件設定後、出力 locator を実行する。",
+                    "expected": "代表条件ごとに Legacy/New ともファイル出力が開始され、エラーや想定外 close が発生しない。",
+                    "expected_type": "download",
+                    "automation_mode": "auto",
+                    "enabled": "true",
+                    "priority_offset": 30 + index,
+                    "pre_steps": json.dumps(pre_steps, ensure_ascii=False),
+                    "main_step": json.dumps({"action_type": "download", "locator": download_locator}, ensure_ascii=False),
+                }
+            )
+        return specs[:3]
+
+    def _option_variants(self, controls: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        variants: List[Dict[str, Any]] = []
+        check_controls = [
+            item for item in controls
+            if _as_text(item.get("tag")).lower() == "input"
+            and _as_text(item.get("type")).lower() in {"checkbox", "radio"}
+            and item.get("locator")
+        ]
+        select_controls = [
+            item for item in controls
+            if _as_text(item.get("tag")).lower() == "select" and item.get("locator")
+        ]
+
+        if check_controls:
+            variants.append(
+                {
+                    "id": "all_selected",
+                    "title": "全チェック",
+                    "description": "表示されている checkbox/radio を代表的に選択状態へ変更する",
+                    "pre_steps": [
+                        {"action_type": "check", "locator": item.get("locator")}
+                        for item in check_controls
+                    ],
+                }
+            )
+
+            first_locator = check_controls[0].get("locator")
+            variants.append(
+                {
+                    "id": "minimum_selected",
+                    "title": "最小選択",
+                    "description": "先頭 option のみを選択し、その他の checkbox/radio を解除する",
+                    "pre_steps": [
+                        {
+                            "action_type": "check" if item.get("locator") == first_locator else "uncheck",
+                            "locator": item.get("locator"),
+                        }
+                        for item in check_controls
+                    ],
+                }
+            )
+
+            variants.append(
+                {
+                    "id": "alternate_selected",
+                    "title": "代替選択",
+                    "description": "偶数/奇数位置を切り替えた代替 checkbox/radio 条件へ変更する",
+                    "pre_steps": [
+                        {
+                            "action_type": "check" if index % 2 else "uncheck",
+                            "locator": item.get("locator"),
+                        }
+                        for index, item in enumerate(check_controls)
+                    ],
+                }
+            )
+
+        for select in select_controls:
+            options = [
+                option for option in select.get("options") or []
+                if isinstance(option, dict) and not option.get("disabled") and _as_text(option.get("value"))
+            ]
+            selected_value = _as_text(select.get("selected_value"))
+            alternate = next((option for option in options if _as_text(option.get("value")) != selected_value), None)
+            if not alternate:
+                continue
+            variants.append(
+                {
+                    "id": f"select_{_safe_case_id(select.get('name') or select.get('label'))}",
+                    "title": f"{select.get('label') or select.get('name') or 'select'} 代替値",
+                    "description": "select 項目を代表的な代替値へ変更する",
+                    "pre_steps": [
+                        {
+                            "action_type": "select",
+                            "locator": select.get("locator"),
+                            "value": _as_text(alternate.get("value")),
+                        }
+                    ],
+                }
+            )
+
+        if check_controls and select_controls:
+            check_variants = [item for item in variants if not _as_text(item.get("id")).startswith("select_")]
+            select_variants = [item for item in variants if _as_text(item.get("id")).startswith("select_")]
+            mixed: List[Dict[str, Any]] = []
+            for bucket in (
+                check_variants[:1],
+                select_variants[:1],
+                check_variants[1:2],
+                select_variants[1:2],
+                check_variants[2:],
+                select_variants[2:],
+            ):
+                mixed.extend(bucket)
+            return mixed
+        return variants
 
     @staticmethod
     def _build(seed: Dict[str, Any], spec: Dict[str, Any]) -> Dict[str, Any]:
@@ -1189,7 +1419,7 @@ class PageCasePlanner:
             steps = "ファイルを設定せず submit locator を実行する。"
             expected = "業務エラーまたは画面保持となり、500 エラーや空登録が発生しない。"
         elif template_id == "download_template":
-            download_item = self._first(profile, "download_actions")
+            download_item = self._first(profile, "template_download_actions")
             locator = _as_text(download_item.get("locator"))
             if not locator:
                 return None, "missing download locator"
@@ -1198,6 +1428,16 @@ class PageCasePlanner:
             objective = "テンプレート/雛形ダウンロード操作が移行前後で同等に動作することを確認する。"
             steps = "ダウンロード locator を実行し、download event と画面状態を確認する。"
             expected = "Legacy/New ともダウンロードが開始され、画面に重大差分がない。"
+        elif template_id == "file_download":
+            download_item = self._first(profile, "file_download_actions")
+            locator = _as_text(download_item.get("locator"))
+            if not locator:
+                return None, "missing file output locator"
+            expected_type = "download"
+            title = "ファイル出力ダウンロード確認"
+            objective = "出力/ファイル出力/PDF出力ボタンで業務ファイルが移行前後同等にダウンロードされることを確認する。"
+            steps = "出力 locator を実行し、download event、保存ファイル名、出力後の画面 close/保持状態を確認する。"
+            expected = "Legacy/New とも業務ファイルがダウンロードされ、画面 close が発生しても次 case 前に対象画面へ復帰できる。"
         elif template_id == "link_navigation":
             link_item = self._first(profile, "navigation_links")
             locator = _as_text(link_item.get("locator"))

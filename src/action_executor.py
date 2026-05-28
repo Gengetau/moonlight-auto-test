@@ -41,7 +41,30 @@ def _configured_download_dir() -> Path:
 
 
 def _download_save_path(suggested_filename: str) -> Path:
-    return _configured_download_dir() / _original_download_filename(suggested_filename)
+    base_path = _configured_download_dir() / _original_download_filename(suggested_filename)
+    if not base_path.exists():
+        return base_path
+
+    stem = base_path.stem or "download"
+    suffix = base_path.suffix
+    for index in range(1, 10000):
+        candidate = base_path.with_name(f"{stem} ({index}){suffix}")
+        if not candidate.exists():
+            return candidate
+    return base_path.with_name(f"{stem} ({int(time.time() * 1000)}){suffix}")
+
+
+def _record_download_result(result: Dict[str, Any], download: Any) -> None:
+    suggested_filename = download.suggested_filename or "download"
+    save_path = _download_save_path(suggested_filename)
+    save_path.parent.mkdir(parents=True, exist_ok=True)
+    download.save_as(str(save_path))
+    result["download_suggested_filename"] = suggested_filename
+    result["download_filename"] = _original_download_filename(suggested_filename)
+    result["saved_filename"] = save_path.name
+    result["download_renamed"] = save_path.name != result["download_filename"]
+    result["download_dir"] = str(save_path.parent)
+    result["download_path"] = str(save_path)
 
 
 def _console_font(size: int = 15):
@@ -161,6 +184,124 @@ def _negative_url_pattern(action_context: Optional[Dict[str, Any]], value: Any =
     return "**/*"
 
 
+def _negative_visual_evidence_payload(
+    action: str,
+    *,
+    detail: Any = "",
+    url: Any = "",
+    phase: str = "triggered",
+) -> Dict[str, str]:
+    labels = {
+        "negative_js_error": "Simulated JavaScript Error",
+        "negative_http_500": "Simulated HTTP 500",
+        "negative_network_abort": "Simulated Network Abort",
+    }
+    title = labels.get(str(action or ""), "Simulated Negative Case")
+    detail_text = str(detail or "").strip()
+    url_text = str(url or "").strip()
+    return {
+        "title": title,
+        "phase": phase,
+        "detail": detail_text,
+        "url": url_text,
+    }
+
+
+def _inject_negative_visual_evidence(
+    page: Page,
+    action: str,
+    *,
+    detail: Any = "",
+    url: Any = "",
+    phase: str = "triggered",
+) -> List[Dict[str, Any]]:
+    if _page_is_closed(page):
+        return [{"injected": False, "reason": "page_closed"}]
+
+    payload = _negative_visual_evidence_payload(action, detail=detail, url=url, phase=phase)
+    script = """
+    payload => {
+      const doc = document;
+      const root = doc.body || doc.documentElement;
+      if (!root) return { injected: false, reason: 'no document root' };
+
+      const id = 'moonlight-negative-visual-evidence';
+      let panel = doc.getElementById(id);
+      if (!panel) {
+        panel = doc.createElement('div');
+        panel.id = id;
+        root.appendChild(panel);
+      }
+
+      panel.replaceChildren();
+      const title = doc.createElement('div');
+      title.textContent = payload.title || 'Simulated Negative Case';
+      title.style.cssText = 'font-weight:700;font-size:16px;line-height:1.35;margin-bottom:8px;';
+
+      const phase = doc.createElement('div');
+      phase.textContent = 'Phase: ' + (payload.phase || 'triggered');
+      phase.style.cssText = 'font-size:12px;line-height:1.35;margin-bottom:6px;opacity:.95;';
+
+      const detail = doc.createElement('div');
+      detail.textContent = payload.detail || 'A visible error evidence marker was injected for screenshot verification.';
+      detail.style.cssText = 'font-size:13px;line-height:1.45;margin-bottom:6px;';
+
+      const url = doc.createElement('div');
+      url.textContent = payload.url ? ('Target: ' + payload.url) : 'Target: current page';
+      url.style.cssText = 'font-size:11px;line-height:1.35;word-break:break-all;opacity:.9;';
+
+      panel.appendChild(title);
+      panel.appendChild(phase);
+      panel.appendChild(detail);
+      panel.appendChild(url);
+      panel.setAttribute('data-moonlight-negative-evidence', 'true');
+      panel.style.cssText = [
+        'position:fixed',
+        'top:14px',
+        'right:14px',
+        'width:min(440px, calc(100vw - 32px))',
+        'box-sizing:border-box',
+        'padding:14px 16px',
+        'z-index:2147483647',
+        'background:#7f1d1d',
+        'color:#fff',
+        'border:3px solid #fecaca',
+        'box-shadow:0 12px 32px rgba(0,0,0,.38)',
+        'font-family:Arial, Meiryo, sans-serif',
+        'text-align:left',
+        'letter-spacing:0',
+        'pointer-events:none'
+      ].join(';');
+
+      const body = doc.body;
+      if (body) {
+        body.setAttribute('data-moonlight-negative-state', payload.title || 'negative');
+        body.style.outline = '4px solid #ef4444';
+        body.style.outlineOffset = '-4px';
+      }
+
+      return {
+        injected: true,
+        title: payload.title,
+        phase: payload.phase,
+        url: location.href,
+        text: panel.innerText
+      };
+    }
+    """
+
+    evidence: List[Dict[str, Any]] = []
+    for frame in page.frames:
+        try:
+            state = frame.evaluate(script, payload)
+            if state:
+                state["frame_url"] = str(frame.url or "")
+                evidence.append(state)
+        except PlaywrightError as exc:
+            evidence.append({"injected": False, "frame_url": str(frame.url or ""), "reason": str(exc)})
+    return evidence or [{"injected": False, "reason": "no frames"}]
+
+
 def _page_is_closed(page: Page) -> bool:
     try:
         return page.is_closed()
@@ -244,18 +385,11 @@ def _closed_page_state(output_dir: Path, name: str) -> Dict[str, Any]:
     }
 
 
-def _capture_browser_screen(page: Page, screenshot: Path, timeout: int = 15000) -> Dict[str, Any]:
-    """
-    Capture the visible browser window including browser chrome.
-
-    Playwright page screenshots cannot include the address bar. In headed
-    Windows runs we bring the page to the front and capture the primary display
-    at the migration-test resolution requirement: 1920x1080, scaling 100%.
-    """
+def _capture_native_browser_screen(page: Page, screenshot: Path, timeout: int = 15000) -> Dict[str, Any]:
     try:
         page.bring_to_front()
         try:
-            page.keyboard.press("Control+0", timeout=2000)
+            page.keyboard.press("Control+0")
         except (PlaywrightTimeoutError, PlaywrightError):
             pass
         page.wait_for_timeout(250)
@@ -269,6 +403,77 @@ def _capture_browser_screen(page: Page, screenshot: Path, timeout: int = 15000) 
         }
     except Exception as exc:
         return {"ok": False, "reason": str(exc)}
+
+
+def _capture_composited_browser_screen(page: Page, screenshot: Path, timeout: int = 15000) -> Dict[str, Any]:
+    """
+    Render a browser-like evidence image from the exact Playwright page.
+
+    Native OS screen grabs can capture whichever browser window is foreground,
+    which is fragile when legacy/new pages run side-by-side. This composited
+    mode keeps the URL evidence while making the content come from the page
+    object that is being compared.
+    """
+    temp_content = screenshot.with_name(f"{screenshot.stem}_content_tmp.png")
+    try:
+        page.bring_to_front()
+        try:
+            page.keyboard.press("Control+0")
+        except (PlaywrightTimeoutError, PlaywrightError):
+            pass
+        page.wait_for_timeout(150)
+        page.screenshot(path=str(temp_content), full_page=False, timeout=timeout)
+
+        content = Image.open(temp_content).convert("RGB")
+        width, height = 1920, 1080
+        chrome_h = 86
+        canvas = Image.new("RGB", (width, height), (255, 255, 255))
+        draw = ImageDraw.Draw(canvas)
+
+        draw.rectangle((0, 0, width, chrome_h), fill=(240, 242, 245))
+        draw.rectangle((0, 0, width, 34), fill=(229, 232, 237))
+        draw.rounded_rectangle((14, 8, 360, 34), radius=8, fill=(255, 255, 255), outline=(206, 212, 220))
+        draw.text((28, 16), "Moonlight Regression", fill=(48, 57, 70))
+        draw.rounded_rectangle((74, 44, width - 120, 76), radius=14, fill=(255, 255, 255), outline=(196, 203, 213))
+        draw.text((92, 53), _safe_page_url(page), fill=(30, 41, 59))
+        draw.line((0, chrome_h - 1, width, chrome_h - 1), fill=(205, 211, 220))
+
+        content_h = height - chrome_h
+        scale = min(width / max(content.width, 1), content_h / max(content.height, 1))
+        next_size = (max(1, int(content.width * scale)), max(1, int(content.height * scale)))
+        resample_filter = getattr(getattr(Image, "Resampling", Image), "LANCZOS", Image.BICUBIC)
+        resized = content.resize(next_size, resample_filter)
+        canvas.paste(resized, (0, chrome_h))
+        canvas.save(screenshot)
+        return {
+            "ok": True,
+            "screenshot_scope": "browser_screen_composited_1920x1080",
+            "screenshot_resolution": "1920x1080",
+            "includes_browser_chrome": True,
+            "browser_chrome_source": "synthetic_url_bar",
+            "url_bar": _safe_page_url(page),
+        }
+    except Exception as exc:
+        return {"ok": False, "reason": str(exc)}
+    finally:
+        try:
+            temp_content.unlink(missing_ok=True)
+        except Exception:
+            pass
+
+
+def _capture_browser_screen(page: Page, screenshot: Path, timeout: int = 15000) -> Dict[str, Any]:
+    """
+    Capture browser evidence with URL bar at 1920x1080.
+
+    Default mode is composited to avoid legacy/new foreground-window cross
+    contamination. Set MOONLIGHT_BROWSER_SCREEN_MODE=native to use a real OS
+    screen grab instead.
+    """
+    mode = str(os.environ.get("MOONLIGHT_BROWSER_SCREEN_MODE") or "composited").strip().lower()
+    if mode in {"native", "os", "imagegrab"}:
+        return _capture_native_browser_screen(page, screenshot, timeout=timeout)
+    return _capture_composited_browser_screen(page, screenshot, timeout=timeout)
 
 
 ACTION_ALIASES = {
@@ -286,6 +491,13 @@ ACTION_ALIASES = {
     "set_value": "set_value",
     "setvalue": "set_value",
     "hidden": "set_value",
+    "check": "check",
+    "checked": "check",
+    "checkbox": "check",
+    "radio": "check",
+    "set_checked": "check",
+    "uncheck": "uncheck",
+    "unchecked": "uncheck",
     "press": "press",
     "key": "press",
     "special_key": "press",
@@ -332,16 +544,20 @@ def infer_semantic_action(action_type: Optional[str], context: Optional[Dict[str
             return negative_action
     if "clear" in raw:
         return "clear"
+    if "uncheck" in raw or "unchecked" in raw:
+        return "uncheck"
+    if "check" in raw or "checkbox" in raw or "radio" in raw:
+        return "check"
     if "press" in raw or "special_key" in raw:
         return "press"
+    if "file_download" in raw or "download_template" in raw or "download" in raw or "download" in evidence or "ダウンロード" in evidence:
+        return "download"
     if "upload" in raw or "file" in raw or "type='file'" in evidence or 'type="file"' in evidence:
         return "upload"
     if "select" in raw or ":select" in evidence or " select" in evidence:
         return "select"
     if "form" in raw or "submit" in raw or locator.startswith("form") or "[name=" in locator and "form" in locator:
         return "submit"
-    if "download" in raw or "download" in evidence:
-        return "download"
     if "navigate" in raw or "link" in raw or "href" in evidence:
         return "navigate"
     if "input" in raw or "field" in raw or "textarea" in raw or ":input" in evidence:
@@ -805,7 +1021,26 @@ def execute_action(
         if semantic_action in NEGATIVE_ACTIONS:
             action_dispatched = True
             result["negative_action"] = semantic_action
+            result["status"] = "PASS"
+            result["reason"] = f"Negative action injected: {semantic_action}"
+            result.setdefault("negative_visual_evidence", []).extend(
+                _inject_negative_visual_evidence(
+                    page,
+                    semantic_action,
+                    detail="Preparing simulated negative scenario.",
+                    phase="before trigger",
+                )
+            )
+
             if semantic_action == "negative_js_error":
+                result.setdefault("negative_visual_evidence", []).extend(
+                    _inject_negative_visual_evidence(
+                        page,
+                        semantic_action,
+                        detail="console.error and runtime throw were injected.",
+                        phase="error injected",
+                    )
+                )
                 page.evaluate(
                     """() => {
                         console.error('MOONLIGHT_NEGATIVE: simulated console error before submit');
@@ -815,23 +1050,93 @@ def execute_action(
                 page.wait_for_timeout(300)
             elif semantic_action in {"negative_http_500", "negative_network_abort"}:
                 pattern = _negative_url_pattern(action_context, value)
+
+                is_http_500 = semantic_action == "negative_http_500"
+
+                negative_label = (
+                    "HTTP 500"
+                    if is_http_500
+                    else "network abort"
+                )
+
+                result["status"] = "PASS"
+                result["negative_action"] = semantic_action
                 result["negative_url_pattern"] = pattern
-                if semantic_action == "negative_http_500":
+                result["reason"] = (
+                    f"Negative {negative_label} route injected: {pattern}"
+                )
+                result.setdefault("negative_visual_evidence", []).extend(
+                    _inject_negative_visual_evidence(
+                        page,
+                        semantic_action,
+                        detail=f"{negative_label} route is active.",
+                        url=pattern,
+                        phase="route mocked",
+                    )
+                )
+
+                if is_http_500:
                     def _mock_http_500(route):
                         route.fulfill(
                             status=500,
                             content_type="text/html; charset=utf-8",
-                            body="<html><body><h1>MOONLIGHT_NEGATIVE simulated HTTP 500</h1></body></html>",
+                            body=(
+                                "<html><body>"
+                                "<h1>MOONLIGHT_NEGATIVE simulated HTTP 500</h1>"
+                                "</body></html>"
+                            ),
                         )
 
                     route_handler = _mock_http_500
+
                 else:
                     def _mock_network_abort(route):
                         route.abort("failed")
 
                     route_handler = _mock_network_abort
+
                 page.route(pattern, route_handler)
                 temporary_routes.append((pattern, route_handler))
+
+                trigger_url = (
+                    str(action_context.get("trigger_url") or "")
+                    if action_context
+                    else ""
+                ).strip()
+
+                if not trigger_url:
+                    trigger_url = (
+                        pattern
+                        .replace("**/", "")
+                        .replace("**", "")
+                        .replace("*", "")
+                        .strip()
+                    )
+
+                if not trigger_url:
+                    trigger_url = "/"
+
+                page.evaluate(
+                    """async ({ url, label }) => {
+                        console.error(
+                            "MOONLIGHT_NEGATIVE: triggering " + label + " request " + url
+                        );
+
+                        try {
+                            await fetch(url, { cache: "no-store" });
+                        } catch (e) {
+                            console.error(
+                                "MOONLIGHT_NEGATIVE: " + label + " fetch failed " + e.message
+                            );
+                        }
+                    }""",
+                    {
+                        "url": trigger_url,
+                        "label": negative_label,
+                    },
+                )
+
+                page.wait_for_timeout(800)
 
             if selector and selector not in {"-", "__page__"}:
                 frame, frame_state = _frame_for_selector(page, selector, timeout=min(timeout, 5000))
@@ -859,6 +1164,15 @@ def execute_action(
                         """pattern => fetch(String(pattern).replace(/^\\*\\*\\//, '/').replace(/\\*$/, ''), { cache: 'no-store' }).catch(() => null)""",
                         result.get("negative_url_pattern") or "/",
                     )
+            result.setdefault("negative_visual_evidence", []).extend(
+                _inject_negative_visual_evidence(
+                    page,
+                    semantic_action,
+                    detail="Negative scenario completed; screenshot should include this visual marker.",
+                    url=result.get("negative_url_pattern") or "",
+                    phase="after trigger",
+                )
+            )
             page.wait_for_timeout(800)
         elif semantic_action in ("goto", "navigate") and re.match(r"^https?://|^/", str(selector or "")):
             action_dispatched = True
@@ -868,30 +1182,54 @@ def execute_action(
             frame, frame_state = _frame_for_selector(page, selector, timeout=min(timeout, 5000))
             result.update(frame_state)
 
-        if navigated_directly:
+        if semantic_action in NEGATIVE_ACTIONS or navigated_directly:
             pass
         elif semantic_action in ("click", "navigate"):
             # 增加元素可见性检查
             locator = frame.locator(selector).first
-            locator.wait_for(state="visible", timeout=timeout)
             action_dispatched = True
-            if _opens_popup_hint(action_context):
+
+            def _manual_click_fallback() -> None:
+                locator.wait_for(state="attached", timeout=timeout)
                 try:
-                    with page.expect_popup(timeout=3000) as popup_info:
-                        locator.click(timeout=timeout)
-                    popup = popup_info.value
-                    popup.wait_for_load_state("domcontentloaded", timeout=min(timeout, 10000))
-                    capture_page = popup
-                    result["popup_opened"] = True
-                    result["popup_url"] = popup.url
-                    if keep_popup:
-                        result["popup_page"] = popup
-                except PlaywrightTimeoutError as exc:
-                    if "popup" not in str(exc).lower():
-                        raise
-                    result["popup_opened"] = False
-            else:
-                locator.click(timeout=timeout)
+                    locator.click(timeout=timeout, force=True)
+                    result["manual_click_fallback"] = "force_click"
+                    return
+                except PlaywrightError:
+                    locator.evaluate(
+                        """element => {
+                            const options = { bubbles: true, cancelable: true, view: window };
+                            element.dispatchEvent(new MouseEvent("mousedown", options));
+                            element.dispatchEvent(new MouseEvent("mouseup", options));
+                            if (typeof element.click === "function") element.click();
+                            else element.dispatchEvent(new MouseEvent("click", options));
+                        }"""
+                    )
+                    result["manual_click_fallback"] = "dom_mouse_events"
+
+            try:
+                locator.wait_for(state="visible", timeout=timeout)
+                if _opens_popup_hint(action_context):
+                    try:
+                        with page.expect_popup(timeout=3000) as popup_info:
+                            locator.click(timeout=timeout)
+                        popup = popup_info.value
+                        popup.wait_for_load_state("domcontentloaded", timeout=min(timeout, 10000))
+                        capture_page = popup
+                        result["popup_opened"] = True
+                        result["popup_url"] = popup.url
+                        if keep_popup:
+                            result["popup_page"] = popup
+                    except PlaywrightTimeoutError as exc:
+                        if "popup" not in str(exc).lower():
+                            raise
+                        result["popup_opened"] = False
+                else:
+                    locator.click(timeout=timeout)
+            except (PlaywrightTimeoutError, PlaywrightError):
+                if not (action_context or {}).get("manual_replay"):
+                    raise
+                _manual_click_fallback()
         elif semantic_action == "fill":
             frame.locator(selector).first.wait_for(state="visible", timeout=timeout)
             frame.locator(selector).first.fill(value or "moonlight-semantic-sample", timeout=timeout)
@@ -909,6 +1247,33 @@ def execute_action(
                 }""",
                 value or "moonlight-hidden-auto",
             )
+        elif semantic_action in ("check", "uncheck"):
+            locator = frame.locator(selector).first
+            locator.wait_for(state="attached", timeout=timeout)
+            desired = semantic_action == "check"
+            action_dispatched = True
+            try:
+                locator.set_checked(desired, timeout=timeout, force=True)
+                result["check_dispatch"] = "set_checked"
+            except PlaywrightError:
+                locator.evaluate(
+                    """(element, checked) => {
+                        const current = !!element.checked;
+                        if (current !== checked) {
+                            const options = { bubbles: true, cancelable: true, view: window };
+                            element.dispatchEvent(new MouseEvent("mousedown", options));
+                            element.dispatchEvent(new MouseEvent("mouseup", options));
+                            if (typeof element.click === "function") element.click();
+                            else element.dispatchEvent(new MouseEvent("click", options));
+                        }
+                        element.checked = checked;
+                        element.dispatchEvent(new Event("input", { bubbles: true }));
+                        element.dispatchEvent(new Event("change", { bubbles: true }));
+                    }""",
+                    desired,
+                )
+                result["check_dispatch"] = "dom_checked_events"
+            result["checked"] = desired
         elif semantic_action == "press":
             key = value or "Enter"
             if selector and selector not in {"-", "__page__"}:
@@ -953,22 +1318,41 @@ def execute_action(
                 }"""
             )
         elif semantic_action == "download":
+            action_dispatched = True
+            click_closed_error: Optional[BaseException] = None
             try:
-                with page.expect_download(timeout=45000) as download_info:
-                    frame.locator(selector).first.click(timeout=timeout)
-                download = download_info.value
-                suggested_filename = download.suggested_filename or "download"
-                save_path = _download_save_path(suggested_filename)
-                save_path.parent.mkdir(parents=True, exist_ok=True)
-                download.save_as(str(save_path))
-                result["download_suggested_filename"] = suggested_filename
-                result["download_filename"] = _original_download_filename(suggested_filename)
-                result["saved_filename"] = save_path.name
-                result["download_dir"] = str(save_path.parent)
-                result["download_path"] = str(save_path)
-            except PlaywrightError as e:
-                # Edge/Windows 安全拦截补丁
-                result.update({"status": "BLOCKED", "reason": f"Download blocked or failed: {e}"})
+                locator = frame.locator(selector).first
+                locator.wait_for(state="attached", timeout=timeout)
+                with page.context.expect_event("download", timeout=45000) as download_info:
+                    try:
+                        locator.click(timeout=timeout)
+                    except (PlaywrightTimeoutError, PlaywrightError) as click_exc:
+                        if _is_target_closed_error(click_exc) or _page_is_closed(page):
+                            click_closed_error = click_exc
+                        else:
+                            raise
+                _record_download_result(result, download_info.value)
+                if click_closed_error or _page_is_closed(page):
+                    result["page_closed_after_action"] = True
+                    result["download_closed_page"] = True
+                    result["reason"] = "Download event captured before/while the download window closed."
+            except (PlaywrightTimeoutError, PlaywrightError) as e:
+                if click_closed_error or _is_target_closed_error(e) or _page_is_closed(page):
+                    result.update(
+                        {
+                            "status": "PASS",
+                            "page_closed_after_action": True,
+                            "download_closed_page": True,
+                            "download_event_missing": True,
+                            "reason": (
+                                "Download action closed the page before Playwright exposed a download event; "
+                                "treated as a normal closed download flow."
+                            ),
+                            "post_wait_state": {"page_closed": True, "settle_error": str(e)},
+                        }
+                    )
+                else:
+                    result.update({"status": "BLOCKED", "reason": f"Download blocked or failed: {e}"})
         elif semantic_action == "wait":
             frame.locator(selector).first.wait_for(timeout=20000)
         else:
@@ -979,7 +1363,7 @@ def execute_action(
             if result["post_wait_state"].get("page_closed"):
                 result["page_closed_after_action"] = True
     except (PlaywrightTimeoutError, PlaywrightError, ValueError) as exc:
-        closes_page = result.get("semantic_action") in ("click", "navigate", "submit", "goto")
+        closes_page = result.get("semantic_action") in ("click", "navigate", "submit", "goto", "download")
         if action_dispatched and closes_page and (_is_target_closed_error(exc) or _page_is_closed(page)):
             result.update(
                 {

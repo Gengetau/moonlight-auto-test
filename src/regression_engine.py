@@ -27,6 +27,9 @@ NEGATIVE_CASE_TYPES = {
 }
 
 
+DOWNLOAD_CASE_TYPES = {"download", "download_template", "file_download"}
+
+
 def _judge_compare_status(
     *,
     action_type: str,
@@ -51,7 +54,7 @@ def _judge_compare_status(
         return "BLOCKED"
 
     normalized_action = (action_type or "page_snapshot").lower()
-    visual_required = normalized_action not in {"download", "close_window"}
+    visual_required = normalized_action not in (DOWNLOAD_CASE_TYPES | {"close_window"})
     url_required = normalized_action in {"navigate", "page_snapshot"}
 
     if visual_status == "BLOCKED":
@@ -145,6 +148,88 @@ class RegressionEngine:
         else:
             profiles = payload.get("upload_profiles") if isinstance(payload, dict) else []
         return [item for item in profiles or [] if isinstance(item, dict)]
+
+    @classmethod
+    def _json_safe(cls, value: Any, *, depth: int = 0) -> Any:
+        if depth > 8:
+            return str(value)
+        if value is None or isinstance(value, (bool, int, float, str)):
+            if isinstance(value, str) and len(value) > 20000:
+                return value[:20000] + "...<truncated>"
+            return value
+        if isinstance(value, Path):
+            return str(value)
+        if isinstance(value, dict):
+            return {
+                str(key): cls._json_safe(item, depth=depth + 1)
+                for key, item in value.items()
+                if str(key) not in {"popup_page"}
+            }
+        if isinstance(value, (list, tuple, set)):
+            return [cls._json_safe(item, depth=depth + 1) for item in value]
+        return str(value)
+
+    def _page_debug_summary(self, page: Optional[Page]) -> Dict[str, Any]:
+        if page is None:
+            return {"missing": True}
+        closed = self._page_is_closed(page)
+        summary: Dict[str, Any] = {
+            "closed": closed,
+            "url": "about:closed" if closed else self._safe_page_url(page),
+        }
+        try:
+            summary["frame_urls"] = [] if closed else [str(frame.url or "") for frame in page.frames[:20]]
+        except Exception as exc:
+            summary["frame_error"] = str(exc)
+        try:
+            context_pages = []
+            for index, item in enumerate(list(page.context.pages)[:20]):
+                item_closed = self._page_is_closed(item)
+                context_pages.append(
+                    {
+                        "index": index,
+                        "closed": item_closed,
+                        "url": "about:closed" if item_closed else self._safe_page_url(item),
+                    }
+                )
+            summary["context_pages"] = context_pages
+        except Exception as exc:
+            summary["context_pages_error"] = str(exc)
+        return summary
+
+    @staticmethod
+    def _state_debug_summary(state: Dict[str, Any]) -> Dict[str, Any]:
+        if not isinstance(state, dict):
+            return {}
+        return {
+            "url": state.get("url"),
+            "screenshot": state.get("screenshot"),
+            "page_closed": state.get("page_closed"),
+            "target_frame": state.get("target_frame"),
+            "screenshot_error": state.get("screenshot_error"),
+            "capture_error": state.get("capture_error"),
+            "browser_screen_error": state.get("browser_screen_error"),
+            "text_sample": str(state.get("text") or "")[:500],
+        }
+
+    def _reset_full_test_log(self, page_dir: Path) -> None:
+        log_path = page_dir / "full_test_log.jsonl"
+        try:
+            if log_path.exists():
+                log_path.unlink()
+        except OSError:
+            pass
+
+    def _write_full_test_log(self, page_dir: Path, page_id: str, event: str, payload: Dict[str, Any]) -> None:
+        page_dir.mkdir(parents=True, exist_ok=True)
+        record = {
+            "time": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "event": event,
+            "page_id": page_id,
+            **payload,
+        }
+        with open(page_dir / "full_test_log.jsonl", "a", encoding="utf-8") as handle:
+            handle.write(json.dumps(self._json_safe(record), ensure_ascii=False, default=str) + "\n")
 
     def load_mapping(self) -> Dict[str, Any]:
         if not self.mapping_path.exists():
@@ -287,6 +372,8 @@ class RegressionEngine:
             "status": overall_status,
             "results": results,
             "report_path": str(report_path),
+            "debug_log_path": str(Path(report_path).parent / "full_test_log.jsonl"),
+            "results_json_path": str(Path(report_path).parent / "regression_results.json"),
             "summary": dict(Counter(item["status"] for item in results)),
         }
 
@@ -307,6 +394,7 @@ class RegressionEngine:
             / f"{page_index:04d}_{self._safe_name(page_id)}"
         )
         page_dir.mkdir(parents=True, exist_ok=True)
+        self._reset_full_test_log(page_dir)
 
         entry_url = (
             mapping.get("entry_url")
@@ -322,6 +410,22 @@ class RegressionEngine:
         new_url = self._page_url(
             self.new_base_url,
             entry_url,
+        )
+        self._write_full_test_log(
+            page_dir,
+            page_id,
+            "page_start",
+            {
+                "page_index": page_index,
+                "browser": browser_name,
+                "manual": manual,
+                "entry_url": entry_url,
+                "legacy_target_url": legacy_url,
+                "new_target_url": new_url,
+                "mapping_keys": sorted(str(key) for key in mapping.keys()),
+                "legacy_page": self._page_debug_summary(legacy_page),
+                "new_page": self._page_debug_summary(new_page),
+            },
         )
 
         # ============================================================
@@ -532,6 +636,19 @@ class RegressionEngine:
                 capture_dir=page_dir,
                 side="new",
             )
+            self._write_full_test_log(
+                page_dir,
+                page_id,
+                "initial_navigation",
+                {
+                    "strategy": "force_route_map",
+                    "route_id": route.get("route_id"),
+                    "legacy_nav": legacy_nav,
+                    "new_nav": new_nav,
+                    "legacy_page": self._page_debug_summary(legacy_page),
+                    "new_page": self._page_debug_summary(new_page),
+                },
+            )
             return self._run_captured_page_pair(
                 legacy_page,
                 new_page,
@@ -551,6 +668,19 @@ class RegressionEngine:
         new_nav = self._goto(
             new_page,
             new_url,
+        )
+        self._write_full_test_log(
+            page_dir,
+            page_id,
+            "direct_navigation_attempt",
+            {
+                "legacy_nav": legacy_nav,
+                "new_nav": new_nav,
+                "legacy_reached": self._page_matches_mapping(legacy_page, mapping) if legacy_nav.get("status") == "PASS" else False,
+                "new_reached": self._page_matches_mapping(new_page, mapping) if new_nav.get("status") == "PASS" else False,
+                "legacy_page": self._page_debug_summary(legacy_page),
+                "new_page": self._page_debug_summary(new_page),
+            },
         )
 
         direct_legacy_reached = legacy_nav.get("status") == "PASS" and self._page_matches_mapping(legacy_page, mapping)
@@ -598,6 +728,20 @@ class RegressionEngine:
                     )
                 else:
                     new_nav.update({"strategy": "direct_url", "target_reached": True})
+                self._write_full_test_log(
+                    page_dir,
+                    page_id,
+                    "route_map_fallback_navigation",
+                    {
+                        "route_id": route.get("route_id"),
+                        "legacy_direct_reached": direct_legacy_reached,
+                        "new_direct_reached": direct_new_reached,
+                        "legacy_nav": legacy_nav,
+                        "new_nav": new_nav,
+                        "legacy_page": self._page_debug_summary(legacy_page),
+                        "new_page": self._page_debug_summary(new_page),
+                    },
+                )
             else:
                 if not direct_legacy_reached:
                     legacy_nav.update(
@@ -878,6 +1022,14 @@ class RegressionEngine:
             expected_value = cell(expected_value_col)
             destructive = self._truthy(destructive_value)
             negative_case = self._is_negative_case(case_type, action_type)
+            download_case = self._is_download_checklist_case(
+                case_id=case_id,
+                case_type=case_type,
+                action_type=action_type,
+                expected_type=expected_type,
+                label=label,
+                operation=operation,
+            )
 
             if destructive and not self.include_destructive:
                 stats["destructive_rejected"] += 1
@@ -903,9 +1055,66 @@ class RegressionEngine:
                 operation=operation,
                 submit_locator=submit_locator,
                 main_step_text=main_step_text,
+                expected_type=expected_type,
+                case_id=case_id,
+                locator=locator or legacy_locator,
             )
 
-            if is_upload_submit:
+            if download_case:
+                parsed_main_step = self._parse_step_json(main_step_text)
+                parsed_pre_steps = self._parse_steps_json(pre_steps_text)
+                download_locator = locator or legacy_locator
+                if self._is_download_step(parsed_main_step):
+                    download_locator = (
+                        parsed_main_step.get("legacy_locator")
+                        or parsed_main_step.get("locator")
+                        or parsed_main_step.get("new_locator")
+                        or download_locator
+                    )
+                if not download_locator:
+                    for step in parsed_pre_steps + ([parsed_main_step] if parsed_main_step else []):
+                        if not self._is_download_step(step):
+                            continue
+                        step_locator = step.get("legacy_locator") or step.get("locator") or step.get("new_locator")
+                        if step_locator:
+                            download_locator = step_locator
+                            break
+                if not download_locator:
+                    stats["locator_missing_download"] += 1
+                    add_sample("locator_missing_download", page=row_page, case_id=case_id, mode=mode)
+                    checklist_coverage["excluded_reason"] = "download case has no locator"
+                    continue
+                text_for_kind = " ".join(str(value or "").lower() for value in (case_id, case_type, action_type, label))
+                download_kind = "download_template" if any(token in text_for_kind for token in ("download_template", "template", "テンプレート")) else "file_download"
+                case_payload = {
+                    "case_id": case_id,
+                    "case_type": download_kind,
+                    "action_type": download_kind,
+                    "label": label,
+                    "test_title": test_title,
+                    "page_id": row_page,
+                    "legacy_locator": legacy_locator or download_locator,
+                    "new_locator": new_locator or download_locator,
+                    "locator": download_locator,
+                    "value": test_data,
+                    "test_data": test_data,
+                    "expected_type": expected_type or "download",
+                    "expected_value": expected_value,
+                    "destructive": str(destructive).lower(),
+                    "source": "checklist",
+                }
+                option_steps = self._download_condition_steps(parsed_pre_steps)
+                if option_steps:
+                    case_payload["pre_steps"] = option_steps
+                    case_payload["main_step"] = {
+                        "action_type": "download",
+                        "legacy_locator": legacy_locator or download_locator,
+                        "new_locator": new_locator or download_locator,
+                        "locator": download_locator,
+                    }
+                cases.append(self._normalize_action_case(case_payload))
+                stats["loadable_download"] += 1
+            elif is_upload_submit:
                 if not locator and not legacy_locator:
                     stats["locator_missing_upload"] += 1
                     add_sample("locator_missing_upload", page=row_page, case_id=case_id, mode=mode)
@@ -1005,6 +1214,24 @@ class RegressionEngine:
         return any(profile in haystack for profile in self.negative_profiles)
 
     @staticmethod
+    def _is_download_checklist_case(
+        *,
+        case_id: Any,
+        case_type: Any,
+        action_type: Any,
+        expected_type: Any,
+        label: Any,
+        operation: Any,
+    ) -> bool:
+        text = " ".join(str(value or "").lower() for value in (case_id, case_type, action_type, expected_type, label, operation))
+        return (
+            "download" in text
+            or "ダウンロード" in str(label or "")
+            or "出力ファイル" in str(label or "")
+            or str(expected_type or "").strip().lower() == "download"
+        )
+
+    @staticmethod
     def _is_upload_submit_case(
         *,
         case_type: Any,
@@ -1013,9 +1240,15 @@ class RegressionEngine:
         operation: Any,
         submit_locator: Any,
         main_step_text: Any,
+        expected_type: Any = "",
+        case_id: Any = "",
+        locator: Any = "",
     ) -> bool:
         case_lower = str(case_type or "").lower()
         action_lower = str(action_type or "").lower()
+        download_text = " ".join(str(value or "").lower() for value in (case_id, case_type, action_type, expected_type, label, operation, main_step_text, locator))
+        if "download" in download_text or "ダウンロード" in str(label or "") or str(expected_type or "").strip().lower() == "download":
+            return False
         if "negative" in case_lower or "negative" in action_lower:
             return False
         label_text = str(label or "")
@@ -1056,6 +1289,35 @@ class RegressionEngine:
         if not isinstance(parsed, list):
             return []
         return [item for item in parsed if isinstance(item, dict)]
+
+    @staticmethod
+    def _is_download_step(step: Dict[str, Any]) -> bool:
+        if not isinstance(step, dict):
+            return False
+        text = " ".join(
+            str(step.get(key) or "").lower()
+            for key in ("action_type", "case_type", "expected_type", "locator", "legacy_locator", "new_locator", "label")
+        )
+        return "download" in text or "fndownload" in text or "ダウンロード" in text
+
+    @staticmethod
+    def _download_condition_steps(steps: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        allowed = {"check", "uncheck", "select", "fill", "clear", "set_value", "press"}
+        result: List[Dict[str, Any]] = []
+        for step in steps:
+            action_type = str(step.get("action_type") or step.get("type") or "").strip().lower()
+            if action_type not in allowed:
+                continue
+            locator = step.get("locator") or step.get("legacy_locator") or step.get("new_locator")
+            if not locator:
+                continue
+            copied = dict(step)
+            copied["action_type"] = action_type
+            copied.setdefault("locator", locator)
+            copied.setdefault("legacy_locator", locator)
+            copied.setdefault("new_locator", locator)
+            result.append(copied)
+        return result
 
     @staticmethod
     def _submit_locator_from_mapping(mapping: Optional[Dict[str, Any]], upload_locator: Any = "") -> str:
@@ -1307,6 +1569,8 @@ class RegressionEngine:
 
             if result.get("status") != "PASS":
                 break
+            if result.get("page_closed_after_action"):
+                break
 
         if last_result is None:
             return {
@@ -1346,6 +1610,19 @@ class RegressionEngine:
 
         legacy_state = _capture_state(legacy_page, page_dir, "00_legacy_initial")
         new_state = _capture_state(new_page, page_dir, "00_new_initial")
+        self._write_full_test_log(
+            page_dir,
+            page_id,
+            "initial_state_captured",
+            {
+                "legacy_nav": legacy_nav,
+                "new_nav": new_nav,
+                "legacy_state": self._state_debug_summary(legacy_state),
+                "new_state": self._state_debug_summary(new_state),
+                "legacy_page": self._page_debug_summary(legacy_page),
+                "new_page": self._page_debug_summary(new_page),
+            },
+        )
         results.append(
             self._compare_state(
                 page_id,
@@ -1360,6 +1637,17 @@ class RegressionEngine:
         )
 
         if legacy_nav.get("status") != "PASS" or new_nav.get("status") != "PASS":
+            self._write_full_test_log(
+                page_dir,
+                page_id,
+                "navigation_blocked_skip_actions",
+                {
+                    "legacy_nav": legacy_nav,
+                    "new_nav": new_nav,
+                    "legacy_page": self._page_debug_summary(legacy_page),
+                    "new_page": self._page_debug_summary(new_page),
+                },
+            )
             print(
                 f"[{page_id}] ROUTE NAVIGATION blocked; skip action plan: "
                 + json.dumps(
@@ -1412,6 +1700,30 @@ class RegressionEngine:
             )
 
         target_actions, plan_source = self._build_action_plan(page_id, mapping)
+        self._write_full_test_log(
+            page_dir,
+            page_id,
+            "action_plan_built",
+            {
+                "source": plan_source,
+                "planned": len(target_actions),
+                "checklist_path": str(self.checklist_path) if self.checklist_path else None,
+                "checklist_debug": self._last_checklist_debug,
+                "action_kinds": dict(Counter(action.get("kind") or action.get("case_type") or "unknown" for action in target_actions)),
+                "actions": [
+                    {
+                        "index": index,
+                        "case_id": action.get("case_id"),
+                        "label": action.get("label") or action.get("test_title") or action.get("semantic_key"),
+                        "case_type": action.get("case_type"),
+                        "action_type": action.get("action_type"),
+                        "legacy_locator": action.get("legacy_locator") or action.get("locator"),
+                        "new_locator": action.get("new_locator") or action.get("locator"),
+                    }
+                    for index, action in enumerate(target_actions, start=1)
+                ],
+            },
+        )
         print(
             f"[{page_id}] ACTION PLAN SOURCE: "
             + json.dumps(
@@ -1460,8 +1772,39 @@ class RegressionEngine:
                     ensure_ascii=False,
                 )
             )
+            self._write_full_test_log(
+                page_dir,
+                page_id,
+                "action_start",
+                {
+                    "action_index": action_index,
+                    "action_total": len(target_actions),
+                    "action_file_id": action_file_id,
+                    "action_name": action_name,
+                    "action_type": action_type,
+                    "semantic_action": semantic_action,
+                    "legacy_locator": legacy_locator,
+                    "new_locator": new_locator,
+                    "plan_source": action_case.get("source") or plan_source,
+                    "action_case": action_case,
+                    "legacy_page_before": self._page_debug_summary(legacy_page),
+                    "new_page_before": self._page_debug_summary(new_page),
+                },
+            )
 
             if not legacy_locator and not action_case.get("pre_steps") and not action_case.get("main_step"):
+                self._write_full_test_log(
+                    page_dir,
+                    page_id,
+                    "action_blocked_missing_locator",
+                    {
+                        "action_index": action_index,
+                        "action_name": action_name,
+                        "action_type": action_type,
+                        "legacy_locator": legacy_locator,
+                        "new_locator": new_locator,
+                    },
+                )
                 results.append(
                     {
                         "page_id": page_id,
@@ -1482,6 +1825,18 @@ class RegressionEngine:
             if database_operation:
                 legacy_before_state = _capture_state(legacy_page, page_dir, f"{action_file_id}_legacy_before")
                 new_before_state = _capture_state(new_page, page_dir, f"{action_file_id}_new_before")
+                self._write_full_test_log(
+                    page_dir,
+                    page_id,
+                    "database_before_state_captured",
+                    {
+                        "action_index": action_index,
+                        "action_name": action_name,
+                        "database_operation": database_operation,
+                        "legacy_before_state": self._state_debug_summary(legacy_before_state),
+                        "new_before_state": self._state_debug_summary(new_before_state),
+                    },
+                )
 
             legacy_action = self._execute_action_case(
                 legacy_page,
@@ -1498,6 +1853,23 @@ class RegressionEngine:
                 browser_name=browser_name,
                 capture_dir=page_dir,
                 test_id=f"{action_file_id}_new",
+            )
+            self._write_full_test_log(
+                page_dir,
+                page_id,
+                "action_executed",
+                {
+                    "action_index": action_index,
+                    "action_name": action_name,
+                    "action_type": action_type,
+                    "semantic_action": semantic_action,
+                    "legacy_action": legacy_action,
+                    "new_action": new_action,
+                    "legacy_state_summary": self._state_debug_summary(legacy_action.get("state") or {}),
+                    "new_state_summary": self._state_debug_summary(new_action.get("state") or {}),
+                    "legacy_page_after_execute": self._page_debug_summary(legacy_page),
+                    "new_page_after_execute": self._page_debug_summary(new_page),
+                },
             )
 
             print(
@@ -1516,6 +1888,62 @@ class RegressionEngine:
                     default=str,
                 )
             )
+
+            should_reopen_target = self._requires_target_reopen_after_action(
+                action_case,
+                action_type,
+                semantic_action,
+                legacy_action,
+                new_action,
+            )
+            reopen_result: Optional[Dict[str, Any]] = None
+            if should_reopen_target:
+                legacy_action["state_before_reopen"] = legacy_action.get("state") or {}
+                new_action["state_before_reopen"] = new_action.get("state") or {}
+                self._write_full_test_log(
+                    page_dir,
+                    page_id,
+                    "target_reopen_required",
+                    {
+                        "action_index": action_index,
+                        "action_name": action_name,
+                        "action_type": action_type,
+                        "semantic_action": semantic_action,
+                        "legacy_state_before_reopen": self._state_debug_summary(legacy_action.get("state_before_reopen") or {}),
+                        "new_state_before_reopen": self._state_debug_summary(new_action.get("state_before_reopen") or {}),
+                        "legacy_page_before_reopen": self._page_debug_summary(legacy_page),
+                        "new_page_before_reopen": self._page_debug_summary(new_page),
+                    },
+                )
+                legacy_page, new_page, reopen_result = self._reopen_target_pair(
+                    legacy_page,
+                    new_page,
+                    mapping,
+                    page_dir,
+                    browser_name,
+                    reason=f"after action {action_index}: {action_name}",
+                )
+                if reopen_result.get("status") == "PASS":
+                    legacy_reopened_state = _capture_state(legacy_page, page_dir, f"{action_file_id}_legacy_after_reopen")
+                    new_reopened_state = _capture_state(new_page, page_dir, f"{action_file_id}_new_after_reopen")
+                    legacy_action["state_after_reopen"] = legacy_reopened_state
+                    new_action["state_after_reopen"] = new_reopened_state
+                    legacy_action["state"] = legacy_reopened_state
+                    new_action["state"] = new_reopened_state
+                self._write_full_test_log(
+                    page_dir,
+                    page_id,
+                    "target_reopen_finished",
+                    {
+                        "action_index": action_index,
+                        "action_name": action_name,
+                        "reopen_result": reopen_result,
+                        "legacy_state_after_reopen": self._state_debug_summary(legacy_action.get("state_after_reopen") or {}),
+                        "new_state_after_reopen": self._state_debug_summary(new_action.get("state_after_reopen") or {}),
+                        "legacy_page_after_reopen": self._page_debug_summary(legacy_page),
+                        "new_page_after_reopen": self._page_debug_summary(new_page),
+                    },
+                )
 
             if database_operation:
                 compared = self._compare_database_operation(
@@ -1571,22 +1999,7 @@ class RegressionEngine:
                     "plan_source": plan_source,
                 }
             )
-            should_reopen_target = self._requires_target_reopen_after_action(
-                action_case,
-                action_type,
-                semantic_action,
-                legacy_action,
-                new_action,
-            )
-            if should_reopen_target:
-                legacy_page, new_page, reopen_result = self._reopen_target_pair(
-                    legacy_page,
-                    new_page,
-                    mapping,
-                    page_dir,
-                    browser_name,
-                    reason=f"after action {action_index}: {action_name}",
-                )
+            if reopen_result is not None:
                 compared["post_action_reopen"] = reopen_result
                 if reopen_result.get("status") != "PASS":
                     compared["status"] = "BLOCKED"
@@ -1608,10 +2021,46 @@ class RegressionEngine:
                     default=str,
                 )
             )
+            self._write_full_test_log(
+                page_dir,
+                page_id,
+                "compare_result",
+                {
+                    "action_index": action_index,
+                    "action_name": action_name,
+                    "status": compared.get("status"),
+                    "reason": compared.get("reason"),
+                    "url_match": compared.get("url_match"),
+                    "visual": compared.get("visual"),
+                    "download": {
+                        "filename_match": compared.get("download_filename_match"),
+                        "legacy_filename": compared.get("legacy_download_filename"),
+                        "new_filename": compared.get("new_download_filename"),
+                        "legacy_path": compared.get("legacy_download_path"),
+                        "new_path": compared.get("new_download_path"),
+                    },
+                    "legacy_screenshot": compared.get("legacy_screenshot"),
+                    "new_screenshot": compared.get("new_screenshot"),
+                    "diff_screenshot": compared.get("diff_screenshot"),
+                    "post_action_reopen": compared.get("post_action_reopen"),
+                    "legacy_action_status": (compared.get("legacy_action") or {}).get("status"),
+                    "new_action_status": (compared.get("new_action") or {}).get("status"),
+                },
+            )
             results.append(compared)
             if should_reopen_target and compared.get("status") == "BLOCKED":
                 break
 
+        self._write_full_test_log(
+            page_dir,
+            page_id,
+            "page_finished",
+            {
+                "result_counts": dict(Counter(item.get("status") or "UNKNOWN" for item in results)),
+                "legacy_page_final": self._page_debug_summary(legacy_page),
+                "new_page_final": self._page_debug_summary(new_page),
+            },
+        )
         return results
 
     @staticmethod
@@ -1640,6 +2089,7 @@ class RegressionEngine:
             "initial_display",
             "result_table_verify",
             "download_template",
+            "file_download",
             "download",
             "close_window",
             "back_action",
@@ -1837,6 +2287,16 @@ class RegressionEngine:
             f"[{page_id}] REOPEN target page after leaving/closing action: "
             + json.dumps({"reason": reason}, ensure_ascii=False)
         )
+        self._write_full_test_log(
+            page_dir,
+            page_id,
+            "reopen_pair_start",
+            {
+                "reason": reason,
+                "legacy_page_before": self._page_debug_summary(legacy_page),
+                "new_page_before": self._page_debug_summary(new_page),
+            },
+        )
 
         legacy_page, legacy_nav = self._reopen_target_side(
             legacy_page,
@@ -1859,6 +2319,19 @@ class RegressionEngine:
             "legacy": legacy_nav,
             "new": new_nav,
         }
+        self._write_full_test_log(
+            page_dir,
+            page_id,
+            "reopen_pair_end",
+            {
+                "status": status,
+                "reason": result.get("reason"),
+                "legacy_nav": legacy_nav,
+                "new_nav": new_nav,
+                "legacy_page_after": self._page_debug_summary(legacy_page),
+                "new_page_after": self._page_debug_summary(new_page),
+            },
+        )
         print(
             f"[{page_id}] REOPEN result: "
             + json.dumps(
@@ -1899,6 +2372,7 @@ class RegressionEngine:
         route = self.route_map_catalog.find_for_target(page_id, side=side) or self.route_map_catalog.find_for_target(page_id)
 
         if route:
+            page, takeover_nav = self._takeover_recovery_page(page, route)
             route_step = self._page_is_route_map_step(page, route)
             pre_nav: Dict[str, Any]
 
@@ -1907,6 +2381,7 @@ class RegressionEngine:
                     "status": "PASS",
                     "strategy": "reuse_current_route_step",
                     "current_url": self._safe_page_url(page),
+                    "context_takeover": takeover_nav,
                 }
             else:
                 page, pre_nav = self._login_recovery_page(
@@ -1976,6 +2451,64 @@ class RegressionEngine:
                 }
             )
         return page, nav
+
+    def _takeover_recovery_page(self, page: Page, route: Dict[str, Any]) -> Tuple[Page, Dict[str, Any]]:
+        """Prefer an already-open sibling/container page before login recovery."""
+        try:
+            pages = list(page.context.pages)
+        except Exception as exc:
+            return page, {"status": "SKIPPED", "reason": f"context pages unavailable: {exc}"}
+
+        candidates = []
+        debug_candidates = []
+        for candidate in pages:
+            if self._page_is_closed(candidate):
+                debug_candidates.append({"closed": True, "url": "about:closed", "selected": False})
+                continue
+            try:
+                url = candidate.url
+            except Exception:
+                url = ""
+            if url == "about:blank":
+                debug_candidates.append({"closed": False, "url": url, "about_blank": True, "selected": False})
+                continue
+            route_step = self._page_is_route_map_step(candidate, route)
+            login_like = bool(re.search(r"login", str(url or ""), re.IGNORECASE))
+            candidates.append((0 if route_step else 1, 1 if login_like else 0, candidate, url, route_step))
+            debug_candidates.append(
+                {
+                    "closed": False,
+                    "url": url,
+                    "route_step_detected": route_step,
+                    "login_like": login_like,
+                    "selected": False,
+                }
+            )
+
+        if not candidates:
+            return page, {"status": "SKIPPED", "reason": "no open sibling/container page found", "candidates": debug_candidates}
+
+        candidates.sort(key=lambda item: (item[0], item[1], str(item[3] or "")))
+        _, _, selected, url, route_step = candidates[0]
+        for item in debug_candidates:
+            if item.get("url") == url and not item.get("closed"):
+                item["selected"] = True
+                break
+        try:
+            selected.bring_to_front()
+        except Exception:
+            pass
+        try:
+            selected.wait_for_load_state("domcontentloaded", timeout=min(self.timeout, 5000))
+        except Exception:
+            pass
+        return selected, {
+            "status": "PASS",
+            "strategy": "context_sibling_takeover",
+            "url": url,
+            "route_step_detected": route_step,
+            "candidates": debug_candidates,
+        }
 
     def _try_login_if_login_form(self, page: Page) -> Dict[str, Any]:
         password_selectors = [
@@ -2143,12 +2676,18 @@ class RegressionEngine:
     ) -> Dict[str, Any]:
         action_type = str(extra.get("action_type") or action or "page_snapshot")
         visual = {"status": "SKIPPED", "reason": "Visual comparison is disabled for this action type"}
-        if action_type.lower() not in {"download", "close_window"}:
+        normalized_action_type = action_type.lower()
+        if normalized_action_type not in (DOWNLOAD_CASE_TYPES | {"close_window"}):
+            ignore_top_px = 86 if (
+                str(legacy_state.get("screenshot_scope") or "").startswith("browser_screen_composited")
+                and str(new_state.get("screenshot_scope") or "").startswith("browser_screen_composited")
+            ) else 0
             visual = compare_visual_screenshot(
                 legacy_state.get("screenshot", ""),
                 new_state.get("screenshot", ""),
                 str(diff_path),
                 threshold_percent=self.visual_threshold_percent,
+                ignore_top_px=ignore_top_px,
             )
         url_match = self._normalized_url(legacy_state.get("url", "")) == self._normalized_url(new_state.get("url", ""))
         dom_match = str(legacy_state.get("dom", "")) == str(new_state.get("dom", ""))
@@ -2167,7 +2706,7 @@ class RegressionEngine:
             visual["reason"] = "Visual diff appears to be table/list data variance between environments."
 
         download_compare = {}
-        if action_type.lower() == "download":
+        if normalized_action_type in DOWNLOAD_CASE_TYPES:
             download_compare = self._download_compare_fields(
                 extra.get("legacy_action") or {},
                 extra.get("new_action") or {},
@@ -2200,7 +2739,7 @@ class RegressionEngine:
 
     @staticmethod
     def _download_action_filename(action: Dict[str, Any]) -> str:
-        for key in ("saved_filename", "download_filename", "download_suggested_filename", "suggested_filename"):
+        for key in ("download_filename", "download_suggested_filename", "suggested_filename", "saved_filename"):
             value = action.get(key)
             if value:
                 return Path(str(value).replace("\\", "/")).name
@@ -2281,6 +2820,11 @@ class RegressionEngine:
         counts = Counter(item["status"] for item in results)
         rows = "\n".join(self._render_result(item, report_dir) for item in results)
         report_dir.mkdir(parents=True, exist_ok=True)
+        results_json_path = report_dir / "regression_results.json"
+        results_json_path.write_text(
+            json.dumps(self._json_safe(results), ensure_ascii=False, indent=2, default=str) + "\n",
+            encoding="utf-8",
+        )
         report_path.write_text(
             f"""<!doctype html>
 <html lang="ja">
@@ -2299,6 +2843,8 @@ class RegressionEngine:
     .summary-card h2 {{ margin: 0 0 8px; font-size: 13px; color: #d6eaf8; }}
     .summary-card p {{ margin: 4px 0; font-size: 12px; color: #f8f9f9; overflow-wrap: anywhere; }}
     .summary-card .num {{ font-size: 20px; font-weight: 800; }}
+    .debug-links {{ margin-top: 14px; display: flex; gap: 10px; flex-wrap: wrap; }}
+    .debug-links a {{ color: #fff; background: #34495e; text-decoration: none; padding: 7px 10px; border-radius: 4px; font-size: 12px; font-weight: 700; }}
     .pill {{ padding: 8px 12px; border-radius: 6px; background: #273746; font-weight: 700; }}
     main {{ padding: 24px 32px; }}
     .case {{ margin-bottom: 20px; border: 1px solid #d9e0ea; border-radius: 8px; background: white; overflow: hidden; }}
@@ -2335,6 +2881,7 @@ class RegressionEngine:
       <span class="pill">BLOCKED: {counts.get('BLOCKED', 0)}</span>
       <span class="pill">ERROR: {counts.get('ERROR', 0)}</span>
     </div>
+    {self._render_debug_links(report_dir)}
     {self._render_summary_details(results, counts)}
   </header>
   <main>{self._render_coverage_matrix(results)}{rows or '<p>No results.</p>'}</main>
@@ -2475,6 +3022,20 @@ class RegressionEngine:
         except ValueError:
             rel = Path(path).resolve()
         return f'<figure><figcaption>{html.escape(label)}</figcaption><img src="{html.escape(rel.as_posix())}" alt="{html.escape(label)}"></figure>'
+
+    @staticmethod
+    def _render_debug_links(report_dir: Path) -> str:
+        links = []
+        for filename, label in (
+            ("full_test_log.jsonl", "Full Test Log"),
+            ("regression_results.json", "Result JSON"),
+        ):
+            path = report_dir / filename
+            if path.exists():
+                links.append(f'<a href="{html.escape(filename)}" target="_blank">{html.escape(label)}</a>')
+        if not links:
+            return ""
+        return f'<div class="debug-links">{"".join(links)}</div>'
 
     @staticmethod
     def _render_download_detail_rows(item: Dict[str, Any]) -> str:

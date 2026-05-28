@@ -27,6 +27,7 @@ def compare_visual_screenshot(
     diff_path: str,
     *,
     threshold_percent: float = 0.1,
+    ignore_top_px: int = 0,
 ) -> Dict[str, Any]:
     """
     Compare two screenshots with Pillow, write a visual diff, and return metrics.
@@ -58,6 +59,10 @@ def compare_visual_screenshot(
     with Image.open(legacy_file) as legacy_img, Image.open(new_file) as new_img:
         legacy = legacy_img.convert("RGBA")
         new = new_img.convert("RGBA")
+        if ignore_top_px > 0:
+            crop_y = min(ignore_top_px, legacy.height, new.height)
+            legacy = legacy.crop((0, crop_y, legacy.width, legacy.height))
+            new = new.crop((0, crop_y, new.width, new.height))
         width = max(legacy.width, new.width)
         height = max(legacy.height, new.height)
 
@@ -83,6 +88,7 @@ def compare_visual_screenshot(
         "status": "PASS" if diff_percent <= threshold_percent else "DIFF",
         "diff_percent": round(diff_percent, 4),
         "threshold_percent": threshold_percent,
+        "ignored_top_px": ignore_top_px,
         "diff_screenshot": str(output_file),
         "legacy_size": [legacy.width, legacy.height],
         "new_size": [new.width, new.height],
