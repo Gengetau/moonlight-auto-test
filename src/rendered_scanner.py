@@ -26,19 +26,36 @@ def scan_rendered_page(url, output_path):
                 const results = [];
                 const all = document.querySelectorAll('input, button, a, select, textarea, [onclick]');
                 
-                all.forEach((el, index) => {
+                const isVisible = el => {
+                    const style = window.getComputedStyle(el);
+                    if (style.visibility === 'hidden' || style.display === 'none' || style.opacity === '0') return false;
                     const rect = el.getBoundingClientRect();
-                    if (rect.width === 0 || rect.height === 0) return; // Skip hidden
+                    return rect.width > 2 && rect.height > 2;
+                };
+
+                all.forEach((el, index) => {
+                    if (!isVisible(el)) return;
                     
+                    const tag = el.tagName.toLowerCase();
+                    const type = (el.getAttribute('type') || '').toLowerCase();
+                    
+                    // Filter non-functional links
+                    if (tag === 'a') {
+                        const href = el.getAttribute('href') || '';
+                        const onclick = el.getAttribute('onclick') || '';
+                        if (!onclick && (!href || href === '#' || href.startsWith('javascript:void'))) return;
+                        if (!el.innerText.trim() && !el.getAttribute('title') && !el.querySelector('img')) return;
+                    }
+
+                    // Filter hidden inputs
+                    if (tag === 'input' && type === 'hidden') return;
+
                     const attrs = {};
                     for (const attr of el.attributes) {
                         attrs[attr.name] = attr.value;
                     }
                     
                     let kind = 'field';
-                    const tag = el.tagName.toLowerCase();
-                    const type = (el.getAttribute('type') || '').toLowerCase();
-                    
                     if (tag === 'a') kind = 'link';
                     else if (tag === 'button' || type === 'button' || type === 'submit') kind = 'button';
                     else if (type === 'file') kind = 'file';
@@ -52,7 +69,7 @@ def scan_rendered_page(url, output_path):
                         kind: kind,
                         tag: tag,
                         attributes: attrs,
-                        text: el.innerText || el.value || '',
+                        text: (el.innerText || el.value || '').trim().slice(0, 200),
                         locator: selector,
                         rect: {x: rect.x, y: rect.y, w: rect.width, h: rect.height}
                     });

@@ -71,18 +71,34 @@ def _capture_frame_controls(frame, frame_index: int) -> Dict[str, Any]:
       const isVisible = el => {
         if (!el || !el.tagName) return false;
         const style = window.getComputedStyle(el);
-        return style.visibility !== 'hidden'
-          && style.display !== 'none'
-          && style.opacity !== '0'
-          && hasBox(el);
+        if (style.visibility === 'hidden' || style.display === 'none' || style.opacity === '0') return false;
+        const rect = el.getBoundingClientRect();
+        return rect.width > 2 && rect.height > 2; // 过滤掉极小的装饰性元素
       };
       const hasVisibleControl = el => Array.from(el.querySelectorAll('a,button,input,select,textarea,[onclick],[formaction]'))
         .some(child => isVisible(child));
       const includeElement = el => {
         const tag = el.tagName.toLowerCase();
-        if (isVisible(el)) return true;
-        // 允许捕获带 onclick 的不可见容器，只要它包含可见控件（例如某些 Struts 装饰器）
-        return (tag === 'form' || tag === 'table' || el.getAttribute('onclick')) && hasVisibleControl(el);
+        if (!isVisible(el)) {
+          // 仅保留包含可见控件的容器标签
+          return (tag === 'form' || tag === 'table') && hasVisibleControl(el);
+        }
+        
+        // 过滤无意义的超链接
+        if (tag === 'a') {
+          const href = el.getAttribute('href') || '';
+          const onclick = el.getAttribute('onclick') || '';
+          if (!onclick && (!href || href === '#' || href.startsWith('javascript:void'))) return false;
+          if (!el.innerText.trim() && !el.getAttribute('title') && !el.querySelector('img')) return false;
+        }
+
+        // 过滤隐藏域
+        if (tag === 'input' && el.getAttribute('type') === 'hidden') return false;
+
+        // 过滤无意义的容器
+        if (tag === 'table' || tag === 'form') return hasVisibleControl(el);
+
+        return true;
       };
       const pathSelector = el => {
         const path = [];

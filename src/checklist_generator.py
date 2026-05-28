@@ -654,7 +654,14 @@ def collect_elements(page: Dict[str, Any]) -> List[Dict[str, Any]]:
         normalized_element = normalize_mapping_element(element)
         kind = as_text(normalized_element.get("kind")).lower()
         locator = normalized_locator(normalized_element)
-        label = element_label(normalized_element)
+        label = element_label(normalized_element).strip()
+        
+        # 过滤低价值元素，减少 Checklist 噪音
+        if kind in {"link", "button"} and not label and locator == "(locator missing)":
+            continue
+        if kind == "hidden":
+            continue # 隐藏域通常不需要出现在人工 Checklist 中
+            
         line = as_text(normalized_element.get("line"), "-")
         source = as_text(normalized_element.get("_source"), "")
         key = (kind, locator, label, line, source)
@@ -1421,9 +1428,9 @@ def main() -> None:
         help="Runtime page profile JSON directory. Defaults to generated/valid/runtime_profile.",
     )
     parser.add_argument(
-        "--no-runtime-profile-dir",
+        "--include-runtime-profiles",
         action="store_true",
-        help="Do not append existing runtime_profile/*.json pages when generating the checklist.",
+        help="Append all existing runtime_profile/*.json pages to the checklist.",
     )
     args = parser.parse_args()
     if not args.input.exists():
@@ -1432,7 +1439,7 @@ def main() -> None:
         load_scan(args.input),
         args.output,
         runtime_profile_dir=args.runtime_profile_dir,
-        include_runtime_profile_dir=not args.no_runtime_profile_dir,
+        include_runtime_profile_dir=args.include_runtime_profiles,
     )
 
 

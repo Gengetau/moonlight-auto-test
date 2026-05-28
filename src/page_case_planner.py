@@ -476,12 +476,19 @@ def _is_navigation_link(item: Dict[str, Any]) -> bool:
     action_type = _as_text(item.get("action_type") or item.get("action_hint") or item.get("case_type")).lower()
     href = _first_attr(item, "href").strip()
     blob = _search_blob(item)
+    
     if "logout" in blob or "logoff" in blob:
         return False
     if href in {"", "#"} and action_type != "navigate":
         return False
-    if href.lower().startswith("javascript:"):
+    if href.lower().startswith("javascript:") and "window.open" not in blob:
         return False
+    
+    # 忽略无文字、无标题且无图片的空链接
+    label = _label(item).strip()
+    if not label and not _first_attr(item, "title") and "img" not in tag:
+        return False
+
     return kind == "link" or tag == "a" or action_type == "navigate"
 
 
@@ -761,14 +768,27 @@ class PageProfileBuilder:
 
         tag = _as_text(control.get("tag")).lower()
         input_type = _as_text(control.get("type")).lower()
+        
+        # 严格过滤不可见元素（除了 form/table）
         if control.get("visible") is False and tag not in {"form", "table"}:
             return None
+            
+        # 过滤极小元素 (可能是装饰物)
+        rect = control.get("rect")
+        if isinstance(rect, dict):
+            if rect.get("w", 0) <= 2 or rect.get("h", 0) <= 2:
+                return None
 
         if tag == "form":
             kind = "form"
         elif tag == "table":
             kind = "table"
         elif tag == "a":
+            # 过滤无效链接
+            href = _as_text(control.get("href")).strip()
+            onclick = _as_text(control.get("onclick")).strip()
+            if not onclick and (not href or href == "#" or href.startswith("javascript:void")):
+                return None
             kind = "link"
         elif tag == "button":
             kind = "button"
@@ -779,7 +799,7 @@ class PageProfileBuilder:
         elif tag == "input" and input_type == "file":
             kind = "file"
         elif tag == "input" and input_type == "hidden":
-            kind = "hidden"
+            return None # 运行时扫描不关心隐藏域，它们由 pre_steps 处理
         elif tag == "input" and input_type in {"button", "submit", "reset", "image"}:
             kind = "button"
         elif tag == "input":
@@ -787,7 +807,7 @@ class PageProfileBuilder:
         elif control.get("onclick"):
             kind = "button"
         else:
-            kind = tag or "unknown"
+            return None # 忽略无意义标签
 
         raw_attrs = control.get("attributes")
         attrs = dict(raw_attrs) if isinstance(raw_attrs, dict) else {}
