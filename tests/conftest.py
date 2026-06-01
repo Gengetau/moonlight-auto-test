@@ -2,6 +2,7 @@ import re
 
 import pytest
 from playwright.sync_api import sync_playwright
+from src.browser_window import set_main_window_bounds
 from src.config_parser import Config
 
 
@@ -14,19 +15,13 @@ def _make_process_dpi_aware():
         pass
 
 
-CHROMIUM_FULLSCREEN_ARGS = [
-    "--start-maximized",
-    "--window-size=1920,1080",
-    "--window-position=0,0",
+CHROMIUM_ARGS = [
     "--force-device-scale-factor=1",
     "--high-dpi-support=1",
     "--disable-popup-blocking",
 ]
 
-FIREFOX_FULLSCREEN_ARGS = [
-    "--width=1920",
-    "--height=1080",
-]
+FIREFOX_ARGS = []
 
 
 def pytest_addoption(parser):
@@ -242,12 +237,12 @@ def browser(browser_name, login_entry):
             browser = p.chromium.launch(
                 channel="msedge",
                 headless=False,
-                args=CHROMIUM_FULLSCREEN_ARGS,
+                args=CHROMIUM_ARGS,
             )
         elif browser_name == "firefox":
             browser = p.firefox.launch(
                 headless=False,
-                args=FIREFOX_FULLSCREEN_ARGS,
+                args=FIREFOX_ARGS,
             )
         elif browser_name == "chrome_port":
             if not Config.CHROME_PORTABLE_PATH:
@@ -256,9 +251,6 @@ def browser(browser_name, login_entry):
                 executable_path=Config.CHROME_PORTABLE_PATH, 
                 headless=False,
                 args=[
-                    "--start-maximized",
-                    "--window-size=1920,1080",
-                    "--window-position=0,0",
                     "--force-device-scale-factor=1",
                     "--high-dpi-support=1",
                     "--disable-popup-blocking",
@@ -302,6 +294,7 @@ def _authenticated_page(browser, base_url):
     context.on("page", _on_page)
 
     page = context.new_page()
+    set_main_window_bounds(page)
     try:
         page.keyboard.press("Control+0")
         page.goto(base_url, wait_until="load", timeout=30000)

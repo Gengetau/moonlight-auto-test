@@ -15,6 +15,7 @@ from playwright.sync_api import Page, Error as PlaywrightError, TimeoutError as 
 from src.action_executor import _capture_state, execute_action, infer_semantic_action
 from src.assert_engine import compare_visual_screenshot
 from src.config_parser import Config
+from src.page_aliases import page_aliases
 from src.route_navigator import RouteMapCatalog, RouteNavigator
 
 
@@ -28,6 +29,9 @@ NEGATIVE_CASE_TYPES = {
 
 
 DOWNLOAD_CASE_TYPES = {"download", "download_template", "file_download"}
+BROWSER_DIALOG_CASE_TYPES = {"browser_dialog", "dialog", "alert", "confirm", "prompt"}
+PRINT_CASE_TYPES = {"print", "print_output", "print_dialog", "print_invocation"}
+NON_VISUAL_ACTION_TYPES = DOWNLOAD_CASE_TYPES | BROWSER_DIALOG_CASE_TYPES | PRINT_CASE_TYPES | {"close_window"}
 
 
 def _judge_compare_status(
@@ -54,7 +58,7 @@ def _judge_compare_status(
         return "BLOCKED"
 
     normalized_action = (action_type or "page_snapshot").lower()
-    visual_required = normalized_action not in (DOWNLOAD_CASE_TYPES | {"close_window"})
+    visual_required = normalized_action not in NON_VISUAL_ACTION_TYPES
     url_required = normalized_action in {"navigate", "page_snapshot"}
 
     if visual_status == "BLOCKED":
@@ -257,12 +261,15 @@ class RegressionEngine:
         # ------------------------------------------------------------------
         if target_page:
             normalized_target = self._target_page_name(target_page)
+            target_aliases = self._target_page_aliases(target_page)
 
             pages = [
                 page
                 for page in self.mapping.get("page_mappings", [])
-                if self._target_page_name(page.get("page_id"))
-                == normalized_target
+                if (
+                    self._target_page_name(page.get("page_id")) == normalized_target
+                    or bool(self._target_page_aliases(page.get("page_id")) & target_aliases)
+                )
             ]
 
             if not pages:
@@ -486,9 +493,16 @@ class RegressionEngine:
                         or mapping.get("resolved_entry_url")
                         or page_id
                     ).lower()
+                    target_aliases = self._target_page_aliases(page_id) | self._target_page_aliases(target_action)
 
                     for idx, page_item in enumerate(all_pages):
                         url_lower = page_item.url.lower()
+                        url_aliases = self._target_page_aliases(page_item.url)
+                        try:
+                            for frame in page_item.frames:
+                                url_aliases.update(self._target_page_aliases(frame.url))
+                        except PlaywrightError:
+                            pass
 
                         print(
                             f"    [{idx}] "
@@ -498,6 +512,7 @@ class RegressionEngine:
                         if (
                             page_id.lower() in url_lower
                             or target_action in url_lower
+                            or bool(target_aliases & url_aliases)
                         ):
                             match_idx = idx
 
@@ -867,8 +882,10 @@ class RegressionEngine:
         mapping executable_cases/full_action_steps.
         """
         target_name = self._target_page_name(page_id)
+        target_aliases = self._target_page_aliases(page_id)
         debug: Dict[str, Any] = {
             "target": target_name,
+            "target_aliases": sorted(target_aliases),
             "path": str(self.checklist_path) if self.checklist_path else None,
             "status": "not_configured",
         }
@@ -882,6 +899,15 @@ class RegressionEngine:
         if not self.checklist_path.exists():
             debug["status"] = "missing_file"
             return []
+
+        if self.checklist_path.suffix.lower() == ".json":
+            return self._load_guided_json_checklist_cases(
+                page_id=page_id,
+                target_name=target_name,
+                target_aliases=target_aliases,
+                debug=debug,
+                coverage_rows=coverage_rows,
+            )
 
         try:
             from openpyxl import load_workbook
@@ -984,7 +1010,8 @@ class RegressionEngine:
                 return "" if value is None else str(value).strip()
 
             row_page = cell(page_col)
-            if self._target_page_name(row_page) != target_name:
+            row_aliases = self._target_page_aliases(row_page)
+            if self._target_page_name(row_page) != target_name and not (row_aliases & target_aliases):
                 stats["page_not_matched"] += 1
                 continue
 
@@ -1203,6 +1230,214 @@ class RegressionEngine:
                     case_payload["main_step"] = parsed_main_step
                 cases.append(self._normalize_action_case(case_payload))
                 stats["loadable_action"] += 1
+
+        debug["status"] = "loaded" if cases else "no_cases"
+        debug["loaded"] = len(cases)
+        debug["stats"] = dict(stats)
+        debug["samples"] = samples
+        return cases
+
+    def _load_guided_json_checklist_cases(
+        self,
+        *,
+        page_id: str,
+        target_name: str,
+        target_aliases: set[str],
+        debug: Dict[str, Any],
+        coverage_rows: List[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        """Load AI/manual guided checklist JSON directly as executable cases."""
+        try:
+            payload = json.loads(self.checklist_path.read_text(encoding="utf-8"))
+        except Exception as exc:
+            debug["status"] = "json_read_error"
+            debug["error"] = str(exc)
+            return []
+
+        if isinstance(payload, list):
+            raw_cases = payload
+            default_page = page_id
+            schema = "list"
+        elif isinstance(payload, dict):
+            raw_cases = (
+                payload.get("cases")
+                or payload.get("checklist_cases")
+                or payload.get("checklist")
+                or payload.get("items")
+                or []
+            )
+            default_page = payload.get("page_id") or payload.get("target_page") or page_id
+            schema = str(payload.get("schema") or "moonlight.guided_checklist.v1")
+        else:
+            raw_cases = []
+            default_page = page_id
+            schema = "invalid"
+
+        debug["format"] = "guided_json"
+        debug["schema"] = schema
+        if not isinstance(raw_cases, list):
+            debug["status"] = "json_cases_not_list"
+            return []
+
+        allowed_modes = {"auto", "automated", "true", "yes", "y", "1"}
+        semi_auto_modes = {"semi-auto", "semiauto", "semi auto"}
+        cases: List[Dict[str, Any]] = []
+        stats: Counter[str] = Counter()
+        samples: List[Dict[str, str]] = []
+
+        def add_sample(kind: str, **values: str) -> None:
+            if len(samples) < 5:
+                samples.append({"kind": kind, **values})
+
+        def as_text(value: Any, default: str = "") -> str:
+            if value is None:
+                return default
+            if isinstance(value, bool):
+                return "true" if value else "false"
+            return str(value)
+
+        def as_steps(value: Any) -> List[Dict[str, Any]]:
+            if not isinstance(value, list):
+                return []
+            return [dict(item) for item in value if isinstance(item, dict)]
+
+        def expected_parts(item: Dict[str, Any]) -> Tuple[str, str]:
+            expected = item.get("expected")
+            expected_type = as_text(item.get("expected_type"))
+            expected_value = as_text(item.get("expected_value"))
+            if isinstance(expected, dict):
+                expected_type = expected_type or as_text(expected.get("type") or expected.get("expected_type"))
+                expected_value = expected_value or as_text(expected.get("value") or expected.get("expected_value"))
+            elif isinstance(expected, list):
+                expected_value = expected_value or "\n".join(as_text(part) for part in expected if as_text(part))
+            elif expected not in (None, ""):
+                expected_value = expected_value or as_text(expected)
+            return expected_type, expected_value
+
+        for index, item in enumerate(raw_cases, start=1):
+            if not isinstance(item, dict):
+                stats["invalid_case"] += 1
+                continue
+
+            row_page = as_text(item.get("page_id") or item.get("page") or default_page or page_id)
+            row_aliases = self._target_page_aliases(row_page)
+            if self._target_page_name(row_page) != target_name and not (row_aliases & target_aliases):
+                stats["page_not_matched"] += 1
+                continue
+
+            stats["page_matched"] += 1
+            case_id = as_text(item.get("case_id") or item.get("id") or f"guided-{index:03d}")
+            title = as_text(item.get("title") or item.get("test_title") or case_id)
+            risk_level = as_text(item.get("risk_level") or item.get("risk"), "safe").strip().lower()
+            destructive = self._truthy(item.get("destructive")) or risk_level in {"destructive", "danger", "dangerous"}
+            mode = as_text(item.get("automation_mode")).strip().lower()
+            if not mode:
+                mode = "manual" if destructive or risk_level == "manual" else "auto"
+            destructive_value = "true" if destructive else "false"
+            row_info = {
+                "page_id": row_page,
+                "case_id": case_id,
+                "test_title": title,
+                "automation_mode": mode,
+                "destructive": destructive_value,
+                "excluded_reason": "",
+            }
+            coverage_rows.append(row_info)
+
+            if item.get("enabled") is False or as_text(item.get("enabled")).lower() in {"false", "0", "no", "n", "disabled", "off"}:
+                stats["disabled"] += 1
+                row_info["excluded_reason"] = "enabled=false"
+                continue
+
+            mode_allowed = mode in allowed_modes or mode.startswith("auto")
+            if not mode_allowed and self.include_semi_auto:
+                mode_allowed = mode in semi_auto_modes or mode.startswith("semi")
+            if not mode_allowed:
+                stats[f"mode_rejected:{mode or '<blank>'}"] += 1
+                if mode in semi_auto_modes or mode.startswith("semi"):
+                    row_info["excluded_reason"] = f"automation_mode={mode}; requires --include-semi-auto"
+                else:
+                    row_info["excluded_reason"] = f"automation_mode={mode or '<blank>'} is not executable"
+                add_sample("mode_rejected", page=row_page, mode=mode, case_id=case_id)
+                continue
+
+            if destructive and not self.include_destructive:
+                stats["destructive_rejected"] += 1
+                row_info["excluded_reason"] = "destructive=true; requires --include-destructive"
+                add_sample("destructive_rejected", page=row_page, case_id=case_id)
+                continue
+
+            pre_steps = as_steps(item.get("pre_steps"))
+            main_step = dict(item.get("main_step")) if isinstance(item.get("main_step"), dict) else {}
+            steps = as_steps(item.get("steps"))
+            if steps and not main_step:
+                pre_steps.extend(steps[:-1])
+                main_step = dict(steps[-1])
+            if not main_step:
+                main_step = {
+                    "action_type": item.get("action_type") or "snapshot",
+                    "locator": item.get("locator") or "__page__",
+                }
+
+            expected_type, expected_value = expected_parts(item)
+            if expected_value and not main_step.get("value") and str(main_step.get("action_type") or "").lower() in {
+                "assert_text",
+                "expect_text",
+                "verify_text",
+                "assert_value",
+                "expect_value",
+                "verify_value",
+                "assert_url",
+                "expect_url",
+            }:
+                main_step["value"] = expected_value
+
+            action_type = as_text(item.get("action_type") or main_step.get("action_type") or item.get("case_type") or "scenario")
+            case_type = as_text(item.get("case_type") or action_type or "scenario")
+            locator = as_text(item.get("locator") or main_step.get("locator") or "__page__")
+
+            negative_case = self._is_negative_case(case_type, action_type)
+            if negative_case and not self.include_negative:
+                stats["negative_rejected"] += 1
+                row_info["excluded_reason"] = "negative case; requires --include-negative"
+                add_sample("negative_rejected", page=row_page, case_id=case_id, case_type=case_type)
+                continue
+            if negative_case and self.include_negative and not self._negative_profile_enabled(
+                case_type,
+                action_type,
+                as_text(item.get("generated_by")),
+            ):
+                stats["negative_profile_rejected"] += 1
+                row_info["excluded_reason"] = "negative case; --negative-profile did not match"
+                add_sample("negative_profile_rejected", page=row_page, case_id=case_id, case_type=case_type)
+                continue
+
+            main_step.setdefault("locator", locator)
+            main_step.setdefault("legacy_locator", item.get("legacy_locator") or locator)
+            main_step.setdefault("new_locator", item.get("new_locator") or locator)
+
+            case_payload = {
+                "case_id": case_id,
+                "case_type": case_type,
+                "action_type": action_type,
+                "label": title,
+                "test_title": title,
+                "page_id": row_page,
+                "legacy_locator": as_text(item.get("legacy_locator") or locator),
+                "new_locator": as_text(item.get("new_locator") or locator),
+                "locator": locator,
+                "value": as_text(item.get("value") or item.get("test_data")),
+                "test_data": as_text(item.get("test_data") or item.get("value")),
+                "expected_type": expected_type,
+                "expected_value": expected_value,
+                "risk_level": risk_level,
+                "destructive": destructive_value,
+                "source": "guided_json_checklist",
+                "pre_steps": pre_steps,
+                "main_step": main_step,
+            }
+            cases.append(self._normalize_action_case(case_payload))
+            stats["loadable_action"] += 1
 
         debug["status"] = "loaded" if cases else "no_cases"
         debug["loaded"] = len(cases)
@@ -1555,6 +1790,12 @@ class RegressionEngine:
                     "executed_steps": executed,
                 }
 
+            step_context = {**action_case, **step, "locator": locator}
+            if step.get("action_type") or step.get("action_hint") or step.get("kind"):
+                step_context["action_type"] = action_type
+                step_context["action_hint"] = step.get("action_hint") or action_type
+                step_context["kind"] = step.get("kind") or ""
+
             result = execute_action(
                 page,
                 action_type,
@@ -1564,7 +1805,7 @@ class RegressionEngine:
                 capture_dir=capture_dir,
                 test_id=f"{test_id}_step{index}",
                 timeout=self.timeout,
-                action_context={**action_case, **step, "locator": locator},
+                action_context=step_context,
             )
             executed.append(
                 {
@@ -2260,6 +2501,41 @@ class RegressionEngine:
         if RegressionEngine._is_negative_case(action_case.get("case_type"), action_case.get("action_type") or action_type):
             return True
 
+        passive_actions = {
+            "assert_visible",
+            "assert_text",
+            "assert_value",
+            "assert_url",
+            "assert_attached",
+            "expect_visible",
+            "expect_text",
+            "expect_value",
+            "expect_url",
+            "expect_attached",
+            "verify_visible",
+            "verify_text",
+            "verify_value",
+            "verify_attached",
+            "snapshot",
+            "page_snapshot",
+            "visual_check",
+            "wait",
+        }
+        steps: List[Dict[str, Any]] = []
+        if action_case.get("pre_steps") or action_case.get("main_step"):
+            steps.extend(action_case.get("pre_steps") or [])
+            if isinstance(action_case.get("main_step"), dict):
+                steps.append(action_case["main_step"])
+        if steps:
+            step_actions = {
+                str(step.get("action_type") or step.get("action_hint") or step.get("kind") or "").strip().lower()
+                for step in steps
+            }
+            if step_actions and step_actions <= passive_actions:
+                return False
+        elif str(semantic_action or action_type or "").strip().lower() in passive_actions:
+            return False
+
         evidence = " ".join(
             str(value or "")
             for value in (
@@ -2473,6 +2749,13 @@ class RegressionEngine:
 
         candidates = []
         debug_candidates = []
+        target_page = (
+            route.get("target_page")
+            or route.get("target_page_name")
+            or (route.get("source_route") or {}).get("target_page")
+            or (route.get("source_route") or {}).get("target_page_name")
+        )
+        target_mapping = {"page_id": target_page} if target_page else {}
         for candidate in pages:
             if self._page_is_closed(candidate):
                 debug_candidates.append({"closed": True, "url": "about:closed", "selected": False})
@@ -2485,13 +2768,15 @@ class RegressionEngine:
                 debug_candidates.append({"closed": False, "url": url, "about_blank": True, "selected": False})
                 continue
             route_step = self._page_is_route_map_step(candidate, route)
+            target_match = bool(target_mapping and self._page_matches_mapping(candidate, target_mapping))
             login_like = bool(re.search(r"login", str(url or ""), re.IGNORECASE))
-            candidates.append((0 if route_step else 1, 1 if login_like else 0, candidate, url, route_step))
+            candidates.append((0 if target_match else 1, 0 if route_step else 1, 1 if login_like else 0, candidate, url, route_step, target_match))
             debug_candidates.append(
                 {
                     "closed": False,
                     "url": url,
                     "route_step_detected": route_step,
+                    "target_page_detected": target_match,
                     "login_like": login_like,
                     "selected": False,
                 }
@@ -2500,8 +2785,8 @@ class RegressionEngine:
         if not candidates:
             return page, {"status": "SKIPPED", "reason": "no open sibling/container page found", "candidates": debug_candidates}
 
-        candidates.sort(key=lambda item: (item[0], item[1], str(item[3] or "")))
-        _, _, selected, url, route_step = candidates[0]
+        candidates.sort(key=lambda item: (item[0], item[1], item[2], str(item[4] or "")))
+        _, _, _, selected, url, route_step, target_match = candidates[0]
         for item in debug_candidates:
             if item.get("url") == url and not item.get("closed"):
                 item["selected"] = True
@@ -2519,6 +2804,7 @@ class RegressionEngine:
             "strategy": "context_sibling_takeover",
             "url": url,
             "route_step_detected": route_step,
+            "target_page_detected": target_match,
             "candidates": debug_candidates,
         }
 
@@ -2689,7 +2975,7 @@ class RegressionEngine:
         action_type = str(extra.get("action_type") or action or "page_snapshot")
         visual = {"status": "SKIPPED", "reason": "Visual comparison is disabled for this action type"}
         normalized_action_type = action_type.lower()
-        if normalized_action_type not in (DOWNLOAD_CASE_TYPES | {"close_window"}):
+        if normalized_action_type not in NON_VISUAL_ACTION_TYPES:
             ignore_top_px = 86 if (
                 str(legacy_state.get("screenshot_scope") or "").startswith("browser_screen_composited")
                 and str(new_state.get("screenshot_scope") or "").startswith("browser_screen_composited")
@@ -2726,6 +3012,24 @@ class RegressionEngine:
             if download_compare.get("download_filename_match") is False:
                 status = "DIFF"
 
+        dialog_compare = {}
+        if normalized_action_type in BROWSER_DIALOG_CASE_TYPES:
+            dialog_compare = self._browser_dialog_compare_fields(
+                extra.get("legacy_action") or {},
+                extra.get("new_action") or {},
+            )
+            if dialog_compare.get("browser_dialog_match") is False:
+                status = "DIFF"
+
+        print_compare = {}
+        if normalized_action_type in PRINT_CASE_TYPES:
+            print_compare = self._print_compare_fields(
+                extra.get("legacy_action") or {},
+                extra.get("new_action") or {},
+            )
+            if print_compare.get("print_invocation_match") is False:
+                status = "DIFF"
+
         return {
             "page_id": page_id,
             "risk": risk,
@@ -2746,6 +3050,8 @@ class RegressionEngine:
                 "new": new_state.get("frame_candidates", []),
             },
             **download_compare,
+            **dialog_compare,
+            **print_compare,
             **extra,
         }
 
@@ -2777,6 +3083,42 @@ class RegressionEngine:
             "new_download_suggested_filename": new_action.get("download_suggested_filename"),
             "legacy_download_path": legacy_action.get("download_path"),
             "new_download_path": new_action.get("download_path"),
+        }
+
+    @staticmethod
+    def _dialog_signature(action: Dict[str, Any]) -> str:
+        dialogs = action.get("dialogs") or []
+        if not isinstance(dialogs, list) or not dialogs:
+            return ""
+        first = dialogs[0] if isinstance(dialogs[0], dict) else {}
+        dialog_type = str(first.get("type") or "").strip().lower()
+        message = re.sub(r"\s+", " ", str(first.get("message") or "")).strip()
+        return f"{dialog_type}:{message}"
+
+    @classmethod
+    def _browser_dialog_compare_fields(cls, legacy_action: Dict[str, Any], new_action: Dict[str, Any]) -> Dict[str, Any]:
+        legacy_signature = cls._dialog_signature(legacy_action)
+        new_signature = cls._dialog_signature(new_action)
+        if legacy_signature and new_signature:
+            dialog_match: Optional[bool] = legacy_signature == new_signature
+        else:
+            dialog_match = None if not legacy_signature and not new_signature else False
+        return {
+            "browser_dialog_match": dialog_match,
+            "legacy_browser_dialog": legacy_signature,
+            "new_browser_dialog": new_signature,
+        }
+
+    @staticmethod
+    def _print_compare_fields(legacy_action: Dict[str, Any], new_action: Dict[str, Any]) -> Dict[str, Any]:
+        legacy_invoked = bool(legacy_action.get("print_invoked"))
+        new_invoked = bool(new_action.get("print_invoked"))
+        return {
+            "print_invocation_match": legacy_invoked == new_invoked,
+            "legacy_print_invoked": legacy_invoked,
+            "new_print_invoked": new_invoked,
+            "legacy_print_events": legacy_action.get("print_events") or [],
+            "new_print_events": new_action.get("print_events") or [],
         }
 
     @staticmethod
@@ -3328,6 +3670,10 @@ class RegressionEngine:
             name = name[:-3] + ".jsp"
         return name.lower()
 
+    @staticmethod
+    def _target_page_aliases(value: Any) -> set[str]:
+        return page_aliases(value)
+
     def _page_matches_mapping(self, page: Page, mapping: Dict[str, Any]) -> bool:
         """
         Best-effort check that direct navigation landed on the requested page.
@@ -3349,7 +3695,7 @@ class RegressionEngine:
                 continue
             leaf = raw.rsplit("/", 1)[-1]
             stem = re.sub(r"\.(jsp|do|action)$", "", leaf, flags=re.IGNORECASE)
-            for candidate in (raw, leaf, stem, f"{stem}.do"):
+            for candidate in (raw, leaf, stem, f"{stem}.do", *page_aliases(value)):
                 candidate = candidate.strip("/")
                 if len(candidate) >= 3 and candidate not in needles:
                     needles.append(candidate)

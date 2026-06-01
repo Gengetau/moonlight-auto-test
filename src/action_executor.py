@@ -10,6 +10,7 @@ from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 from PIL import Image, ImageDraw, ImageFont, ImageGrab
 
 from src.assert_engine import compare_visual_screenshot
+from src.browser_window import capture_window_metrics
 from src.config_parser import Config
 
 
@@ -352,6 +353,28 @@ def _should_accept_database_dialog(context: Optional[Dict[str, Any]]) -> bool:
     )
 
 
+def _expects_browser_dialog(context: Optional[Dict[str, Any]]) -> bool:
+    if not context:
+        return False
+    explicit_fields = (
+        "case_type",
+        "action_type",
+        "expected_type",
+        "semantic_key",
+    )
+    explicit_values = [str(context.get(key) or "").strip().lower() for key in explicit_fields]
+    if any(value in {"browser_dialog", "dialog", "alert", "confirm", "prompt"} for value in explicit_values):
+        return True
+    if any("browser_dialog" in value or "js_dialog" in value for value in explicit_values):
+        return True
+
+    script_evidence = " ".join(
+        str(context.get(key) or "")
+        for key in ("raw", "onclick", "locator", "expected_value")
+    ).lower()
+    return bool(re.search(r"\b(?:alert|confirm|prompt)\s*\(", script_evidence))
+
+
 def _accept_dialog_safely(dialog) -> str:
     try:
         dialog.accept()
@@ -362,6 +385,65 @@ def _accept_dialog_safely(dialog) -> str:
         if "already handled" in lowered or "already been handled" in lowered:
             return "already_handled"
         return f"accept_failed: {message}"
+
+
+def _install_print_observer(page: Page) -> Dict[str, Any]:
+    result: Dict[str, Any] = {"installed": False, "frames": 0, "errors": []}
+    if _page_is_closed(page):
+        return {"installed": False, "frames": 0, "errors": [{"error": "page_closed"}]}
+
+    script_body = """
+        window.__moonlightPrintEvents = window.__moonlightPrintEvents || [];
+        if (!window.__moonlightPrintInstalled) {
+            window.__moonlightPrintInstalled = true;
+            const originalPrint = window.print ? window.print.bind(window) : null;
+            window.__moonlightOriginalPrint = originalPrint;
+            window.print = () => {
+                window.__moonlightPrintEvents.push({
+                    time: new Date().toISOString(),
+                    url: String(location.href || ""),
+                    title: String(document.title || "")
+                });
+                window.dispatchEvent(new Event("beforeprint"));
+                window.dispatchEvent(new Event("afterprint"));
+            };
+        }
+    """
+    try:
+        page.context.add_init_script(script=script_body)
+        result["context_init_script"] = True
+    except Exception as exc:
+        result.setdefault("errors", []).append({"scope": "context_init_script", "error": str(exc)})
+    try:
+        page.add_init_script(script=script_body)
+        result["page_init_script"] = True
+    except Exception as exc:
+        result.setdefault("errors", []).append({"scope": "page_init_script", "error": str(exc)})
+
+    script = f"() => {{ {script_body} return window.__moonlightPrintInstalled ? 'installed' : 'not_installed'; }}"
+    for frame in _walk_frames(page.main_frame):
+        try:
+            frame.evaluate(script)
+            result["frames"] += 1
+            result["installed"] = True
+        except Exception as exc:
+            result.setdefault("errors", []).append({"frame_url": str(getattr(frame, "url", "") or ""), "error": str(exc)})
+    return result
+
+
+def _read_print_events(page: Page) -> Dict[str, Any]:
+    events: List[Dict[str, Any]] = []
+    errors: List[Dict[str, str]] = []
+    if _page_is_closed(page):
+        return {"events": events, "errors": [{"error": "page_closed"}]}
+    for frame in _walk_frames(page.main_frame):
+        try:
+            frame_events = frame.evaluate("() => window.__moonlightPrintEvents || []")
+            if isinstance(frame_events, list):
+                events.extend(item for item in frame_events if isinstance(item, dict))
+        except Exception as exc:
+            errors.append({"frame_url": str(getattr(frame, "url", "") or ""), "error": str(exc)})
+    return {"events": events, "errors": errors}
 
 
 def _closed_page_state(output_dir: Path, name: str) -> Dict[str, Any]:
@@ -522,11 +604,36 @@ ACTION_ALIASES = {
     "file": "upload",
     "upload": "upload",
     "download": "download",
+    "browser_dialog": "browser_dialog",
+    "dialog": "browser_dialog",
+    "alert": "browser_dialog",
+    "confirm": "browser_dialog",
+    "prompt": "browser_dialog",
+    "print": "print",
+    "print_dialog": "print",
+    "print_invocation": "print",
     "negative_js_error": "negative_js_error",
     "negative_http_500": "negative_http_500",
     "negative_network_abort": "negative_network_abort",
     "wait": "wait",
     "snapshot": "wait",
+    "assert_visible": "assert_visible",
+    "expect_visible": "assert_visible",
+    "verify_visible": "assert_visible",
+    "wait_visible": "assert_visible",
+    "wait_for_visible": "assert_visible",
+    "assert_attached": "assert_attached",
+    "expect_attached": "assert_attached",
+    "verify_attached": "assert_attached",
+    "assert_text": "assert_text",
+    "expect_text": "assert_text",
+    "verify_text": "assert_text",
+    "text_visible": "assert_text",
+    "assert_value": "assert_value",
+    "expect_value": "assert_value",
+    "verify_value": "assert_value",
+    "assert_url": "assert_url",
+    "expect_url": "assert_url",
 }
 
 
@@ -548,7 +655,10 @@ def infer_semantic_action(action_type: Optional[str], context: Optional[Dict[str
     ]
     raw = " ".join(str(value or "").lower() for value in raw_values)
     locator = str(context.get("locator") or context.get("selector") or "").lower()
-    evidence = " ".join(str(context.get(key) or "").lower() for key in ("raw", "label", "semantic_key"))
+    evidence = " ".join(
+        str(context.get(key) or "").lower()
+        for key in ("raw", "label", "semantic_key", "expected_type", "expected_value", "onclick")
+    )
 
     if "set_value" in raw or "setvalue" in raw or "hidden" in raw:
         return "set_value"
@@ -557,17 +667,31 @@ def infer_semantic_action(action_type: Optional[str], context: Optional[Dict[str
             return negative_action
     if "clear" in raw:
         return "clear"
+    if any(token in raw for token in ("assert_visible", "expect_visible", "verify_visible", "wait_visible", "wait_for_visible")):
+        return "assert_visible"
+    if any(token in raw for token in ("assert_attached", "expect_attached", "verify_attached")):
+        return "assert_attached"
+    if any(token in raw for token in ("assert_text", "expect_text", "verify_text", "text_visible")):
+        return "assert_text"
+    if any(token in raw for token in ("assert_value", "expect_value", "verify_value")):
+        return "assert_value"
+    if any(token in raw for token in ("assert_url", "expect_url")):
+        return "assert_url"
     if "uncheck" in raw or "unchecked" in raw:
         return "uncheck"
     if "check" in raw or "checkbox" in raw or "radio" in raw:
         return "check"
     if "press" in raw or "special_key" in raw:
         return "press"
+    if "print" in raw or "window.print" in evidence or "print_invocation" in evidence or "印刷" in evidence:
+        return "print"
+    if _expects_browser_dialog(context):
+        return "browser_dialog"
     if "file_download" in raw or "download_template" in raw or "download" in raw or "download" in evidence or "ダウンロード" in evidence:
         return "download"
     if "upload" in raw or "file" in raw or "type='file'" in evidence or 'type="file"' in evidence:
         return "upload"
-    if "select" in raw or ":select" in evidence or " select" in evidence:
+    if re.search(r"\bselect\b", raw) or ":select" in evidence or re.search(r"\bselect\b", evidence):
         return "select"
     if "form" in raw or "submit" in raw or locator.startswith("form") or "[name=" in locator and "form" in locator:
         return "submit"
@@ -1011,7 +1135,11 @@ def execute_action(
         _attach_event("pageerror", _on_pageerror)
         _attach_event("requestfailed", _on_requestfailed)
         _attach_event("response", _on_response)
-        if _should_accept_database_dialog(action_context):
+        if (
+            _should_accept_database_dialog(action_context)
+            or result.get("semantic_action") == "browser_dialog"
+            or _expects_browser_dialog(action_context)
+        ):
             def _accept_dialog(dialog):
                 accept_status = _accept_dialog_safely(dialog)
                 dialog_state = {
@@ -1030,6 +1158,8 @@ def execute_action(
         result["wait_state"] = _wait_for_semantic_ready(page, timeout=max(timeout, 15000 if browser_name == "firefox" else timeout))
         semantic_action = result["semantic_action"]
         navigated_directly = False
+        if semantic_action == "print":
+            result["print_observer"] = _install_print_observer(page)
 
         if semantic_action in NEGATIVE_ACTIONS:
             action_dispatched = True
@@ -1197,7 +1327,7 @@ def execute_action(
 
         if semantic_action in NEGATIVE_ACTIONS or navigated_directly:
             pass
-        elif semantic_action in ("click", "navigate"):
+        elif semantic_action in ("click", "navigate", "browser_dialog", "print"):
             # 增加元素可见性检查
             locator = frame.locator(selector).first
             action_dispatched = True
@@ -1243,9 +1373,110 @@ def execute_action(
                 if not (action_context or {}).get("manual_replay"):
                     raise
                 _manual_click_fallback()
+            if semantic_action == "browser_dialog":
+                page.wait_for_timeout(300)
+                if not result.get("dialogs"):
+                    result.update({"status": "BLOCKED", "reason": "Expected browser dialog was not observed."})
+            elif semantic_action == "print":
+                try:
+                    capture_page.wait_for_timeout(500)
+                except PlaywrightError:
+                    pass
+                print_state = _read_print_events(capture_page)
+                result["print_events"] = print_state.get("events", [])
+                result["print_errors"] = print_state.get("errors", [])
+                result["print_invoked"] = bool(result["print_events"])
+                if not result["print_invoked"]:
+                    result.update({"status": "BLOCKED", "reason": "Print action did not call window.print()."})
         elif semantic_action == "fill":
             frame.locator(selector).first.wait_for(state="visible", timeout=timeout)
             frame.locator(selector).first.fill(value or "moonlight-semantic-sample", timeout=timeout)
+        elif semantic_action == "assert_visible":
+            if not selector or selector in {"-", "__page__"}:
+                frame.locator("body").first.wait_for(state="visible", timeout=timeout)
+                result["assertion"] = "page_body_visible"
+            else:
+                frame.locator(selector).first.wait_for(state="visible", timeout=timeout)
+                result["assertion"] = "locator_visible"
+        elif semantic_action == "assert_attached":
+            if not selector or selector in {"-", "__page__"}:
+                frame.locator("body").first.wait_for(state="attached", timeout=timeout)
+                result["assertion"] = "page_body_attached"
+            else:
+                frame.locator(selector).first.wait_for(state="attached", timeout=timeout)
+                result["assertion"] = "locator_attached"
+        elif semantic_action == "assert_text":
+            expected_text = str(
+                value
+                or (action_context or {}).get("expected_value")
+                or (action_context or {}).get("text")
+                or ""
+            )
+            if selector and selector not in {"-", "__page__"}:
+                frame.locator(selector).first.wait_for(state="attached", timeout=timeout)
+                actual_text = frame.locator(selector).first.inner_text(timeout=timeout)
+            else:
+                frame.locator("body").first.wait_for(state="attached", timeout=timeout)
+                actual_text = frame.locator("body").first.inner_text(timeout=timeout)
+            result["assertion"] = "text_contains"
+            result["actual_text_sample"] = str(actual_text or "")[:1000]
+            result["expected_text"] = expected_text
+            if expected_text and expected_text not in str(actual_text or ""):
+                result.update(
+                    {
+                        "status": "BLOCKED",
+                        "reason": f"Expected text was not found: {expected_text}",
+                    }
+                )
+        elif semantic_action == "assert_value":
+            expected_value = str(
+                value
+                or (action_context or {}).get("expected_value")
+                or (action_context or {}).get("text")
+                or ""
+            )
+            locator = frame.locator(selector).first
+            locator.wait_for(state="attached", timeout=timeout)
+            actual_value = locator.evaluate(
+                """element => {
+                    const tag = (element.tagName || '').toLowerCase();
+                    if (tag === 'select') {
+                        return Array.from(element.selectedOptions || [])
+                            .map(option => option.value || option.textContent || '')
+                            .join('|');
+                    }
+                    if ('value' in element) return String(element.value || '');
+                    return String(element.textContent || '');
+                }"""
+            )
+            result["assertion"] = "value_contains"
+            result["actual_value"] = str(actual_value or "")
+            result["expected_value"] = expected_value
+            if expected_value and expected_value not in str(actual_value or ""):
+                result.update(
+                    {
+                        "status": "BLOCKED",
+                        "reason": f"Expected value was not found: {expected_value}",
+                    }
+                )
+        elif semantic_action == "assert_url":
+            expected_url = str(
+                value
+                or (action_context or {}).get("expected_value")
+                or (action_context or {}).get("url_pattern")
+                or ""
+            )
+            current_url = _safe_page_url(page)
+            result["assertion"] = "url_contains"
+            result["current_url"] = current_url
+            result["expected_url"] = expected_url
+            if expected_url and expected_url not in current_url:
+                result.update(
+                    {
+                        "status": "BLOCKED",
+                        "reason": f"Expected URL fragment was not found: {expected_url}",
+                    }
+                )
         elif semantic_action == "clear":
             frame.locator(selector).first.wait_for(state="visible", timeout=timeout)
             frame.locator(selector).first.fill("", timeout=timeout)
@@ -1376,7 +1607,7 @@ def execute_action(
             if result["post_wait_state"].get("page_closed"):
                 result["page_closed_after_action"] = True
     except (PlaywrightTimeoutError, PlaywrightError, ValueError) as exc:
-        closes_page = result.get("semantic_action") in ("click", "navigate", "submit", "goto", "download")
+        closes_page = result.get("semantic_action") in ("click", "navigate", "submit", "goto", "download", "browser_dialog", "print")
         if action_dispatched and closes_page and (_is_target_closed_error(exc) or _page_is_closed(page)):
             result.update(
                 {
@@ -1464,6 +1695,7 @@ def _capture_state(page: Page, output_dir: Path, name: str) -> Dict[str, Any]:
         raise
     state["target_frame"] = _frame_identity(target_frame)
     state["frame_candidates"] = diagnostics[:8]
+    state["window_metrics"] = capture_window_metrics(page)
     browser_screen = _capture_browser_screen(page, screenshot)
     if browser_screen.get("ok"):
         state.update({key: value for key, value in browser_screen.items() if key != "ok"})
@@ -1583,6 +1815,20 @@ COMPARE_POLICY = {
         "visual_required": True,
     },
     "download": {
+        "url_required": False,
+        "title_required": False,
+        "text_required": False,
+        "dom_required": False,
+        "visual_required": False,
+    },
+    "browser_dialog": {
+        "url_required": False,
+        "title_required": False,
+        "text_required": False,
+        "dom_required": False,
+        "visual_required": False,
+    },
+    "print": {
         "url_required": False,
         "title_required": False,
         "text_required": False,

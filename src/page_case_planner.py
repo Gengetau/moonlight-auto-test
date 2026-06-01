@@ -1,5 +1,4 @@
 import json
-import json
 import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -246,6 +245,48 @@ def _search_blob(item: Dict[str, Any]) -> str:
     return " ".join(_as_text(value) for value in values if value is not None).lower()
 
 
+def _action_blob(item: Dict[str, Any]) -> str:
+    attrs = _attributes(item)
+    values = [
+        item.get("action"),
+        item.get("onclick"),
+        item.get("href"),
+        item.get("locator"),
+        item.get("legacy_locator"),
+        item.get("new_locator"),
+        _first_attr(item, "action", "formAction", "ownerFormAction", "href", "onclick", "onClick"),
+    ]
+    return " ".join(_as_text(value) for value in values if value is not None).lower()
+
+
+def _looks_like_indirect_label(value: Any) -> bool:
+    text = _as_text(value).lower()
+    return "<bean:" in text or "bean:message" in text or " key=" in text
+
+
+def _display_blob(item: Dict[str, Any]) -> str:
+    attrs = _attributes(item)
+    raw_values = [
+        item.get("label"),
+        item.get("label_key"),
+        item.get("semantic_key"),
+        item.get("key"),
+        item.get("text"),
+    ]
+    values = [value for value in raw_values if not _looks_like_indirect_label(value)]
+    display_attr = _first_attr(item, "value", "title", "alt", "aria-label")
+    if not _looks_like_indirect_label(display_attr):
+        values.append(display_attr)
+    for value in attrs.values():
+        if (
+            isinstance(value, str)
+            and value in {attrs.get("value"), attrs.get("title"), attrs.get("alt"), attrs.get("aria-label")}
+            and not _looks_like_indirect_label(value)
+        ):
+            values.append(value)
+    return " ".join(_as_text(value) for value in values if value is not None).lower()
+
+
 def _compact_label(value: Any) -> str:
     return re.sub(r"[\s\u3000]+", "", _as_text(value)).lower()
 
@@ -276,6 +317,8 @@ def _is_table(item: Dict[str, Any]) -> bool:
 def _is_result_table(item: Dict[str, Any]) -> bool:
     if not _is_table(item):
         return False
+    if not _as_text(item.get("_source")).startswith("runtime_profile"):
+        return True
     attrs = _attributes(item)
     identity = " ".join(
         _as_text(value)
@@ -371,20 +414,27 @@ def _is_download_action(item: Dict[str, Any]) -> bool:
 def _is_template_download_action(item: Dict[str, Any]) -> bool:
     if not _is_clickable_control(item):
         return False
-    blob = _search_blob(item)
+    action_blob = _action_blob(item)
+    display_blob = _display_blob(item)
     action_type = _as_text(item.get("action_type") or item.get("action_hint") or item.get("case_type")).lower()
-    has_template_marker = any(marker in blob for marker in ("templatedownload", "template", "雛形", "テンプレート"))
-    has_download_marker = action_type == "download" or any(marker in blob for marker in ("download", "ダウンロード", "template", "テンプレート", "雛形"))
-    return has_template_marker and has_download_marker
+    label = _compact_label(_label(item))
+    output_label = label in {"出力", "ファイル出力", "pdf出力"} or label.endswith("出力")
+    marker_blob = f"{action_blob} {display_blob}"
+    has_template_marker = any(marker in marker_blob for marker in ("templatedownload", "template", "雛形", "テンプレート"))
+    has_download_marker = action_type == "download" or "download" in action_blob or any(marker in display_blob for marker in ("download", "ダウンロード"))
+    if has_template_marker:
+        return True
+    return has_download_marker and not output_label and "fndownload" not in action_blob
 
 
 def _is_file_download_action(item: Dict[str, Any]) -> bool:
     if not _is_clickable_control(item) or _is_template_download_action(item):
         return False
     blob = _search_blob(item)
+    action_blob = _action_blob(item)
+    display_blob = _display_blob(item)
     action_type = _as_text(item.get("action_type") or item.get("action_hint") or item.get("case_type")).lower()
     label = _compact_label(_label(item))
-    onclick = _as_text(_first_attr(item, "onclick", "onClick") or item.get("onclick")).lower()
     if any(marker in blob for marker in ("window.close", "parent.close", "fncancel", "キャンセル", "取消", "戻る", "戻り")):
         return False
     if re.search(r"\b(?:cancel|back|bak|close)\b", blob):
@@ -392,10 +442,9 @@ def _is_file_download_action(item: Dict[str, Any]) -> bool:
     output_label = label in {"出力", "ファイル出力", "pdf出力"} or label.endswith("出力")
     return (
         (action_type == "download" and output_label)
-        or "fndownload" in blob
-        or "download" in blob
-        or "ダウンロード" in blob
-        or (output_label and ("download" in onclick or "fndownload" in onclick or "download" in blob))
+        or "fndownload" in action_blob
+        or (output_label and "download" in action_blob)
+        or (output_label and "ダウンロード" in display_blob)
     )
 
 
@@ -465,7 +514,13 @@ def _is_search_action(item: Dict[str, Any]) -> bool:
     if _is_form(item):
         return False
     blob = _search_blob(item)
-    return "search" in blob or "検索" in blob
+    action_type = _as_text(item.get("action_type") or item.get("action_hint") or item.get("case_type")).lower()
+    has_search_marker = "search" in blob or "検索" in blob
+    if not has_search_marker:
+        return False
+    if action_type == "search":
+        return _is_clickable_control(item) or _as_text(item.get("kind")).lower() == "scenario"
+    return _is_clickable_control(item)
 
 
 def _is_navigation_link(item: Dict[str, Any]) -> bool:
@@ -699,7 +754,7 @@ class PageProfileBuilder:
                     elements.append(nested_copy)
 
         for item in _as_list(page_mapping.get("controls")):
-            runtime_item = self._runtime_control_to_element(item, "controls")
+            runtime_item = self._runtime_control_to_element(item, "runtime_profile.controls")
             if runtime_item:
                 add_item(runtime_item, "runtime_profile.controls")
 
@@ -707,7 +762,7 @@ class PageProfileBuilder:
             if not isinstance(frame, dict):
                 continue
             for item in _as_list(frame.get("controls")):
-                runtime_item = self._runtime_control_to_element(item, "frames.controls")
+                runtime_item = self._runtime_control_to_element(item, "runtime_profile.frames.controls")
                 if runtime_item:
                     add_item(runtime_item, "runtime_profile.frames.controls")
 
@@ -881,7 +936,7 @@ class PageProfileBuilder:
             return "click"
         if is_clickable and ("download" in blob or "template" in blob or "ダウンロード" in blob or "fndownload" in blob):
             return "download"
-        if "search" in blob:
+        if is_clickable and ("search" in blob or "検索" in blob):
             return "search"
         if "fnsubmit" in blob or "submitform" in blob or ".submit(" in blob or input_type == "submit":
             return "submit"

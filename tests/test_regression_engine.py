@@ -71,6 +71,28 @@ def test_select_pages_target_page_ignores_risk(tmp_path):
     assert [page["page_id"] for page in pages] == ["low.jsp"]
 
 
+def test_select_pages_accepts_business_action_alias_for_actual_frame(tmp_path):
+    mapping = {
+        "page_mappings": [
+            {"page_id": "GazetteMainFrame.jsp", "risk": "High"},
+            {"page_id": "NonjavaScreeningMainFrame.jsp", "risk": "High"},
+            {"page_id": "WwPersonAidMain.jsp", "risk": "High"},
+        ]
+    }
+    mapping_path = tmp_path / "page_mapping.json"
+    mapping_path.write_text(json.dumps(mapping), encoding="utf-8")
+
+    engine = RegressionEngine(mapping_path=str(mapping_path), output_dir=str(tmp_path / "out"))
+
+    gazette = engine.select_pages(target_page="JpGazetteForNumberSearch.do")
+    screening = engine.select_pages(target_page="JpNonjavaScreeningForEasySearch.do?method=unRead")
+    person_aid = engine.select_pages(target_page="WwPersonalNameDicDispForEasySearch.do")
+
+    assert [page["page_id"] for page in gazette] == ["GazetteMainFrame.jsp"]
+    assert [page["page_id"] for page in screening] == ["NonjavaScreeningMainFrame.jsp"]
+    assert [page["page_id"] for page in person_aid] == ["WwPersonAidMain.jsp"]
+
+
 def test_select_pages_target_page_reports_missing_mapping(tmp_path):
     mapping = {"page_mappings": [{"page_id": "exists.jsp", "risk": "High"}]}
     mapping_path = tmp_path / "page_mapping.json"
@@ -122,6 +144,32 @@ def test_route_map_catalog_selects_verified_route_for_target(tmp_path):
     assert route["route_map_path"] == str(route_map)
 
 
+def test_route_map_catalog_accepts_business_action_alias(tmp_path):
+    route_map = tmp_path / "usable_route_map.json"
+    route_map.write_text(
+        json.dumps(
+            {
+                "schema": "moonlight.usable_route_map.v1",
+                "verified": [
+                    {
+                        "route_id": "gazette",
+                        "status": "verified",
+                        "target_page": "GazetteMainFrame.jsp",
+                        "target_page_name": "gazettemainframe.jsp",
+                        "source_route": {"length": 3},
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    catalog = RouteMapCatalog([route_map])
+    route = catalog.find_for_target("JpGazetteForNumberSearch.do")
+
+    assert route["route_id"] == "gazette"
+
+
 def test_page_matches_mapping_checks_frame_urls(tmp_path):
     mapping_path = tmp_path / "page_mapping.json"
     mapping_path.write_text(json.dumps({"page_mappings": []}), encoding="utf-8")
@@ -142,6 +190,92 @@ def test_page_matches_mapping_checks_frame_urls(tmp_path):
         Page(),
         {"page_id": "ProjectMemberUploadDisp.jsp", "entry_url": "ProjectMemberUploadDisp.do"},
     )
+
+
+def test_page_matches_mapping_accepts_business_action_alias(tmp_path):
+    mapping_path = tmp_path / "page_mapping.json"
+    mapping_path.write_text(json.dumps({"page_mappings": []}), encoding="utf-8")
+    engine = RegressionEngine(mapping_path=str(mapping_path), output_dir=str(tmp_path / "out"))
+
+    class Page:
+        url = "https://legacy.example/patlics/JpGazetteForNumberSearch.do"
+        frames = []
+
+    assert engine._page_matches_mapping(Page(), {"page_id": "GazetteMainFrame.jsp"})
+
+
+def test_passive_window_close_assertion_does_not_force_target_reopen():
+    action_case = {
+        "case_type": "assert_visible",
+        "action_type": "assert_visible",
+        "label": "Result panel confirm/cancel controls are visible",
+        "pre_steps": [
+            {"action_type": "assert_visible", "locator": "input[name='rbExpand'][value='+']"},
+        ],
+        "main_step": {
+            "action_type": "assert_visible",
+            "locator": "input[onclick*='window.close']",
+        },
+    }
+
+    assert not RegressionEngine._requires_target_reopen_after_action(
+        action_case,
+        "assert_visible",
+        "assert_visible",
+        {"status": "PASS"},
+        {"status": "PASS"},
+    )
+
+
+def test_takeover_recovery_prefers_open_target_popup_over_parent_route_step(tmp_path):
+    mapping_path = tmp_path / "page_mapping.json"
+    mapping_path.write_text(json.dumps({"page_mappings": []}), encoding="utf-8")
+    engine = RegressionEngine(mapping_path=str(mapping_path), output_dir=str(tmp_path / "out"))
+
+    class Frame:
+        def __init__(self, url):
+            self.url = url
+
+    class Context:
+        def __init__(self):
+            self.pages = []
+
+    class Page:
+        def __init__(self, url, context, frames=None):
+            self.url = url
+            self.context = context
+            self.frames = frames or []
+            self.front = False
+
+        def is_closed(self):
+            return False
+
+        def bring_to_front(self):
+            self.front = True
+
+        def wait_for_load_state(self, *_args, **_kwargs):
+            return None
+
+    context = Context()
+    parent = Page(
+        "https://legacy.example/patlics/PatlicsTopMain.do",
+        context,
+        frames=[Frame("https://legacy.example/patlics/WwEasySearchMain.do")],
+    )
+    popup = Page("https://legacy.example/patlics/WwPersonalNameDicDispForEasySearch.do", context)
+    context.pages = [parent, popup]
+
+    selected, nav = engine._takeover_recovery_page(
+        parent,
+        {
+            "target_page": "WwPersonAidMain.jsp",
+            "source_route": {"entry_url": "PatlicsTopMain.do"},
+        },
+    )
+
+    assert selected is popup
+    assert popup.front
+    assert nav["target_page_detected"] is True
 
 
 def test_render_report_contains_side_by_side_sections(tmp_path):
@@ -237,6 +371,14 @@ def test_infer_semantic_action_uses_scanner_hints():
     assert infer_semantic_action("uncheck", {"kind": "checkbox"}) == "uncheck"
     assert infer_semantic_action("file_download", {"locator": 'input[name="btSave"][type="button"]'}) == "download"
     assert infer_semantic_action("download_template", {"kind": "link"}) == "download"
+    assert infer_semantic_action("browser_dialog", {"expected_type": "browser_dialog"}) == "browser_dialog"
+    assert infer_semantic_action("click", {"onclick": "window.print()", "expected_type": "print_invocation"}) == "print"
+    assert infer_semantic_action("assert_visible", {}) == "assert_visible"
+    assert infer_semantic_action("assert_attached", {}) == "assert_attached"
+    assert infer_semantic_action("expect_text", {}) == "assert_text"
+    assert infer_semantic_action("expect_value", {}) == "assert_value"
+    assert infer_semantic_action("assert_url", {}) == "assert_url"
+    assert infer_semantic_action("fill", {"label": "Selected result can be confirmed"}) == "fill"
 
 
 def test_action_dedupe_prefers_locator_change_over_full_action_fallback(tmp_path):
@@ -468,6 +610,57 @@ def test_upload_submit_button_step_clicks_onclick_instead_of_request_submit(tmp_
     assert calls[1]["semantic_action"] == "click"
 
 
+def test_scenario_step_semantics_do_not_inherit_parent_kind(tmp_path, monkeypatch):
+    mapping_path = tmp_path / "page_mapping.json"
+    mapping_path.write_text(json.dumps({"page_mappings": []}), encoding="utf-8")
+    engine = RegressionEngine(mapping_path=str(mapping_path), output_dir=str(tmp_path / "out"))
+    calls = []
+
+    def fake_execute_action(page, action_type, locator, value=None, **kwargs):
+        context = kwargs.get("action_context") or {}
+        calls.append(
+            {
+                "action_type": action_type,
+                "locator": locator,
+                "value": value,
+                "semantic_action": infer_semantic_action(action_type, context),
+            }
+        )
+        return {"status": "PASS", "state": {"url": "http://example.test/after", "screenshot": str(tmp_path / "after.png")}}
+
+    monkeypatch.setattr(regression_engine_module, "execute_action", fake_execute_action)
+    action_case = {
+        "case_id": "person-aid-middle",
+        "case_type": "assert_text",
+        "action_type": "assert_text",
+        "kind": "assert_text",
+        "label": "Middle-match keyword search refreshes the result frame",
+        "expected_type": "result_list",
+        "expected_value": "11 HEALTH",
+        "pre_steps": [
+            {"action_type": "fill", "locator": "input[name='keyword'][type='text']", "value": "11"},
+            {"action_type": "check", "locator": "input[name='searchType'][value='3']"},
+            {"action_type": "click", "locator": "form[name='WwPersonalNameDicSearchForm'] input[type='submit']"},
+        ],
+        "main_step": {"action_type": "assert_text", "locator": "#tableBody", "value": "11 HEALTH"},
+    }
+
+    result = engine._execute_action_case(
+        object(),
+        action_case,
+        side="legacy",
+        browser_name="edge",
+        capture_dir=tmp_path,
+        test_id="person_aid_middle",
+    )
+
+    assert result["status"] == "PASS"
+    assert calls[0]["semantic_action"] == "fill"
+    assert calls[0]["value"] == "11"
+    assert calls[1]["semantic_action"] == "check"
+    assert calls[-1]["semantic_action"] == "assert_text"
+
+
 def test_scenario_stops_after_step_closes_page(tmp_path, monkeypatch):
     mapping_path = tmp_path / "page_mapping.json"
     mapping_path.write_text(json.dumps({"page_mappings": []}), encoding="utf-8")
@@ -560,6 +753,172 @@ def test_checklist_loader_filters_optional_modes(tmp_path):
     )
     full_cases = full_engine._load_checklist_cases("Page.jsp")
     assert {case["label"] for case in full_cases} == {"auto-1", "semi-1", "destroy-1", "neg-1"}
+
+
+def test_guided_json_checklist_loader_builds_scenario(tmp_path):
+    mapping_path = tmp_path / "page_mapping.json"
+    mapping_path.write_text(json.dumps({"page_mappings": []}), encoding="utf-8")
+    checklist = tmp_path / "guided_checklist.json"
+    checklist.write_text(
+        json.dumps(
+            {
+                "schema": "moonlight.guided_checklist.v1",
+                "page_id": "JpBiblioList.jsp",
+                "cases": [
+                    {
+                        "case_id": "biblio-initial",
+                        "title": "書誌一覧初期表示確認",
+                        "risk_level": "safe",
+                        "automation_mode": "auto",
+                        "steps": [
+                            {"action_type": "assert_visible", "locator": "table"},
+                            {"action_type": "assert_text", "locator": "__page__", "value": "検索結果一覧"},
+                        ],
+                        "expected": {"type": "text_visible", "value": "検索結果一覧"},
+                    }
+                ],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    engine = RegressionEngine(mapping_path=str(mapping_path), output_dir=str(tmp_path / "out"), checklist_path=str(checklist))
+    cases = engine._load_checklist_cases("JpBiblioList.jsp")
+
+    assert engine._last_checklist_debug["format"] == "guided_json"
+    assert engine._last_checklist_debug["status"] == "loaded"
+    assert cases[0]["case_id"] == "biblio-initial"
+    assert cases[0]["pre_steps"] == [{"action_type": "assert_visible", "locator": "table"}]
+    assert cases[0]["main_step"]["action_type"] == "assert_text"
+    assert cases[0]["main_step"]["value"] == "検索結果一覧"
+
+
+def test_guided_json_checklist_loader_filters_modes_and_destructive(tmp_path):
+    mapping_path = tmp_path / "page_mapping.json"
+    mapping_path.write_text(json.dumps({"page_mappings": []}), encoding="utf-8")
+    checklist = tmp_path / "guided_checklist.json"
+    checklist.write_text(
+        json.dumps(
+            {
+                "page_id": "Page.jsp",
+                "cases": [
+                    {"case_id": "safe", "automation_mode": "auto", "steps": [{"action_type": "snapshot"}]},
+                    {"case_id": "semi", "automation_mode": "semi-auto", "steps": [{"action_type": "snapshot"}]},
+                    {
+                        "case_id": "destroy",
+                        "automation_mode": "auto",
+                        "risk_level": "destructive",
+                        "steps": [{"action_type": "click", "locator": "#delete"}],
+                    },
+                ],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    default_engine = RegressionEngine(mapping_path=str(mapping_path), output_dir=str(tmp_path / "out"), checklist_path=str(checklist))
+    default_cases = default_engine._load_checklist_cases("Page.jsp")
+    assert [case["case_id"] for case in default_cases] == ["safe"]
+    coverage = {row["case_id"]: row for row in default_engine._checklist_case_rows["page.jsp"]}
+    assert "--include-semi-auto" in coverage["semi"]["excluded_reason"]
+    assert "--include-destructive" in coverage["destroy"]["excluded_reason"]
+
+    full_engine = RegressionEngine(
+        mapping_path=str(mapping_path),
+        output_dir=str(tmp_path / "out2"),
+        checklist_path=str(checklist),
+        include_semi_auto=True,
+        include_destructive=True,
+    )
+    full_cases = full_engine._load_checklist_cases("Page.jsp")
+    assert [case["case_id"] for case in full_cases] == ["safe", "semi", "destroy"]
+
+
+def test_guided_json_checklist_loader_filters_negative_profiles(tmp_path):
+    mapping_path = tmp_path / "page_mapping.json"
+    mapping_path.write_text(json.dumps({"page_mappings": []}), encoding="utf-8")
+    checklist = tmp_path / "guided_negative_checklist.json"
+    checklist.write_text(
+        json.dumps(
+            {
+                "page_id": "Page.jsp",
+                "cases": [
+                    {"case_id": "safe", "automation_mode": "auto", "steps": [{"action_type": "snapshot"}]},
+                    {
+                        "case_id": "neg-js",
+                        "automation_mode": "auto-negative",
+                        "case_type": "negative_js_error",
+                        "action_type": "negative_js_error",
+                        "steps": [{"action_type": "negative_js_error", "locator": "#highlight"}],
+                    },
+                    {
+                        "case_id": "neg-http",
+                        "automation_mode": "auto-negative",
+                        "case_type": "negative_http_500",
+                        "action_type": "negative_http_500",
+                        "steps": [{"action_type": "negative_http_500", "locator": "#pdf", "value": "**/*PDF*"}],
+                    },
+                ],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    default_engine = RegressionEngine(mapping_path=str(mapping_path), output_dir=str(tmp_path / "out"), checklist_path=str(checklist))
+    default_cases = default_engine._load_checklist_cases("Page.jsp")
+    assert [case["case_id"] for case in default_cases] == ["safe"]
+    coverage = {row["case_id"]: row for row in default_engine._checklist_case_rows["page.jsp"]}
+    assert "--include-negative" in coverage["neg-js"]["excluded_reason"]
+
+    filtered_engine = RegressionEngine(
+        mapping_path=str(mapping_path),
+        output_dir=str(tmp_path / "out2"),
+        checklist_path=str(checklist),
+        include_negative=True,
+        negative_profile="negative_http_500",
+    )
+    filtered_cases = filtered_engine._load_checklist_cases("Page.jsp")
+    assert [case["case_id"] for case in filtered_cases] == ["safe", "neg-http"]
+    filtered_coverage = {row["case_id"]: row for row in filtered_engine._checklist_case_rows["page.jsp"]}
+    assert "--negative-profile" in filtered_coverage["neg-js"]["excluded_reason"]
+
+
+def test_checklist_loader_matches_page_stem_without_extension(tmp_path):
+    pytest.importorskip("openpyxl")
+    from openpyxl import Workbook
+
+    mapping_path = tmp_path / "page_mapping.json"
+    mapping_path.write_text(json.dumps({"page_mappings": []}), encoding="utf-8")
+    checklist = tmp_path / "migration_checklist.xlsx"
+
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "Checklist"
+    sheet.append(
+        [
+            "case_id",
+            "page_id",
+            "automation_mode",
+            "case_type",
+            "action_type",
+            "locator",
+            "destructive",
+            "enabled",
+        ]
+    )
+    sheet.append(["stem-1", "page", "auto", "initial_display", "snapshot", "", "false", "true"])
+    workbook.save(checklist)
+
+    engine = RegressionEngine(mapping_path=str(mapping_path), output_dir=str(tmp_path / "out"), checklist_path=str(checklist))
+    cases = engine._load_checklist_cases("Page.jsp")
+
+    assert [case["case_id"] for case in cases] == ["stem-1"]
+    coverage = engine._checklist_case_rows["page.jsp"]
+    assert coverage[0]["page_id"] == "page"
+    assert engine._last_checklist_debug["status"] == "loaded"
 
 
 def test_checklist_loader_preserves_negative_expected_value_and_steps(tmp_path):

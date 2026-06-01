@@ -5,12 +5,15 @@ import pytest
 
 from src.gui_command_builder import (
     build_regression_command,
+    guided_checklist_path_for,
+    starter_guided_checklist,
     html_report_path,
     load_negative_profile_options,
     load_upload_case_options,
     load_page_options,
     negative_profile_labels,
     regression_output_dir,
+    write_starter_guided_checklist,
     upload_case_option_labels,
 )
 
@@ -87,6 +90,46 @@ def test_load_page_options_merges_mapping_routes_and_recent_reports(tmp_path):
     assert by_page["ProjectListUploadDisp.jsp"]["risk"] == "High"
     assert by_page["ProjectListUploadErr.jsp"]["route_map_path"] == str(route_map)
     assert "recent" in by_page["UopcUploadListDispJP.jsp"]["sources"]
+    assert "JpGazetteForNumberSearch.do" in by_page
+    assert "GazetteMainFrame.jsp" in by_page
+    assert "JpNonjavaScreeningForEasySearch.do?method=unRead" in by_page
+    assert "NonjavaScreeningMainFrame.jsp" in by_page
+    assert "WwPersonalNameDicDispForEasySearch.do" in by_page
+    assert "WwPersonAidMain.jsp" in by_page
+
+
+def test_guided_checklist_starter_path_and_payload(tmp_path):
+    path = guided_checklist_path_for(
+        "NonjavaScreeningMainFrame.jsp",
+        base_dir=tmp_path,
+    )
+    assert path == tmp_path / "jpnonjavascreeningforeasysearch_unread.guided_checklist.json"
+
+    person_path = guided_checklist_path_for("WwPersonAidMain.jsp", base_dir=tmp_path)
+    assert person_path == tmp_path / "wwpersonaidmain.guided_checklist.json"
+
+    generic_path = guided_checklist_path_for("WwSearchAid.jsp", base_dir=tmp_path)
+    assert generic_path == tmp_path / "WwSearchAid_checklist.json"
+
+    payload = starter_guided_checklist("GazetteMainFrame.jsp")
+    assert payload["schema"] == "moonlight.guided_checklist.v1"
+    assert payload["template_id"] == "gazette_detail"
+    assert len(payload["cases"]) >= 25
+    assert payload["cases"][0]["steps"][0]["action_type"] == "assert_visible"
+    assert any(case["automation_mode"] == "semi-auto" for case in payload["cases"])
+    assert any(case["automation_mode"] == "auto-negative" for case in payload["cases"])
+    assert any(case.get("case_type") == "negative_http_500" for case in payload["cases"])
+    assert any(case["case_id"] == "gazette_latest_information_panel_visible" for case in payload["cases"])
+
+    output = write_starter_guided_checklist(tmp_path / "starter.json", "JpGazetteForNumberSearch.do")
+    written = json.loads(output.read_text(encoding="utf-8"))
+    assert written["page_id"] == "JpGazetteForNumberSearch.do"
+
+    person_payload = starter_guided_checklist("WwPersonalNameDicDispForEasySearch.do")
+    assert person_payload["template_id"] == "person_name_dictionary_assist"
+    assert any(case["case_id"] == "person_aid_middle_match_search_results" for case in person_payload["cases"])
+    assert any(case["automation_mode"] == "manual" for case in person_payload["cases"])
+    assert any(case.get("case_type") == "negative_http_500" for case in person_payload["cases"])
 
 
 def test_load_upload_case_options_filters_page_upload_cases(tmp_path):
@@ -167,6 +210,48 @@ def test_load_upload_case_options_filters_page_upload_cases(tmp_path):
     assert "project-upload-valid" in labels[0]
 
 
+def test_load_upload_case_options_reads_guided_json(tmp_path):
+    checklist = tmp_path / "guided.json"
+    checklist.write_text(
+        json.dumps(
+            {
+                "schema": "moonlight.guided_checklist.v1",
+                "page_id": "Upload.do",
+                "cases": [
+                    {
+                        "case_id": "guided-upload",
+                        "title": "Guided upload",
+                        "automation_mode": "auto",
+                        "steps": [
+                            {
+                                "action_type": "upload",
+                                "locator": "input[type='file']",
+                            },
+                            {
+                                "action_type": "click",
+                                "locator": "input[value='Submit']",
+                            },
+                        ],
+                    },
+                    {
+                        "case_id": "guided-snapshot",
+                        "title": "Snapshot",
+                        "automation_mode": "auto",
+                        "steps": [{"action_type": "snapshot", "locator": "__page__"}],
+                    },
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    cases = load_upload_case_options(checklist, "Upload.jsp")
+
+    assert [case["case_id"] for case in cases] == ["guided-upload"]
+    assert cases[0]["locator"] == "input[type='file']"
+    assert cases[0]["submit_locator"] == "input[value='Submit']"
+
+
 def test_load_negative_profile_options_reads_page_checklist_cases(tmp_path):
     pytest.importorskip("openpyxl")
     from openpyxl import Workbook
@@ -188,3 +273,30 @@ def test_load_negative_profile_options_reads_page_checklist_cases(tmp_path):
     assert "negative_js_error" in profiles
     assert profiles["negative_http_500"]["description"] == "HTTP 500 evidence"
     assert any(label.startswith("negative_js_error") for label in labels)
+
+
+def test_load_negative_profile_options_reads_guided_json(tmp_path):
+    checklist = tmp_path / "guided.json"
+    checklist.write_text(
+        json.dumps(
+            {
+                "schema": "moonlight.guided_checklist.v1",
+                "page_id": "Upload.do",
+                "cases": [
+                    {
+                        "case_id": "neg-js",
+                        "title": "Guided JS error",
+                        "case_type": "negative_js_error",
+                        "action_type": "negative_js_error",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    options = load_negative_profile_options(checklist, "Upload.jsp")
+    profiles = {item["profile"]: item for item in options}
+
+    assert profiles["negative_js_error"]["description"] == "Guided JS error"
+    assert "negative_http_500" in profiles

@@ -136,7 +136,7 @@ def _capture_frame_controls(frame, frame_index: int) -> Dict[str, Any]:
         if (value) return `${tag}[value="${attrEscape(value)}"]`;
         return pathSelector(el);
       };
-      return Array.from(document.querySelectorAll('form,input,select,textarea,button,a,table,[onclick],[formaction]'))
+      const controls = Array.from(document.querySelectorAll('form,input,select,textarea,button,a,table,[onclick],[formaction]'))
         .filter(includeElement)
         .slice(0, 1000)
         .map(el => {
@@ -185,15 +185,28 @@ def _capture_frame_controls(frame, frame_index: int) -> Dict[str, Any]:
             raw: (el.outerHTML || '').slice(0, 1500)
           };
         });
+      return {
+        controls,
+        html: document.documentElement ? document.documentElement.outerHTML : '',
+        text: (document.body ? document.body.innerText || '' : '').slice(0, 8000)
+      };
     }
     """
-    controls = frame.evaluate(script)
-    if not isinstance(controls, list):
-        controls = []
+    payload = frame.evaluate(script)
+    if isinstance(payload, dict):
+        controls = payload.get("controls") if isinstance(payload.get("controls"), list) else []
+        frame_html = str(payload.get("html") or "")
+        frame_text = str(payload.get("text") or "")
+    else:
+        controls = payload if isinstance(payload, list) else []
+        frame_html = ""
+        frame_text = ""
     return {
         "frame_index": frame_index,
         "frame_url": frame.url,
         "controls": controls,
+        "html": frame_html,
+        "text": frame_text,
     }
 
 

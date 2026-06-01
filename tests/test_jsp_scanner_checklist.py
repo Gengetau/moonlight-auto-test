@@ -2,6 +2,9 @@ import json
 
 from src.checklist_generator import generate_cases, page_entries, plan_page_specific_cases, universal_checklist_markdown_lines, write_excel
 from src.jsp_scanner import scan_jsp_source
+from src.page_evidence_builder import PageEvidenceBuilder
+from src.page_spec_checklist_generator import page_spec_to_cases
+from src.page_spec_generator import page_spec_cache_path
 
 
 def test_spring_form_tags_are_classified_without_inflating_forms():
@@ -264,3 +267,223 @@ def test_checklist_generation_appends_existing_runtime_profile_pages(tmp_path):
     runtime_profiles = [profile for profile in profiles if profile.get("page_id") == "RuntimeUpload.jsp"]
     assert runtime_profiles
     assert runtime_profiles[0]["runtime_profile_path"] == str(profile_path)
+
+
+def test_cached_manual_page_spec_generates_preconditioned_cases(tmp_path):
+    page_spec_dir = tmp_path / "page_specs"
+    spec_path = page_spec_cache_path("Search.jsp", page_spec_dir)
+    spec_path.parent.mkdir()
+    spec_path.write_text(
+        json.dumps(
+            {
+                "schema": "moonlight.page_spec.v1",
+                "page_id": "Search.jsp",
+                "page_type": "search_page",
+                "business_summary": "Search page with a result export.",
+                "capabilities": {
+                    "initial_display": True,
+                    "search": True,
+                    "result_table": True,
+                    "file_download": True,
+                },
+                "states": [
+                    {"id": "initial", "description": "loaded"},
+                    {"id": "search_ready", "description": "condition entered"},
+                    {"id": "result_ready", "description": "results shown"},
+                ],
+                "operations": [
+                    {
+                        "id": "input_keyword",
+                        "type": "fill",
+                        "from_state": "initial",
+                        "to_state": "search_ready",
+                        "steps": [{"action_type": "fill", "locator": "input[name='keyword']", "value": "${SEARCH_KEYWORD}"}],
+                    },
+                    {
+                        "id": "execute_search",
+                        "type": "search",
+                        "title": "Search main path",
+                        "from_state": "search_ready",
+                        "to_state": "result_ready",
+                        "requires": ["input_keyword"],
+                        "steps": [{"action_type": "click", "locator": "input[name='search']"}],
+                        "expected": {"type": "result_update", "value": "result_ready"},
+                    },
+                    {
+                        "id": "file_output",
+                        "type": "file_download",
+                        "title": "Export results",
+                        "from_state": "result_ready",
+                        "requires": ["execute_search"],
+                        "steps": [{"action_type": "download", "locator": "input[name='fileOutput']"}],
+                        "expected": {"type": "download", "value": ""},
+                    },
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    scan_data = {
+        "page_mappings": [
+            {
+                "page_id": "Search.jsp",
+                "elements": [
+                    {"kind": "field", "tag": "input", "locator": "input[name='keyword']", "attributes": {"name": "keyword", "type": "text"}},
+                    {"kind": "button", "tag": "input", "locator": "input[name='search']", "attributes": {"name": "search", "type": "button"}},
+                    {"kind": "button", "tag": "input", "locator": "input[name='fileOutput']", "attributes": {"name": "fileOutput", "type": "button"}},
+                ],
+            }
+        ]
+    }
+
+    cases, skipped, profiles = plan_page_specific_cases(
+        scan_data,
+        use_page_spec=True,
+        page_spec_dir=page_spec_dir,
+    )
+
+    assert not skipped
+    by_type = {case.case_type: case for case in cases}
+    assert by_type["search_normal"].generated_by == "ManualPageSpec"
+    assert json.loads(by_type["search_normal"].pre_steps)[0]["locator"] == "input[name='keyword']"
+    assert json.loads(by_type["file_download"].pre_steps)[-1]["locator"] == "input[name='search']"
+    assert json.loads(by_type["file_download"].main_step)["locator"] == "input[name='fileOutput']"
+    assert profiles[0]["page_spec_path"] == str(spec_path)
+
+
+def test_manual_page_spec_target_page_filters_before_export(tmp_path):
+    page_spec_dir = tmp_path / "page_specs"
+    spec_path = page_spec_cache_path("Second.jsp", page_spec_dir)
+    spec_path.parent.mkdir()
+    spec_path.write_text(
+        json.dumps(
+            {
+                "schema": "moonlight.page_spec.v1",
+                "page_id": "Second.jsp",
+                "capabilities": {"initial_display": True},
+                "operations": [
+                    {
+                        "id": "initial_display",
+                        "type": "initial_display",
+                        "steps": [{"action_type": "snapshot", "locator": "__page__"}],
+                        "expected": {"type": "visual", "value": ""},
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    scan_data = {
+        "page_mappings": [
+            {"page_id": "First.jsp", "elements": []},
+            {"page_id": "Second.jsp", "elements": []},
+        ]
+    }
+
+    cases, _, profiles = plan_page_specific_cases(
+        scan_data,
+        target_pages=["Second.jsp"],
+        use_page_spec=True,
+        page_spec_dir=page_spec_dir,
+    )
+
+    assert {case.page for case in cases} == {"Second.jsp"}
+    assert profiles[0]["page_id"] == "Second.jsp"
+    assert not (page_spec_dir / "first.page_evidence.json").exists()
+    assert (page_spec_dir / "second.page_evidence.json").exists()
+
+
+def test_page_evidence_includes_static_dom_and_validation_layers():
+    html = """
+    <html><head><script>
+    function validateWwEasySearchForm(form) {
+      return validateDate(form) && validateWordLength(form);
+    }
+    function DateValidations () {
+      this.aa = new Array("i7040[0]", "公報日(from) は正しい日付ではありません", new Function ("varName", "this.datePatternStrict='yyyyMMdd'; return this[varName];"));
+    }
+    function wordLength () {
+      this.aa = new Array("i0790", "全文 で一単語の最短制限は 2文字です", new Function ("varName", "this.kind='moji'; this.check='min'; this.wlength='2'; return this[varName];"));
+    }
+    </script></head>
+    <body>
+      <form action="./WwEasySearch.do">
+        <table>
+          <tr><td><a href="javaScript:showTree('0')">日付系</a></td></tr>
+          <tr style="display:none"><td><input type="checkbox" name="itemId" value="7040" onclick="setTxtfield(this, '7040')"></td><td>公報日</td></tr>
+          <tr><td><a href="javaScript:showTree('2')">文章系</a></td></tr>
+          <tr style="display:none"><td><input type="checkbox" name="itemId" value="0790" onclick="setTxtfield(this, '0790')"></td><td>全文</td></tr>
+        </table>
+        <input type="button" name="search" value="検索" onclick="fnSubmit('./WwEasySearch.do')">
+      </form>
+    </body></html>
+    """
+
+    evidence = PageEvidenceBuilder().build({"page_id": "WwEasySearchMain.jsp", "html": html})
+    static_profile = evidence["static_dom_profile"]
+    validation = evidence["validation_profile"]
+
+    assert static_profile["hidden_control_count"] >= 2
+    assert static_profile["search_item_category_count"] == 2
+    assert static_profile["search_item_categories"][0]["items"][0]["item_id"] == "7040"
+    assert static_profile["dynamic_input_mapping"][0]["input_locators"] == ['input[name="i7040[0]"]']
+    assert validation["validation_sequence"] == ["validateDate", "validateWordLength"]
+    assert {rule["rule"] for rule in validation["validation_rules"]} >= {"date", "word_length"}
+
+
+def test_page_spec_conversion_handles_navigation_and_popup_downloads():
+    spec = {
+        "page_id": "Search.jsp",
+        "capabilities": {"initial_display": True, "file_download": True, "popup": True},
+        "operations": [
+            {
+                "id": "file_output",
+                "type": "download",
+                "steps": [{"action_type": "click", "locator": "input[name='fileOutput']"}],
+                "expected": {"type": "download", "value": ""},
+            },
+            {
+                "id": "reserve_download",
+                "type": "download",
+                "steps": [{"action_type": "click", "locator": "input[name='reserve']"}],
+                "expected": {"type": "popup_or_navigation", "value": "reserve screen opened"},
+            },
+            {
+                "id": "show_biblio_list",
+                "type": "navigation",
+                "steps": [{"action_type": "click", "locator": "input[name='biblio']"}],
+                "expected": {"type": "navigation", "value": "list displayed"},
+            },
+            {
+                "id": "clear_conditions",
+                "type": "form",
+                "steps": [{"action_type": "click", "locator": "input[name='clear']"}],
+                "expected": {"type": "form_reset", "value": "cleared"},
+            },
+            {
+                "id": "save_confirm",
+                "type": "browser_dialog",
+                "steps": [{"action_type": "browser_dialog", "locator": "input[name='save']"}],
+                "expected": {"type": "browser_dialog", "value": "saved"},
+            },
+            {
+                "id": "print_list",
+                "type": "print",
+                "steps": [{"action_type": "print", "locator": "input[name='print']"}],
+                "expected": {"type": "print_invocation", "value": ""},
+            },
+        ],
+    }
+
+    cases = {case["case_id"]: case for case in page_spec_to_cases(spec)}
+
+    assert cases["search-file_output-001"]["case_type"] == "file_download"
+    assert cases["search-reserve_download-002"]["case_type"] == "link_navigation"
+    assert cases["search-show_biblio_list-003"]["case_type"] == "link_navigation"
+    assert cases["search-clear_conditions-004"]["case_type"] == "form_action"
+    assert cases["search-save_confirm-005"]["case_type"] == "browser_dialog"
+    assert cases["search-save_confirm-005"]["action_type"] == "browser_dialog"
+    assert cases["search-save_confirm-005"]["expected_type"] == "browser_dialog"
+    assert cases["search-print_list-006"]["case_type"] == "print_output"
+    assert cases["search-print_list-006"]["action_type"] == "print"
+    assert cases["search-print_list-006"]["expected_type"] == "print_invocation"

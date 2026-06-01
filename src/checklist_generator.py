@@ -13,10 +13,35 @@ if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
 from src.coverage_policy import CHECKLIST_SECTIONS, CASE_DEPTH  # noqa: E402
+from src.page_aliases import page_aliases  # noqa: E402
 try:  # noqa: E402
     from src.page_case_planner import PageCasePlanner
 except ImportError:  # pragma: no cover - direct script execution fallback
     from page_case_planner import PageCasePlanner  # type: ignore
+try:  # noqa: E402
+    from src.page_evidence_builder import PageEvidenceBuilder
+    from src.page_spec_checklist_generator import page_spec_to_cases, page_spec_to_profile
+    from src.page_spec_generator import (
+        PageSpecError,
+        page_evidence_cache_path,
+        load_cached_page_spec,
+        page_spec_prompt_cache_path,
+        page_spec_cache_path,
+        write_page_evidence,
+        write_page_spec_prompt,
+    )
+except ImportError:  # pragma: no cover - direct script execution fallback
+    from page_evidence_builder import PageEvidenceBuilder  # type: ignore
+    from page_spec_checklist_generator import page_spec_to_cases, page_spec_to_profile  # type: ignore
+    from page_spec_generator import (  # type: ignore
+        PageSpecError,
+        page_evidence_cache_path,
+        load_cached_page_spec,
+        page_spec_prompt_cache_path,
+        page_spec_cache_path,
+        write_page_evidence,
+        write_page_spec_prompt,
+    )
 
 
 SEVERITY_ORDER = {"High": 0, "Medium": 1, "Low": 2}
@@ -40,6 +65,7 @@ AUTO_ACTION_TYPES = {
 }
 RUNTIME_PROFILE_SCHEMA = "moonlight.runtime_page_profile.v1"
 DEFAULT_RUNTIME_PROFILE_DIR = Path("generated/valid/runtime_profile")
+DEFAULT_PAGE_SPEC_DIR = Path("generated/valid/page_specs")
 
 
 @dataclass(frozen=True)
@@ -148,7 +174,17 @@ def page_match_keys(value: Any) -> set:
         return set()
     leaf = text.rsplit("/", 1)[-1]
     stem = leaf.rsplit(".", 1)[0] if "." in leaf else leaf
-    return {text, leaf, stem}
+    return {text, leaf, stem} | page_aliases(value)
+
+
+def parse_target_pages(values: Optional[Sequence[str]]) -> List[str]:
+    targets: List[str] = []
+    for value in values or []:
+        for part in as_text(value).replace("\n", ",").split(","):
+            cleaned = part.strip()
+            if cleaned:
+                targets.append(cleaned)
+    return targets
 
 
 def _page_values_for_match(page: Dict[str, Any]) -> List[Any]:
@@ -166,6 +202,20 @@ def _page_values_for_match(page: Dict[str, Any]) -> List[Any]:
         if isinstance(source, list):
             values.extend(source)
     return values
+
+
+def page_matches_targets(page: Dict[str, Any], target_pages: Optional[Sequence[str]]) -> bool:
+    targets = parse_target_pages(target_pages)
+    if not targets:
+        return True
+    page_keys = set()
+    for value in _page_values_for_match(page):
+        page_keys.update(page_match_keys(value))
+    page_keys.update(page_match_keys(page_name_of(page)))
+    target_keys = set()
+    for target in targets:
+        target_keys.update(page_match_keys(target))
+    return bool(page_keys.intersection(target_keys))
 
 
 def runtime_profile_paths(search_dir: Path = DEFAULT_RUNTIME_PROFILE_DIR) -> List[Path]:
@@ -943,6 +993,10 @@ def planned_case_to_test_case(case: Dict[str, Any]) -> TestCase:
         evidence_parts.append(f"profile_source={as_text(case.get('profile_source'))}")
     if case.get("runtime_profile_path"):
         evidence_parts.append(f"runtime_profile_path={as_text(case.get('runtime_profile_path'))}")
+    if case.get("page_spec_path"):
+        evidence_parts.append(f"page_spec_path={as_text(case.get('page_spec_path'))}")
+    if case.get("evidence"):
+        evidence_parts.append(as_text(case.get("evidence")))
     return TestCase(
         title=as_text(case.get("title"), as_text(case.get("case_type"), "planned case")),
         objective=as_text(case.get("objective")),
@@ -981,11 +1035,67 @@ def case_priority_order(case: TestCase) -> Tuple[int, str]:
         return 1000 + SEVERITY_ORDER.get(case.severity, 99), case.severity
 
 
+def _page_spec_skipped(page_id: str, reason: str, capabilities: Dict[str, Any]) -> Dict[str, Any]:
+    matched = ",".join(name for name, enabled in capabilities.items() if enabled)
+    return {
+        "page_id": page_id,
+        "template_id": "manual_page_spec",
+        "case_type": "page_spec",
+        "status": "fallback",
+        "reason": reason[:500],
+        "missing_capabilities": "",
+        "matched_capabilities": matched,
+    }
+
+
+def _write_page_spec_inputs(
+    page_input: Dict[str, Any],
+    *,
+    page_spec_dir: Path,
+) -> Tuple[Dict[str, Any], Path, Path, Path]:
+    evidence = PageEvidenceBuilder().build(page_input)
+    evidence_path = page_evidence_cache_path(evidence.get("page_id"), page_spec_dir)
+    prompt_path = page_spec_prompt_cache_path(evidence.get("page_id"), page_spec_dir)
+    spec_path = page_spec_cache_path(evidence.get("page_id"), page_spec_dir)
+    write_page_evidence(evidence_path, evidence)
+    write_page_spec_prompt(prompt_path, evidence)
+    return evidence, evidence_path, prompt_path, spec_path
+
+
+def _plan_with_manual_page_spec(
+    page_input: Dict[str, Any],
+    *,
+    page_spec_dir: Path,
+    export_page_spec_inputs: bool,
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], Dict[str, Any]]:
+    evidence, evidence_path, prompt_path, spec_path = _write_page_spec_inputs(page_input, page_spec_dir=page_spec_dir)
+    spec = load_cached_page_spec(spec_path)
+    if spec is None:
+        raise PageSpecError(
+            "Manual PageSpec JSON not found. "
+            f"Use the prompt file at {prompt_path} in the web model, then save the returned JSON to {spec_path}."
+        )
+
+    planned_cases = page_spec_to_cases(spec, evidence)
+    profile = page_spec_to_profile(spec, evidence, page_spec_path=str(spec_path))
+    profile["page_evidence_path"] = str(evidence_path)
+    profile["page_spec_prompt_path"] = str(prompt_path)
+    for case in planned_cases:
+        case["page_spec_path"] = str(spec_path)
+        case["page_evidence_path"] = str(evidence_path)
+        case["page_spec_prompt_path"] = str(prompt_path)
+    return planned_cases, [], profile
+
+
 def plan_page_specific_cases(
     scan_data: Dict[str, Any],
     *,
     runtime_profile_dir: Path = DEFAULT_RUNTIME_PROFILE_DIR,
     include_runtime_profile_dir: bool = False,
+    target_pages: Optional[Sequence[str]] = None,
+    page_spec_dir: Path = DEFAULT_PAGE_SPEC_DIR,
+    use_page_spec: bool = False,
+    export_page_spec_inputs: bool = False,
 ) -> Tuple[List[TestCase], List[Dict[str, Any]], List[Dict[str, Any]]]:
     planner = PageCasePlanner()
     cases: List[TestCase] = []
@@ -995,22 +1105,80 @@ def plan_page_specific_cases(
     consumed_runtime_profiles = set()
 
     for page in page_entries(scan_data):
+        if not page_matches_targets(page, target_pages):
+            continue
         selected_profile = select_runtime_profile_for_page(page, runtime_profiles)
         profile_input = selected_profile or page
         if selected_profile:
             consumed_runtime_profiles.add(runtime_profile_identity(selected_profile))
-        planned_cases, skipped, profile = planner.plan(profile_input)
+        if export_page_spec_inputs or use_page_spec:
+            try:
+                if use_page_spec:
+                    planned_cases, skipped, profile = _plan_with_manual_page_spec(
+                        profile_input,
+                        page_spec_dir=page_spec_dir,
+                        export_page_spec_inputs=export_page_spec_inputs,
+                    )
+                else:
+                    evidence, evidence_path, prompt_path, spec_path = _write_page_spec_inputs(profile_input, page_spec_dir=page_spec_dir)
+                    planned_cases, skipped, profile = planner.plan(profile_input)
+                    profile["page_evidence_path"] = str(evidence_path)
+                    profile["page_spec_prompt_path"] = str(prompt_path)
+                    profile["page_spec_path"] = str(spec_path)
+                    skipped.append(
+                        _page_spec_skipped(
+                            page_name_of(profile_input),
+                            f"PageSpec inputs exported. Save web-model JSON to {spec_path}, then regenerate with --use-page-spec.",
+                            profile.get("capabilities") or {},
+                        )
+                    )
+            except PageSpecError as exc:
+                if use_page_spec:
+                    raise
+                planned_cases, skipped, profile = planner.plan(profile_input)
+                skipped.append(_page_spec_skipped(page_name_of(profile_input), str(exc), profile.get("capabilities") or {}))
+        else:
+            planned_cases, skipped, profile = planner.plan(profile_input)
         cases.extend(planned_case_to_test_case(case) for case in planned_cases)
         skipped_templates.extend(skipped)
         profiles.append(profile)
 
     if include_runtime_profile_dir:
         for runtime_profile in runtime_profiles:
+            if not page_matches_targets(runtime_profile, target_pages):
+                continue
             identity = runtime_profile_identity(runtime_profile)
             if identity in consumed_runtime_profiles:
                 continue
             profile_input = runtime_profile_page_input(runtime_profile)
-            planned_cases, skipped, profile = planner.plan(profile_input)
+            if export_page_spec_inputs or use_page_spec:
+                try:
+                    if use_page_spec:
+                        planned_cases, skipped, profile = _plan_with_manual_page_spec(
+                            profile_input,
+                            page_spec_dir=page_spec_dir,
+                            export_page_spec_inputs=export_page_spec_inputs,
+                        )
+                    else:
+                        evidence, evidence_path, prompt_path, spec_path = _write_page_spec_inputs(profile_input, page_spec_dir=page_spec_dir)
+                        planned_cases, skipped, profile = planner.plan(profile_input)
+                        profile["page_evidence_path"] = str(evidence_path)
+                        profile["page_spec_prompt_path"] = str(prompt_path)
+                        profile["page_spec_path"] = str(spec_path)
+                        skipped.append(
+                            _page_spec_skipped(
+                                page_name_of(profile_input),
+                                f"PageSpec inputs exported. Save web-model JSON to {spec_path}, then regenerate with --use-page-spec.",
+                                profile.get("capabilities") or {},
+                            )
+                        )
+                except PageSpecError as exc:
+                    if use_page_spec:
+                        raise
+                    planned_cases, skipped, profile = planner.plan(profile_input)
+                    skipped.append(_page_spec_skipped(page_name_of(profile_input), str(exc), profile.get("capabilities") or {}))
+            else:
+                planned_cases, skipped, profile = planner.plan(profile_input)
             cases.extend(planned_case_to_test_case(case) for case in planned_cases)
             skipped_templates.extend(skipped)
             profiles.append(profile)
@@ -1035,17 +1203,27 @@ def generate_cases(
     *,
     runtime_profile_dir: Path = DEFAULT_RUNTIME_PROFILE_DIR,
     include_runtime_profile_dir: bool = False,
+    target_pages: Optional[Sequence[str]] = None,
+    page_spec_dir: Path = DEFAULT_PAGE_SPEC_DIR,
+    use_page_spec: bool = False,
+    export_page_spec_inputs: bool = False,
 ) -> List[TestCase]:
     if uses_page_specific_planner(scan_data):
         cases, _, _ = plan_page_specific_cases(
             scan_data,
             runtime_profile_dir=runtime_profile_dir,
             include_runtime_profile_dir=include_runtime_profile_dir,
+            target_pages=target_pages,
+            page_spec_dir=page_spec_dir,
+            use_page_spec=use_page_spec,
+            export_page_spec_inputs=export_page_spec_inputs,
         )
         return cases
 
     cases: List[TestCase] = []
     for page in page_entries(scan_data):
+        if not page_matches_targets(page, target_pages):
+            continue
         page_name = page_name_of(page)
         depth = case_depth(page)
         page_element = {
@@ -1150,6 +1328,12 @@ def write_excel(
     *,
     runtime_profile_dir: Path = DEFAULT_RUNTIME_PROFILE_DIR,
     include_runtime_profile_dir: bool = False,
+    target_pages: Optional[Sequence[str]] = None,
+    page_spec_dir: Path = DEFAULT_PAGE_SPEC_DIR,
+    use_page_spec: bool = False,
+    export_page_spec_inputs: bool = False,
+    planned_skipped_templates: Optional[List[Dict[str, Any]]] = None,
+    planned_page_profiles: Optional[List[Dict[str, Any]]] = None,
 ) -> None:
     try:
         from openpyxl import Workbook
@@ -1165,11 +1349,18 @@ def write_excel(
     totals = summarize_counts(scan_data, cases)
     skipped_templates: List[Dict[str, Any]] = []
     page_profiles: List[Dict[str, Any]] = []
-    if uses_page_specific_planner(scan_data):
+    if planned_skipped_templates is not None or planned_page_profiles is not None:
+        skipped_templates = planned_skipped_templates or []
+        page_profiles = planned_page_profiles or []
+    elif uses_page_specific_planner(scan_data):
         _, skipped_templates, page_profiles = plan_page_specific_cases(
             scan_data,
             runtime_profile_dir=runtime_profile_dir,
             include_runtime_profile_dir=include_runtime_profile_dir,
+            target_pages=target_pages,
+            page_spec_dir=page_spec_dir,
+            use_page_spec=use_page_spec,
+            export_page_spec_inputs=export_page_spec_inputs,
         )
     summary_rows = [
         ("生成时间", datetime.now().strftime("%Y-%m-%d %H:%M:%S")),
@@ -1211,7 +1402,14 @@ def write_excel(
             "entry_url",
             "view_page",
             "ready_selector",
+            "page_spec_path",
+            "page_evidence_path",
+            "page_spec_prompt_path",
+            "page_spec_summary",
+            "page_type",
             "capabilities",
+            "state_count",
+            "operation_count",
             "form_count",
             "file_count",
             "button_count",
@@ -1237,7 +1435,14 @@ def write_excel(
                     profile.get("entry_url"),
                     profile.get("view_page"),
                     profile.get("ready_selector"),
+                    profile.get("page_spec_path"),
+                    profile.get("page_evidence_path"),
+                    profile.get("page_spec_prompt_path"),
+                    profile.get("page_spec_summary"),
+                    profile.get("page_type"),
                     enabled_caps,
+                    profile.get("state_count"),
+                    profile.get("operation_count"),
                     counts.get("form", 0),
                     counts.get("file", 0),
                     counts.get("button", 0),
@@ -1258,7 +1463,7 @@ def write_excel(
         for row in profile_sheet.iter_rows(min_row=2):
             for cell in row:
                 cell.alignment = Alignment(vertical="top", wrap_text=True)
-        for index, width in enumerate([34, 22, 54, 34, 34, 34, 72, 12, 12, 12, 12, 12, 12, 12, 12, 18, 20, 18], start=1):
+        for index, width in enumerate([34, 22, 54, 34, 34, 34, 54, 54, 54, 72, 20, 72, 12, 16, 12, 12, 12, 12, 12, 12, 12, 12, 18, 20, 18], start=1):
             profile_sheet.column_dimensions[get_column_letter(index)].width = width
         profile_sheet.freeze_panes = "A2"
         profile_sheet.auto_filter.ref = profile_sheet.dimensions
@@ -1388,18 +1593,70 @@ def load_scan(path: Path) -> Dict[str, Any]:
         raise SystemExit(f"Invalid JSON input: {path} ({exc})") from exc
 
 
+def export_page_spec_inputs_report(
+    scan_data: Dict[str, Any],
+    *,
+    runtime_profile_dir: Path = DEFAULT_RUNTIME_PROFILE_DIR,
+    include_runtime_profile_dir: bool = True,
+    target_pages: Optional[Sequence[str]] = None,
+    page_spec_dir: Path = DEFAULT_PAGE_SPEC_DIR,
+) -> List[Dict[str, Any]]:
+    _, skipped, profiles = plan_page_specific_cases(
+        scan_data,
+        runtime_profile_dir=runtime_profile_dir,
+        include_runtime_profile_dir=include_runtime_profile_dir,
+        target_pages=target_pages,
+        page_spec_dir=page_spec_dir,
+        export_page_spec_inputs=True,
+    )
+    rows: List[Dict[str, Any]] = []
+    for profile in profiles:
+        rows.append(
+            {
+                "page_id": profile.get("page_id"),
+                "page_evidence_path": profile.get("page_evidence_path"),
+                "page_spec_prompt_path": profile.get("page_spec_prompt_path"),
+                "page_spec_path": profile.get("page_spec_path"),
+            }
+        )
+    if skipped:
+        rows.append({"notes": skipped})
+    return rows
+
+
 def write_report(
     scan_data: Dict[str, Any],
     output: Optional[Path],
     *,
     runtime_profile_dir: Path = DEFAULT_RUNTIME_PROFILE_DIR,
     include_runtime_profile_dir: bool = True,
+    target_pages: Optional[Sequence[str]] = None,
+    page_spec_dir: Path = DEFAULT_PAGE_SPEC_DIR,
+    use_page_spec: bool = False,
+    export_page_spec_inputs: bool = False,
 ) -> None:
-    cases = generate_cases(
-        scan_data,
-        runtime_profile_dir=runtime_profile_dir,
-        include_runtime_profile_dir=include_runtime_profile_dir,
-    )
+    planned_skipped_templates: Optional[List[Dict[str, Any]]] = None
+    planned_page_profiles: Optional[List[Dict[str, Any]]] = None
+    if uses_page_specific_planner(scan_data):
+        cases, planned_skipped_templates, planned_page_profiles = plan_page_specific_cases(
+            scan_data,
+            runtime_profile_dir=runtime_profile_dir,
+            include_runtime_profile_dir=include_runtime_profile_dir,
+            target_pages=target_pages,
+            page_spec_dir=page_spec_dir,
+            use_page_spec=use_page_spec,
+            export_page_spec_inputs=export_page_spec_inputs,
+        )
+    else:
+        cases = generate_cases(
+            scan_data,
+            runtime_profile_dir=runtime_profile_dir,
+            include_runtime_profile_dir=include_runtime_profile_dir,
+            target_pages=target_pages,
+            page_spec_dir=page_spec_dir,
+            use_page_spec=use_page_spec,
+            export_page_spec_inputs=export_page_spec_inputs,
+        )
     if output and output.suffix.lower() == ".xlsx":
         write_excel(
             output,
@@ -1407,6 +1664,12 @@ def write_report(
             cases,
             runtime_profile_dir=runtime_profile_dir,
             include_runtime_profile_dir=include_runtime_profile_dir,
+            target_pages=target_pages,
+            page_spec_dir=page_spec_dir,
+            use_page_spec=use_page_spec,
+            export_page_spec_inputs=export_page_spec_inputs,
+            planned_skipped_templates=planned_skipped_templates,
+            planned_page_profiles=planned_page_profiles,
         )
         return
     report = render_markdown(scan_data, cases)
@@ -1432,15 +1695,66 @@ def main() -> None:
         action="store_true",
         help="Append all existing runtime_profile/*.json pages to the checklist.",
     )
+    parser.add_argument(
+        "--target-page",
+        action="append",
+        default=[],
+        help="Limit generated checklist/PageSpec to one JSP/page. Can be passed multiple times.",
+    )
+    parser.add_argument(
+        "--target-pages",
+        default="",
+        help="Comma-separated JSP/page list to generate.",
+    )
+    parser.add_argument(
+        "--page-spec-dir",
+        type=Path,
+        default=DEFAULT_PAGE_SPEC_DIR,
+        help="Directory for PageSpec evidence, prompt, and manually generated PageSpec JSON files.",
+    )
+    parser.add_argument(
+        "--export-page-spec-inputs",
+        action="store_true",
+        help="Write *.page_evidence.json and *.page_spec_prompt.md files for manual web-model PageSpec generation.",
+    )
+    parser.add_argument(
+        "--page-spec-inputs-only",
+        action="store_true",
+        help="Only export PageSpec evidence/prompt files and print their paths as JSON. Does not write checklist output.",
+    )
+    parser.add_argument(
+        "--use-page-spec",
+        action="store_true",
+        help="Read manually generated *.page_spec.json files from --page-spec-dir and generate checklist cases from them.",
+    )
     args = parser.parse_args()
     if not args.input.exists():
         raise SystemExit(f"Input JSON does not exist: {args.input}")
-    write_report(
-        load_scan(args.input),
-        args.output,
-        runtime_profile_dir=args.runtime_profile_dir,
-        include_runtime_profile_dir=args.include_runtime_profiles,
-    )
+    target_pages = parse_target_pages([*args.target_page, args.target_pages])
+    scan_data = load_scan(args.input)
+    if args.page_spec_inputs_only:
+        rows = export_page_spec_inputs_report(
+            scan_data,
+            runtime_profile_dir=args.runtime_profile_dir,
+            include_runtime_profile_dir=args.include_runtime_profiles,
+            target_pages=target_pages,
+            page_spec_dir=args.page_spec_dir,
+        )
+        print(json.dumps(rows, ensure_ascii=False, indent=2))
+        return
+    try:
+        write_report(
+            scan_data,
+            args.output,
+            runtime_profile_dir=args.runtime_profile_dir,
+            include_runtime_profile_dir=args.include_runtime_profiles,
+            target_pages=target_pages,
+            page_spec_dir=args.page_spec_dir,
+            use_page_spec=args.use_page_spec,
+            export_page_spec_inputs=args.export_page_spec_inputs,
+        )
+    except PageSpecError as exc:
+        raise SystemExit(str(exc)) from exc
 
 
 if __name__ == "__main__":

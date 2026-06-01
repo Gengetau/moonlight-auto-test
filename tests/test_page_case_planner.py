@@ -173,6 +173,115 @@ def test_search_form_and_result_table_generates_search_and_table_cases():
     assert profile["capabilities"]["result_table"] is True
 
 
+def test_search_named_field_without_search_button_does_not_generate_search_case():
+    case_types, skipped, profile = planned_case_types(
+        {
+            "page_id": "SearchCriteriaOnly.jsp",
+            "elements": [
+                {
+                    "kind": "form",
+                    "tag": "form",
+                    "attributes": {"action": "/Search.do"},
+                    "locator": "form[action*='Search']",
+                },
+                {
+                    "kind": "field",
+                    "tag": "input",
+                    "attributes": {"name": "searchKeyword", "type": "text"},
+                    "locator": "input[name='searchKeyword']",
+                },
+            ],
+        }
+    )
+
+    assert "search_normal" not in case_types
+    assert profile["capabilities"]["search"] is False
+    assert any(item["template_id"] == "search_normal" and item["missing_capabilities"] == "search" for item in skipped)
+
+
+def test_action_hint_download_generates_download_template_case():
+    case_types, _, profile = planned_case_types(
+        {
+            "page_id": "Template.jsp",
+            "elements": [
+                {
+                    "kind": "button",
+                    "tag": "input",
+                    "action_hint": "download",
+                    "attributes": {"type": "button", "value": "ダウンロード"},
+                    "locator": "input[name='download']",
+                },
+            ],
+        }
+    )
+
+    assert "download_template" in case_types
+    assert profile["capabilities"]["template_download"] is True
+
+
+def test_download_page_label_key_does_not_turn_reload_button_into_download():
+    case_types, skipped, profile = planned_case_types(
+        {
+            "page_id": "AbstPDFDownloadSetting.jsp",
+            "elements": [
+                {
+                    "kind": "button",
+                    "tag": "input",
+                    "label": "fnReload",
+                    "action_hint": "click",
+                    "attributes": {"type": "button", "value": "<bean:message key=", "onClick": "JavaScript:fnReload()"},
+                    "raw": '<input type="button" value="<bean:message key="btn.usAbstPDFDownload.saisin" />" onClick="JavaScript:fnReload()">',
+                    "locator": 'input[type="button"][onclick="JavaScript:fnReload()"]',
+                },
+            ],
+        }
+    )
+
+    assert "download_template" not in case_types
+    assert "file_download" not in case_types
+    assert profile["capabilities"]["template_download"] is False
+    assert any(item["template_id"] == "download_template" for item in skipped)
+
+
+def test_indirect_bean_message_label_does_not_trigger_template_download():
+    case_types, _, profile = planned_case_types(
+        {
+            "page_id": "ClsFileDownload.jsp",
+            "elements": [
+                {
+                    "kind": "button",
+                    "tag": "input",
+                    "label": "<bean:message bundle='PATLICS_MESSAGE' key='label.clsFileDownload.output'/>",
+                    "action_hint": "click",
+                    "attributes": {
+                        "type": "button",
+                        "value": "<bean:message bundle='PATLICS_MESSAGE' key='label.clsFileDownload.output'/>",
+                        "onClick": "jpavascript:submitForm();",
+                    },
+                    "locator": 'input[type="button"][onclick="jpavascript:submitForm();"]',
+                },
+            ],
+        }
+    )
+
+    assert "download_template" not in case_types
+    assert profile["capabilities"]["template_download"] is False
+
+
+def test_static_table_is_enough_for_result_table_case():
+    case_types, _, profile = planned_case_types(
+        {
+            "page_id": "StaticTable.jsp",
+            "elements": [
+                {"kind": "table", "tag": "table", "locator": "table"},
+            ],
+        }
+    )
+
+    assert "result_table_verify" in case_types
+    assert profile["capabilities"]["result_table"] is True
+
+
 def test_plain_page_generates_initial_display_and_skips_other_templates():
     cases, skipped, profile = PageCasePlanner().plan({"page_id": "Plain.jsp", "elements": []})
 

@@ -6,6 +6,7 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 from playwright.sync_api import Error as PlaywrightError, Page
 
 from src.action_executor import _capture_state, execute_action
+from src.page_aliases import page_matches
 from src.route_runtime_verifier import (
     _action_context_for_locator,
     _find_reached_action_url,
@@ -68,6 +69,9 @@ class RouteMapCatalog:
             if self._target_name(route.get("target_page_name") or route.get("target_page")) == target_name
             or self._target_name((route.get("source_route") or {}).get("target_page_name")) == target_name
             or self._target_name((route.get("source_route") or {}).get("target_page")) == target_name
+            or page_matches(route.get("target_page_name") or route.get("target_page"), target_page)
+            or page_matches((route.get("source_route") or {}).get("target_page_name"), target_page)
+            or page_matches((route.get("source_route") or {}).get("target_page"), target_page)
         ]
         if not candidates:
             return None

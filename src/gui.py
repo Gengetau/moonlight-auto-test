@@ -26,8 +26,11 @@ from src.config_parser import Config
 from src.gui_command_builder import (
     DEFAULT_CHECKLIST_PATH,
     DEFAULT_ROUTE_MAP_PATH,
+    GUIDED_CHECKLIST_TARGETS,
     build_regression_command,
     browser_key,
+    guided_checklist_path_for,
+    guided_checklist_target_labels,
     html_report_path,
     load_negative_profile_options,
     load_upload_case_options,
@@ -37,6 +40,7 @@ from src.gui_command_builder import (
     regression_output_dir,
     upload_case_option_labels,
     upload_profile_config_path,
+    write_starter_guided_checklist,
 )
 
 
@@ -68,6 +72,25 @@ def route_file_stem(target):
     text = text.replace("/", "_")
     safe = "".join(char if char.isalnum() or char in ("-", "_") else "_" for char in text)
     return safe or "target"
+
+
+def page_spec_file_stem(target):
+    text = str(target or "unknown").replace("\\", "/").strip().strip("/")
+    text = text.rsplit("/", 1)[-1]
+    if "." in text:
+        text = text.rsplit(".", 1)[0]
+    safe = re.sub(r"[^A-Za-z0-9_.-]+", "_", text).strip("_").lower()
+    return safe or "unknown"
+
+
+def page_spec_paths(target, page_spec_dir="generated/valid/page_specs"):
+    base = Path(page_spec_dir)
+    stem = page_spec_file_stem(target)
+    return {
+        "evidence": base / f"{stem}.page_evidence.json",
+        "prompt": base / f"{stem}.page_spec_prompt.md",
+        "spec": base / f"{stem}.page_spec.json",
+    }
 
 
 def safe_upload_name(filename):
@@ -281,6 +304,19 @@ def apply_reg_queue_state(record):
         apply_reg_card_state(index, card)
 
 
+def apply_pending_reg_queue_record():
+    pending_record_id = st.session_state.pop("reg_queue_pending_record_id", None)
+    if not pending_record_id:
+        return
+    records = load_reg_queue_records()
+    record = next((item for item in records if str(item.get("id")) == str(pending_record_id)), None)
+    if not record:
+        st.session_state["reg_queue_record_status"] = f"Saved queue not found: {pending_record_id}"
+        return
+    apply_reg_queue_state(record)
+    st.session_state["reg_queue_record_status"] = f"Loaded: {record.get('name')}"
+
+
 def save_current_reg_queue_record(name):
     records = load_reg_queue_records()
     record = {
@@ -456,6 +492,7 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded",
 )
+apply_pending_reg_queue_record()
 
 # Custom CSS for Moonlight theme
 st.markdown("""
@@ -776,6 +813,83 @@ with tabs[0]:
     if "reg_focus_card_index" not in st.session_state:
         st.session_state["reg_focus_card_index"] = 1
 
+    st.markdown("#### Guided Checklist JSON")
+    guided_labels = guided_checklist_target_labels()
+    guided_col1, guided_col2 = st.columns([2, 3])
+    with guided_col1:
+        guided_target_label = st.selectbox(
+            "Guided target",
+            guided_labels,
+            index=0,
+            key="guided_checklist_target",
+        )
+        guided_target_page = selected_page_from_label(guided_target_label)
+        guided_default_path = guided_checklist_path_for(guided_target_page)
+        guided_path_key = f"guided_checklist_path_{route_file_stem(guided_target_page)}"
+        guided_path = st.text_input(
+            "Guided JSON Path",
+            value=str(guided_default_path or ""),
+            key=guided_path_key,
+        )
+        overwrite_guided = st.checkbox("Overwrite existing starter JSON", value=False, key="guided_checklist_overwrite")
+    with guided_col2:
+        if st.session_state.get("guided_checklist_status"):
+            st.success(st.session_state.pop("guided_checklist_status"))
+        target_meta = next(
+            (
+                item
+                for item in GUIDED_CHECKLIST_TARGETS
+                if item.get("page_id") == guided_target_page
+            ),
+            {},
+        )
+        st.caption(
+            " / ".join(
+                item
+                for item in [
+                    target_meta.get("label"),
+                    f"actual JSP: {target_meta.get('actual_page_id')}" if target_meta.get("actual_page_id") else "",
+                    f"template: {target_meta.get('template_id')}" if target_meta.get("template_id") else "",
+                    "direct URL: no" if target_meta.get("direct_url_allowed") is False else "",
+                ]
+                if item
+            )
+        )
+        st.caption(
+            "Use this when you manually drive the browser to the target page, then run a guided JSON checklist instead of the old Excel generator."
+        )
+        g_btn1, g_btn2 = st.columns(2)
+        with g_btn1:
+            if st.button("Create Starter JSON", key="guided_create_starter_json"):
+                if not guided_target_page or not guided_path.strip():
+                    st.error("Guided target and path are required.")
+                else:
+                    try:
+                        output = write_starter_guided_checklist(
+                            guided_path,
+                            guided_target_page,
+                            overwrite=overwrite_guided,
+                        )
+                        st.session_state["guided_checklist_status"] = f"Created: {output}"
+                        st.rerun()
+                    except FileExistsError:
+                        st.warning("Starter JSON already exists. Enable overwrite if you want to replace it.")
+        with g_btn2:
+            if st.button("Use On Page Card 1", key="guided_apply_card_1"):
+                if not guided_target_page or not guided_path.strip():
+                    st.error("Guided target and path are required.")
+                else:
+                    st.session_state["reg_page_card_count"] = max(
+                        1,
+                        int(st.session_state.get("reg_page_card_count", 1) or 1),
+                    )
+                    st.session_state["reg_focus_card_index"] = 1
+                    st.session_state["reg_page_target_value_1"] = guided_target_page
+                    st.session_state["reg_page_target_1"] = _page_option_label_for(guided_target_page)
+                    st.session_state["reg_page_checklist_1"] = guided_path
+                    st.session_state["guided_checklist_status"] = f"Applied guided JSON to card 1: {guided_target_page}"
+                    st.rerun()
+
     st.markdown("#### Queue Records")
     if st.session_state.get("reg_queue_record_status"):
         st.success(st.session_state.pop("reg_queue_record_status"))
@@ -807,8 +921,7 @@ with tabs[0]:
     with rec_col4:
         load_disabled = not selected_record_id or selected_record_id not in record_by_id
         if st.button("Load", key="reg_queue_load", disabled=load_disabled):
-            apply_reg_queue_state(record_by_id[selected_record_id])
-            st.session_state["reg_queue_record_status"] = f"Loaded: {record_by_id[selected_record_id].get('name')}"
+            st.session_state["reg_queue_pending_record_id"] = selected_record_id
             st.rerun()
 
     if selected_record_id in record_by_id:
@@ -889,7 +1002,14 @@ with tabs[0]:
                     index=0,
                     key=f"reg_page_login_{index}",
                 )
-                checklist_path = st.text_input("Checklist Path", value=DEFAULT_CHECKLIST_PATH, key=f"reg_page_checklist_{index}")
+                checklist_key = f"reg_page_checklist_{index}"
+                suggested_guided_path = guided_checklist_path_for(target_page)
+                if suggested_guided_path:
+                    if st.button("Use Guided JSON", key=f"reg_page_use_guided_{index}"):
+                        st.session_state[checklist_key] = str(suggested_guided_path)
+                        st.rerun()
+                    st.caption(f"Guided JSON: {suggested_guided_path}")
+                checklist_path = st.text_input("Checklist Path", value=DEFAULT_CHECKLIST_PATH, key=checklist_key)
             with col_b:
                 route_map_path = st.text_input("Route Map Path", value=DEFAULT_ROUTE_MAP_PATH, key=f"reg_page_route_{index}")
                 force_route_map = st.checkbox("Use Route Map", value=True, key=f"reg_page_force_route_{index}")
@@ -1092,6 +1212,12 @@ with tabs[1]:
         v_manual_route = st.checkbox("Manual Full Route", value=False, key="rv_manual_route")
         v_use_upload_file = st.checkbox("Use Upload File", value=False, key="rv_use_upload_file")
         v_selected_upload_file = st.file_uploader("Upload File", key="rv_upload_file")
+        v_export_page_spec_inputs = st.checkbox(
+            "Export PageSpec evidence/prompt after verification",
+            value=True,
+            key="rv_export_page_spec_inputs",
+            help="Writes files under generated/valid/page_specs for manual web-model PageSpec generation.",
+        )
         
         if st.button("🛡️ Verify Route Consistency", key="rv_verify_route"):
             if not v_target.strip():
@@ -1122,8 +1248,22 @@ with tabs[1]:
                         st.success(f"Route map saved: {out_file}")
                         if Path("generated/valid/page_mapping.json").exists():
                             st.info("Runtime profile saved. Regenerating checklist from current mapping/profile data...")
-                            checklist_cmd = f"{PYTHON_CMD} src/checklist_generator.py generated/valid/page_mapping.json -o generated/valid/migration_checklist.xlsx"
+                            checklist_cmd = f"{PYTHON_CMD} src/checklist_generator.py generated/valid/page_mapping.json -o generated/valid/migration_checklist.xlsx --target-page {quote(v_target)} --include-runtime-profiles"
                             run_command(checklist_cmd)
+                            if v_export_page_spec_inputs:
+                                st.info("Exporting PageSpec evidence and prompt for the web model...")
+                                export_cmd = f"{PYTHON_CMD} src/checklist_generator.py generated/valid/page_mapping.json --target-page {quote(v_target)} --include-runtime-profiles --page-spec-inputs-only"
+                                run_command(export_cmd)
+                                paths = page_spec_paths(v_target)
+                                st.code(
+                                    "\n".join(
+                                        [
+                                            f"Evidence: {paths['evidence']}",
+                                            f"Prompt:   {paths['prompt']}",
+                                            f"Save web-model JSON here: {paths['spec']}",
+                                        ]
+                                    )
+                                )
                     else:
                         st.error(f"Route verification failed: exit={code}")
 
@@ -1148,17 +1288,68 @@ with tabs[2]:
     with col2:
         st.subheader("Step 2: Bridge Time & Space")
         generate_checklist_after_mapping = st.checkbox("Generate checklist after mapping", value=True, key="scan_generate_checklist_after_mapping")
+        export_page_spec_after_mapping = st.checkbox(
+            "Export PageSpec evidence/prompt after mapping",
+            value=False,
+            key="scan_export_page_spec_after_mapping",
+            help="Writes *.page_evidence.json and *.page_spec_prompt.md under generated/valid/page_specs.",
+        )
+        use_manual_page_spec = st.checkbox(
+            "Use saved manual PageSpec JSON for checklist",
+            value=False,
+            key="scan_use_manual_page_spec",
+            help="Reads generated/valid/page_specs/<page>.page_spec.json and converts it into checklist rows.",
+        )
+
+        def checklist_command() -> str:
+            cmd = f"{PYTHON_CMD} src/checklist_generator.py generated/valid/page_mapping.json -o generated/valid/migration_checklist.xlsx"
+            if use_manual_page_spec:
+                cmd += " --use-page-spec"
+            if export_page_spec_after_mapping:
+                cmd += " --export-page-spec-inputs"
+            return cmd
         if st.button("🌉 Generate Mapping", key="scan_generate_mapping"):
             cmd = f"{PYTHON_CMD} src/page_mapping.py mappings/legacy_elements.json mappings/new_elements.json -o generated/valid/page_mapping.json --md generated/valid/comparison_summary.md"
             code, _ = run_command(cmd)
             if code == 0 and generate_checklist_after_mapping:
-                checklist_cmd = f"{PYTHON_CMD} src/checklist_generator.py generated/valid/page_mapping.json -o generated/valid/migration_checklist.xlsx"
-                run_command(checklist_cmd)
+                run_command(checklist_command())
 
         st.subheader("Step 3: Test Documents")
         if st.button("📊 Export Excel Checklist", key="scan_export_checklist"):
-            cmd = f"{PYTHON_CMD} src/checklist_generator.py generated/valid/page_mapping.json -o generated/valid/migration_checklist.xlsx"
-            run_command(cmd)
+            run_command(checklist_command())
+
+        st.subheader("Manual PageSpec Workflow")
+        ps_target = st.text_input("Target JSP for PageSpec", key="scan_page_spec_target")
+        ps_dir = st.text_input("PageSpec Directory", value="generated/valid/page_specs", key="scan_page_spec_dir")
+        ps_paths = page_spec_paths(ps_target, ps_dir) if ps_target else {}
+        if ps_target:
+            st.caption("1. Export evidence/prompt. 2. Paste prompt into the web model. 3. Save returned JSON as the PageSpec path below. 4. Generate checklist from saved PageSpec.")
+            st.code(
+                "\n".join(
+                    [
+                        f"Evidence: {ps_paths['evidence']}",
+                        f"Prompt:   {ps_paths['prompt']}",
+                        f"PageSpec: {ps_paths['spec']}",
+                    ]
+                )
+            )
+        c1, c2 = st.columns(2)
+        with c1:
+            if st.button("Export PageSpec Evidence + Prompt", key="scan_export_page_spec_inputs"):
+                if not ps_target.strip():
+                    st.error("Target JSP is required.")
+                else:
+                    cmd = f"{PYTHON_CMD} src/checklist_generator.py generated/valid/page_mapping.json --target-page {quote(ps_target)} --page-spec-dir {quote(ps_dir)} --include-runtime-profiles --page-spec-inputs-only"
+                    run_command(cmd)
+        with c2:
+            if st.button("Generate Checklist from PageSpec", key="scan_generate_from_page_spec"):
+                if not ps_target.strip():
+                    st.error("Target JSP is required.")
+                elif not ps_paths["spec"].exists():
+                    st.error(f"PageSpec JSON not found: {ps_paths['spec']}")
+                else:
+                    cmd = f"{PYTHON_CMD} src/checklist_generator.py generated/valid/page_mapping.json -o generated/valid/migration_checklist.xlsx --target-page {quote(ps_target)} --page-spec-dir {quote(ps_dir)} --include-runtime-profiles --use-page-spec"
+                    run_command(cmd)
 
 # --- TAB: Analysis ---
 with tabs[3]:

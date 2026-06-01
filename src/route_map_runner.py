@@ -7,14 +7,12 @@ from typing import Any, Dict, List, Optional
 
 from playwright.sync_api import Page, sync_playwright
 
+from src.browser_window import set_main_window_bounds
 from src.config_parser import Config
 from src.route_runtime_verifier import record_manual_route, verify_candidate_route, write_usable_route_map
 
 
 CHROMIUM_ARGS = [
-    "--start-maximized",
-    "--window-size=1920,1080",
-    "--window-position=0,0",
     "--force-device-scale-factor=1",
     "--high-dpi-support=1",
     "--disable-popup-blocking",
@@ -27,10 +25,7 @@ CHROMIUM_ARGS = [
     "--disable-dev-shm-usage",
 ]
 
-FIREFOX_ARGS = [
-    "--width=1920",
-    "--height=1080",
-]
+FIREFOX_ARGS = []
 
 
 def _configure_stdio() -> None:
@@ -235,6 +230,7 @@ def _prepare_page(browser, page: Optional[Page], entry_url: str, timeout: int, *
                 extra_page.close()
             except Exception:
                 pass
+    set_main_window_bounds(page)
     _open_or_login(page, entry_url, timeout, auto_login=auto_login)
     return page
 
