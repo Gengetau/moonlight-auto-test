@@ -27,6 +27,7 @@ from src.gui_command_builder import (
     DEFAULT_CHECKLIST_PATH,
     DEFAULT_ROUTE_MAP_PATH,
     GUIDED_CHECKLIST_TARGETS,
+    bounded_console_output,
     build_regression_command,
     browser_key,
     guided_checklist_path_for,
@@ -38,6 +39,7 @@ from src.gui_command_builder import (
     negative_profile_labels,
     page_option_labels,
     regression_output_dir,
+    run_regression_queue,
     upload_case_option_labels,
     upload_profile_config_path,
     write_starter_guided_checklist,
@@ -549,7 +551,7 @@ def run_command(cmd, live_output=True):
     for line in process.stdout:
         full_output += line
         if live_output:
-            output_container.code(full_output)
+            output_container.code(bounded_console_output(full_output))
     
     process.wait()
     return process.returncode, full_output
@@ -1148,8 +1150,7 @@ with tabs[0]:
             st.error("Please add at least one enabled target page.")
             st.stop()
 
-        completed_reports = []
-        for page_config in enabled_configs:
+        def run_queue_page(page_config):
             runtime_config = dict(page_config)
             upload_profiles = []
             for profile in page_config.get("upload_profiles_raw") or []:
@@ -1170,16 +1171,25 @@ with tabs[0]:
             st.info(f"Running: `{full_cmd}`")
             code, _ = run_command(full_cmd)
             report_path = Path(runtime_config["html_path"])
-            if report_path.exists():
-                completed_reports.append(report_path)
-            if code != 0:
-                st.error(f"Regression failed for {runtime_config['target_page']} (exit={code}).")
-                break
+            return {
+                "target_page": runtime_config["target_page"],
+                "return_code": code,
+                "report_path": report_path if report_path.exists() else None,
+            }
 
+        queue_results = run_regression_queue(enabled_configs, run_queue_page)
+        completed_reports = [item["report_path"] for item in queue_results if item.get("report_path")]
+        failed_pages = [item for item in queue_results if item.get("return_code") != 0]
         if completed_reports:
-            st.success("Regression Queue Complete.")
             for report_path in completed_reports:
                 render_report_links(report_path, key_prefix=f"completed_{report_path.as_posix()}")
+        if failed_pages:
+            for item in failed_pages:
+                detail = f"exit={item['return_code']}" if item.get("return_code") is not None else item.get("error") or "unknown error"
+                st.error(f"Regression failed for {item.get('target_page')} ({detail}). Queue continued.")
+            st.warning(f"Regression Queue Complete with {len(failed_pages)} failed page(s).")
+        else:
+            st.success("Regression Queue Complete.")
 
 # --- TAB: Route Mapping ---
 with tabs[1]:

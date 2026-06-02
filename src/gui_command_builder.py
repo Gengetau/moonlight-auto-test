@@ -1,7 +1,7 @@
 import json
 import re
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Callable, Dict, Iterable, List, Optional
 
 from src.page_aliases import page_aliases, page_matches
 
@@ -819,6 +819,29 @@ def build_regression_command(config: Dict[str, Any], *, pytest_cmd: str) -> str:
     html_path = config.get("html_path") or html_report_path(browser, page_id)
     cmd += f" --html={quote(html_path)}"
     return cmd
+
+
+def run_regression_queue(configs: Iterable[Dict[str, Any]], run_page: Callable[[Dict[str, Any]], Dict[str, Any]]) -> List[Dict[str, Any]]:
+    results: List[Dict[str, Any]] = []
+    for config in configs:
+        try:
+            result = dict(run_page(config) or {})
+        except Exception as exc:
+            result = {
+                "return_code": None,
+                "error": str(exc),
+            }
+        result.setdefault("target_page", config.get("target_page"))
+        results.append(result)
+    return results
+
+
+def bounded_console_output(value: Any, *, max_chars: int = 40000) -> str:
+    text = str(value or "")
+    if max_chars <= 0 or len(text) <= max_chars:
+        return text
+    omitted = len(text) - max_chars
+    return f"[... {omitted} earlier character(s) omitted from live view ...]\n{text[-max_chars:]}"
 
 
 def _page_name(value: Any) -> str:

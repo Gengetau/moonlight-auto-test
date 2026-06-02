@@ -4,6 +4,7 @@ from pathlib import Path
 import pytest
 
 from src.gui_command_builder import (
+    bounded_console_output,
     build_regression_command,
     guided_checklist_path_for,
     starter_guided_checklist,
@@ -13,6 +14,7 @@ from src.gui_command_builder import (
     load_page_options,
     negative_profile_labels,
     regression_output_dir,
+    run_regression_queue,
     write_starter_guided_checklist,
     upload_case_option_labels,
 )
@@ -45,6 +47,40 @@ def test_build_regression_command_is_page_and_browser_scoped():
     assert "--include-negative" in cmd
     assert '--negative-profile="invalid_file"' in cmd
     assert "--upload-profile-config=" in cmd
+
+
+def test_run_regression_queue_continues_after_failed_page():
+    calls = []
+
+    def run_page(config):
+        calls.append(config["target_page"])
+        if config["target_page"] == "Second.jsp":
+            return {"return_code": 1}
+        if config["target_page"] == "Third.jsp":
+            raise RuntimeError("route setup failed")
+        return {"return_code": 0}
+
+    results = run_regression_queue(
+        [
+            {"target_page": "First.jsp"},
+            {"target_page": "Second.jsp"},
+            {"target_page": "Third.jsp"},
+            {"target_page": "Fourth.jsp"},
+        ],
+        run_page,
+    )
+
+    assert calls == ["First.jsp", "Second.jsp", "Third.jsp", "Fourth.jsp"]
+    assert [item["return_code"] for item in results] == [0, 1, None, 0]
+    assert results[2]["error"] == "route setup failed"
+    assert [item["target_page"] for item in results] == calls
+
+
+def test_bounded_console_output_keeps_recent_tail():
+    rendered = bounded_console_output("0123456789", max_chars=4)
+
+    assert "6 earlier character(s) omitted" in rendered
+    assert rendered.endswith("6789")
 
 
 def test_load_page_options_merges_mapping_routes_and_recent_reports(tmp_path):

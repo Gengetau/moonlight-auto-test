@@ -1666,7 +1666,13 @@ def test_closing_action_report_preserves_parent_state_and_keeps_reopened_state_f
                 "label": "download",
                 "legacy_locator": "#download",
                 "new_locator": "#download",
-            }
+            },
+            {
+                "case_type": "close_window",
+                "label": "close",
+                "legacy_locator": "#close",
+                "new_locator": "#close",
+            },
         ],
         "test",
     )
@@ -1709,6 +1715,79 @@ def test_closing_action_report_preserves_parent_state_and_keeps_reopened_state_f
     assert '"event": "action_executed"' in log_text
     assert '"event": "target_reopen_finished"' in log_text
     assert '"event": "compare_result"' in log_text
+
+
+def test_terminal_closing_action_does_not_require_target_reopen(tmp_path, monkeypatch):
+    class Page:
+        def __init__(self, url):
+            self.url = url
+
+    mapping_path = tmp_path / "page_mapping.json"
+    mapping_path.write_text(json.dumps({"page_mappings": []}), encoding="utf-8")
+    engine = RegressionEngine(mapping_path=str(mapping_path), output_dir=str(tmp_path))
+
+    def fake_capture_state(page, output_dir, name):
+        return {
+            "screenshot": str(Path(output_dir) / f"{name}.png"),
+            "url": getattr(page, "url", ""),
+            "dom": name,
+            "text": name,
+        }
+
+    def fake_compare_state(page_id, risk, action, legacy_state, new_state, diff_path, **extra):
+        return {
+            "page_id": page_id,
+            "risk": risk,
+            "action": action,
+            "status": "PASS",
+            "legacy_screenshot": legacy_state.get("screenshot"),
+            "new_screenshot": new_state.get("screenshot"),
+            **extra,
+        }
+
+    monkeypatch.setattr(regression_engine_module, "_capture_state", fake_capture_state)
+    engine._build_action_plan = lambda page_id, mapping: (
+        [
+            {
+                "case_type": "close_window",
+                "label": "confirm and reflect",
+                "legacy_locator": "#confirm",
+                "new_locator": "#confirm",
+            }
+        ],
+        "checklist",
+    )
+    engine._execute_action_case = lambda page, action_case, **kwargs: {
+        "status": "PASS",
+        "page_closed_after_action": True,
+        "state": {
+            "screenshot": str(tmp_path / f"{kwargs['side']}_parent_after_close.png"),
+            "url": f"http://{kwargs['side']}/parent.jsp",
+            "dom": "<parent-page />",
+            "capture_scope": "opener_after_popup_close",
+        },
+    }
+    engine._reopen_target_pair = lambda *args, **kwargs: (_ for _ in ()).throw(
+        AssertionError("terminal action must not reopen the target page")
+    )
+    engine._compare_state = fake_compare_state
+
+    results = engine._run_captured_page_pair(
+        Page("http://legacy/start.jsp"),
+        Page("http://new/start.jsp"),
+        {"page_id": "Popup.jsp", "risk": "Low"},
+        tmp_path,
+        "chrome",
+        {"status": "PASS"},
+        {"status": "PASS"},
+        manual=False,
+    )
+
+    action_result = next(item for item in results if item["action"] == "confirm and reflect")
+    assert action_result["status"] == "PASS"
+    assert "post_action_reopen" not in action_result
+    log_text = (tmp_path / "full_test_log.jsonl").read_text(encoding="utf-8")
+    assert '"event": "target_reopen_skipped_terminal_action"' in log_text
 
 
 def test_guided_checklist_plan_skips_static_missing_element_noise(tmp_path, monkeypatch):

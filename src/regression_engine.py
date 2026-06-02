@@ -2142,14 +2142,39 @@ class RegressionEngine:
                 )
             )
 
-            should_reopen_target = self._requires_target_reopen_after_action(
+            target_reopen_candidate = self._requires_target_reopen_after_action(
                 action_case,
                 action_type,
                 semantic_action,
                 legacy_action,
                 new_action,
             )
+            has_following_action = action_index < len(target_actions)
+            should_reopen_target = target_reopen_candidate and has_following_action
             reopen_result: Optional[Dict[str, Any]] = None
+            if target_reopen_candidate and not has_following_action:
+                self._write_full_test_log(
+                    page_dir,
+                    page_id,
+                    "target_reopen_skipped_terminal_action",
+                    {
+                        "action_index": action_index,
+                        "action_name": action_name,
+                        "action_type": action_type,
+                        "semantic_action": semantic_action,
+                        "reason": "No following checklist action requires target-page recovery.",
+                    },
+                )
+                print(
+                    f"[{page_id}] SKIP target reopen after terminal action: "
+                    + json.dumps(
+                        {
+                            "action": action_name,
+                            "reason": "No following checklist action requires target-page recovery.",
+                        },
+                        ensure_ascii=False,
+                    )
+                )
             if should_reopen_target:
                 legacy_action["state_before_reopen"] = legacy_action.get("state") or {}
                 new_action["state_before_reopen"] = new_action.get("state") or {}
