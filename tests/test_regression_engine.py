@@ -15,6 +15,7 @@ from src.action_executor import (
     _resolve_upload_file_value,
     _safe_download_filename,
     _safe_opener_page,
+    _should_close_capture_page,
     build_steps_from_page_mapping,
     infer_semantic_action,
 )
@@ -489,6 +490,16 @@ def test_safe_opener_page_returns_open_parent():
 
     assert _safe_opener_page(Page(opener=parent)) is parent
     assert _safe_opener_page(Page(opener=Page(closed=True))) is None
+
+
+def test_opener_capture_page_is_not_closed_after_popup_reflection():
+    popup = object()
+    opener = object()
+    opened_child = object()
+
+    assert _should_close_capture_page(opener, popup, opener, keep_popup=False) is False
+    assert _should_close_capture_page(opened_child, popup, opener, keep_popup=False) is True
+    assert _should_close_capture_page(opened_child, popup, opener, keep_popup=True) is False
 
 
 def test_negative_visual_evidence_payload_names_visible_error_state():
@@ -1475,6 +1486,18 @@ def test_database_operation_kind_covers_crud_actions():
     assert RegressionEngine._database_operation_kind({"case_type": "upload_submit", "label": "アップロード確認"}, "upload_submit", "upload") is None
 
 
+@pytest.mark.parametrize(
+    "action_type",
+    ["assert_attached", "assert_checked", "assert_text", "assert_url", "assert_value", "assert_visible"],
+)
+def test_database_operation_kind_ignores_passive_assertions(action_type):
+    assert RegressionEngine._database_operation_kind(
+        {"case_type": "initial_state", "label": "registration entry controls are visible"},
+        action_type,
+        action_type,
+    ) is None
+
+
 def test_leaving_actions_require_target_reopen():
     assert RegressionEngine._requires_target_reopen_after_action(
         {"case_type": "back_action", "label": "戻る"},
@@ -1788,6 +1811,88 @@ def test_terminal_closing_action_does_not_require_target_reopen(tmp_path, monkey
     assert "post_action_reopen" not in action_result
     log_text = (tmp_path / "full_test_log.jsonl").read_text(encoding="utf-8")
     assert '"event": "target_reopen_skipped_terminal_action"' in log_text
+
+
+def test_failed_reopen_does_not_relabel_successful_popup_reflection_as_blocked(tmp_path, monkeypatch):
+    class Page:
+        def __init__(self, url):
+            self.url = url
+
+    mapping_path = tmp_path / "page_mapping.json"
+    mapping_path.write_text(json.dumps({"page_mappings": []}), encoding="utf-8")
+    engine = RegressionEngine(mapping_path=str(mapping_path), output_dir=str(tmp_path))
+
+    def fake_capture_state(page, output_dir, name):
+        return {
+            "screenshot": str(Path(output_dir) / f"{name}.png"),
+            "url": getattr(page, "url", ""),
+            "dom": name,
+            "text": name,
+        }
+
+    def fake_compare_state(page_id, risk, action, legacy_state, new_state, diff_path, **extra):
+        return {
+            "page_id": page_id,
+            "risk": risk,
+            "action": action,
+            "status": "PASS",
+            "legacy_screenshot": legacy_state.get("screenshot"),
+            "new_screenshot": new_state.get("screenshot"),
+            **extra,
+        }
+
+    monkeypatch.setattr(regression_engine_module, "_capture_state", fake_capture_state)
+    engine._compare_state = fake_compare_state
+    engine._build_action_plan = lambda page_id, mapping: (
+        [
+            {
+                "case_type": "close_window",
+                "label": "confirm and reflect",
+                "legacy_locator": "#confirm",
+                "new_locator": "#confirm",
+            },
+            {
+                "case_type": "snapshot",
+                "label": "remaining popup assertion",
+                "legacy_locator": "__page__",
+                "new_locator": "__page__",
+            },
+        ],
+        "checklist",
+    )
+    engine._execute_action_case = lambda page, action_case, **kwargs: {
+        "status": "PASS",
+        "page_closed_after_action": True,
+        "state": {
+            "screenshot": str(tmp_path / f"{kwargs['side']}_parent_after_close.png"),
+            "url": f"http://{kwargs['side']}/parent.jsp",
+            "dom": "<parent-page />",
+            "capture_scope": "opener_after_popup_close",
+        },
+    }
+    engine._reopen_target_pair = lambda legacy_page, new_page, mapping, page_dir, browser_name, *, reason: (
+        legacy_page,
+        new_page,
+        {"status": "BLOCKED", "reason": "route replay failed"},
+    )
+
+    results = engine._run_captured_page_pair(
+        Page("http://legacy/start.jsp"),
+        Page("http://new/start.jsp"),
+        {"page_id": "Popup.jsp", "risk": "Low"},
+        tmp_path,
+        "chrome",
+        {"status": "PASS"},
+        {"status": "PASS"},
+        manual=False,
+    )
+
+    reflection = next(item for item in results if item["action"] == "confirm and reflect")
+    recovery = next(item for item in results if item["action"] == "Recover target page for remaining checklist actions")
+    assert reflection["status"] == "PASS"
+    assert reflection["recovery_failed_for_following_actions"] is True
+    assert recovery["status"] == "BLOCKED"
+    assert not any(item["action"] == "remaining popup assertion" for item in results)
 
 
 def test_guided_checklist_plan_skips_static_missing_element_noise(tmp_path, monkeypatch):

@@ -30,6 +30,8 @@ from src.gui_command_builder import (
     bounded_console_output,
     build_regression_command,
     browser_key,
+    create_regression_queue_run,
+    current_regression_queue_config,
     guided_checklist_path_for,
     guided_checklist_target_labels,
     html_report_path,
@@ -38,8 +40,8 @@ from src.gui_command_builder import (
     load_page_options,
     negative_profile_labels,
     page_option_labels,
+    record_regression_queue_result,
     regression_output_dir,
-    run_regression_queue,
     upload_case_option_labels,
     upload_profile_config_path,
     write_starter_guided_checklist,
@@ -547,13 +549,18 @@ def run_command(cmd, live_output=True):
     
     output_container = st.empty()
     full_output = ""
+    last_rendered_at = 0.0
     
     for line in process.stdout:
         full_output += line
-        if live_output:
+        now = time.monotonic()
+        if live_output and now - last_rendered_at >= 0.25:
             output_container.code(bounded_console_output(full_output))
+            last_rendered_at = now
     
     process.wait()
+    if live_output:
+        output_container.code(bounded_console_output(full_output))
     return process.returncode, full_output
 
 
@@ -1145,51 +1152,90 @@ with tabs[0]:
     if enabled_configs:
         st.caption(f"Ready: {len(enabled_configs)} page(s)")
 
-    if st.button("🔥 Launch Regression Queue", key="reg_launch"):
-        if not enabled_configs:
-            st.error("Please add at least one enabled target page.")
-            st.stop()
+    def prepare_queue_runtime_config(page_config):
+        runtime_config = dict(page_config)
+        upload_profiles = []
+        for profile in page_config.get("upload_profiles_raw") or []:
+            uploaded_file = profile.get("uploaded_file")
+            if uploaded_file is None or not profile.get("case_id"):
+                continue
+            file_path = save_uploaded_file(uploaded_file, subdir=f"gui_regression/{browser_key(page_config['browser'])}")
+            upload_profiles.append({**profile, "uploaded_file": None, "file": str(file_path)})
+        runtime_config.pop("upload_profiles_raw", None)
+        runtime_config["upload_profiles"] = upload_profiles
+        runtime_config["html_path"] = str(runtime_config["html_path"])
+        runtime_config["regression_output_dir"] = str(runtime_config["regression_output_dir"])
+        upload_profile_config = write_upload_profile_config(runtime_config)
+        if upload_profile_config:
+            runtime_config["upload_profile_config"] = str(upload_profile_config)
+        return runtime_config
 
-        def run_queue_page(page_config):
-            runtime_config = dict(page_config)
-            upload_profiles = []
-            for profile in page_config.get("upload_profiles_raw") or []:
-                uploaded_file = profile.get("uploaded_file")
-                if uploaded_file is None or not profile.get("case_id"):
-                    continue
-                file_path = save_uploaded_file(uploaded_file, subdir=f"gui_regression/{browser_key(page_config['browser'])}")
-                upload_profiles.append({**profile, "file": str(file_path)})
-            runtime_config["upload_profiles"] = upload_profiles
-            upload_profile_config = write_upload_profile_config(runtime_config)
-            if upload_profile_config:
-                runtime_config["upload_profile_config"] = str(upload_profile_config)
+    def run_queue_page(runtime_config):
+        if runtime_config.get("checklist_path") and not Path(runtime_config["checklist_path"]).exists():
+            st.warning(f"Checklist not found, using page mapping fallback: {runtime_config['checklist_path']}")
 
-            if runtime_config.get("checklist_path") and not Path(runtime_config["checklist_path"]).exists():
-                st.warning(f"Checklist not found, using page mapping fallback: {runtime_config['checklist_path']}")
+        full_cmd = build_regression_command(runtime_config, pytest_cmd=PYTEST_CMD)
+        st.info(f"Running: `{full_cmd}`")
+        code, _ = run_command(full_cmd)
+        report_path = Path(runtime_config["html_path"])
+        return {
+            "target_page": runtime_config["target_page"],
+            "return_code": code,
+            "report_path": str(report_path) if report_path.exists() else None,
+        }
 
-            full_cmd = build_regression_command(runtime_config, pytest_cmd=PYTEST_CMD)
-            st.info(f"Running: `{full_cmd}`")
-            code, _ = run_command(full_cmd)
-            report_path = Path(runtime_config["html_path"])
-            return {
-                "target_page": runtime_config["target_page"],
-                "return_code": code,
-                "report_path": report_path if report_path.exists() else None,
-            }
-
-        queue_results = run_regression_queue(enabled_configs, run_queue_page)
-        completed_reports = [item["report_path"] for item in queue_results if item.get("report_path")]
+    def render_queue_results(queue_run):
+        queue_results = list(queue_run.get("results") or [])
+        completed_reports = [Path(item["report_path"]) for item in queue_results if item.get("report_path")]
         failed_pages = [item for item in queue_results if item.get("return_code") != 0]
         if completed_reports:
             for report_path in completed_reports:
                 render_report_links(report_path, key_prefix=f"completed_{report_path.as_posix()}")
-        if failed_pages:
+        if queue_run.get("status") == "running":
+            st.info(f"Regression Queue Progress: {len(queue_results)}/{len(queue_run.get('configs') or [])} completed.")
+        elif queue_run.get("status") == "stopped":
+            st.warning(f"Regression Queue Stopped after {len(queue_results)}/{len(queue_run.get('configs') or [])} page(s).")
+        elif failed_pages:
             for item in failed_pages:
                 detail = f"exit={item['return_code']}" if item.get("return_code") is not None else item.get("error") or "unknown error"
                 st.error(f"Regression failed for {item.get('target_page')} ({detail}). Queue continued.")
             st.warning(f"Regression Queue Complete with {len(failed_pages)} failed page(s).")
         else:
             st.success("Regression Queue Complete.")
+
+    if st.button("🔥 Launch Regression Queue", key="reg_launch"):
+        if not enabled_configs:
+            st.error("Please add at least one enabled target page.")
+            st.stop()
+        st.session_state["reg_queue_runtime"] = create_regression_queue_run(
+            prepare_queue_runtime_config(page_config)
+            for page_config in enabled_configs
+        )
+        st.rerun()
+
+    queue_run = st.session_state.get("reg_queue_runtime")
+    if queue_run:
+        queue_control_col1, queue_control_col2 = st.columns([1, 4])
+        with queue_control_col1:
+            if st.button("Stop Queue", key="reg_queue_stop", disabled=queue_run.get("status") != "running"):
+                queue_run["status"] = "stopped"
+                st.session_state["reg_queue_runtime"] = queue_run
+                st.rerun()
+        with queue_control_col2:
+            render_queue_results(queue_run)
+
+        runtime_config = current_regression_queue_config(queue_run)
+        if runtime_config:
+            try:
+                queue_result = run_queue_page(runtime_config)
+            except Exception as exc:
+                queue_result = {
+                    "target_page": runtime_config.get("target_page"),
+                    "return_code": None,
+                    "error": str(exc),
+                }
+            st.session_state["reg_queue_runtime"] = record_regression_queue_result(queue_run, queue_result)
+            st.rerun()
 
 # --- TAB: Route Mapping ---
 with tabs[1]:

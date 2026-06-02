@@ -1033,6 +1033,11 @@ def _safe_opener_page(page: Page) -> Optional[Page]:
     return opener
 
 
+def _should_close_capture_page(capture_page: Page, action_page: Page, opener_page: Optional[Page], keep_popup: bool) -> bool:
+    """Close only a child popup opened by the action, never the parent used for evidence."""
+    return not keep_popup and capture_page is not action_page and capture_page is not opener_page
+
+
 def _safe_frame_urls(page: Page) -> List[str]:
     try:
         if _page_is_closed(page):
@@ -1688,7 +1693,7 @@ def execute_action(
                     Path(capture_dir),
                     name,
                 )
-            if capture_page is not page and not keep_popup:
+            if _should_close_capture_page(capture_page, page, opener_page, keep_popup):
                 try:
                     capture_page.close()
                 except PlaywrightError:

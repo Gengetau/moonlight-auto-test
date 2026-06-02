@@ -836,6 +836,40 @@ def run_regression_queue(configs: Iterable[Dict[str, Any]], run_page: Callable[[
     return results
 
 
+def create_regression_queue_run(configs: Iterable[Dict[str, Any]]) -> Dict[str, Any]:
+    queued = [dict(config) for config in configs]
+    return {
+        "status": "running" if queued else "complete",
+        "next_index": 0,
+        "configs": queued,
+        "results": [],
+    }
+
+
+def current_regression_queue_config(queue_run: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    configs = list(queue_run.get("configs") or [])
+    next_index = int(queue_run.get("next_index", 0) or 0)
+    if str(queue_run.get("status") or "") != "running" or next_index >= len(configs):
+        return None
+    return dict(configs[next_index])
+
+
+def record_regression_queue_result(queue_run: Dict[str, Any], result: Dict[str, Any]) -> Dict[str, Any]:
+    updated = dict(queue_run)
+    configs = list(updated.get("configs") or [])
+    results = list(updated.get("results") or [])
+    next_index = int(updated.get("next_index", 0) or 0)
+    current = configs[next_index] if next_index < len(configs) else {}
+    recorded = dict(result or {})
+    recorded.setdefault("target_page", current.get("target_page"))
+    results.append(recorded)
+    next_index += 1
+    updated["results"] = results
+    updated["next_index"] = next_index
+    updated["status"] = "complete" if next_index >= len(configs) else "running"
+    return updated
+
+
 def bounded_console_output(value: Any, *, max_chars: int = 40000) -> str:
     text = str(value or "")
     if max_chars <= 0 or len(text) <= max_chars:

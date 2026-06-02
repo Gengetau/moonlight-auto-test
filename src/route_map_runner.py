@@ -187,6 +187,31 @@ def _new_context(browser):
     return context
 
 
+def _close_browser_safely(browser) -> None:
+    """Detach dialog callbacks before contexts close to avoid late accept tasks."""
+    try:
+        contexts = list(browser.contexts)
+    except Exception:
+        contexts = []
+
+    for context in contexts:
+        try:
+            context.remove_listener("dialog", _safe_accept)
+        except Exception:
+            pass
+
+    for context in contexts:
+        try:
+            context.close()
+        except Exception:
+            pass
+
+    try:
+        browser.close()
+    except Exception:
+        pass
+
+
 def _open_or_login(page: Page, entry_url: str, timeout: int, *, auto_login: bool) -> None:
     page.bring_to_front()
     try:
@@ -342,7 +367,7 @@ def run_route_map(args: argparse.Namespace) -> Path:
                     f"原因={result.get('reason') or '-'}"
                 )
         finally:
-            browser.close()
+            _close_browser_safely(browser)
 
     write_usable_route_map(results, args.output)
     return args.output

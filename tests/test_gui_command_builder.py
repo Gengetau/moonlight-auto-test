@@ -6,6 +6,8 @@ import pytest
 from src.gui_command_builder import (
     bounded_console_output,
     build_regression_command,
+    create_regression_queue_run,
+    current_regression_queue_config,
     guided_checklist_path_for,
     starter_guided_checklist,
     html_report_path,
@@ -14,6 +16,7 @@ from src.gui_command_builder import (
     load_page_options,
     negative_profile_labels,
     regression_output_dir,
+    record_regression_queue_result,
     run_regression_queue,
     write_starter_guided_checklist,
     upload_case_option_labels,
@@ -74,6 +77,33 @@ def test_run_regression_queue_continues_after_failed_page():
     assert [item["return_code"] for item in results] == [0, 1, None, 0]
     assert results[2]["error"] == "route setup failed"
     assert [item["target_page"] for item in results] == calls
+
+
+def test_persistent_regression_queue_run_advances_all_cards_after_failures():
+    queue_run = create_regression_queue_run(
+        {"target_page": f"Page{index}.jsp"}
+        for index in range(1, 9)
+    )
+
+    while queue_run["status"] == "running":
+        config = current_regression_queue_config(queue_run)
+        assert config is not None
+        return_code = 1 if config["target_page"] == "Page4.jsp" else 0
+        queue_run = record_regression_queue_result(queue_run, {"return_code": return_code})
+
+    assert queue_run["status"] == "complete"
+    assert queue_run["next_index"] == 8
+    assert [item["target_page"] for item in queue_run["results"]] == [
+        "Page1.jsp",
+        "Page2.jsp",
+        "Page3.jsp",
+        "Page4.jsp",
+        "Page5.jsp",
+        "Page6.jsp",
+        "Page7.jsp",
+        "Page8.jsp",
+    ]
+    assert [item["return_code"] for item in queue_run["results"]] == [0, 0, 0, 1, 0, 0, 0, 0]
 
 
 def test_bounded_console_output_keeps_recent_tail():

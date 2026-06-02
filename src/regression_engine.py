@@ -2278,8 +2278,8 @@ class RegressionEngine:
             if reopen_result is not None:
                 compared["post_action_reopen"] = reopen_result
                 if reopen_result.get("status") != "PASS":
-                    compared["status"] = "BLOCKED"
-                    compared["reason"] = reopen_result.get("reason") or "Failed to reopen target page after leaving/closing action."
+                    compared["recovery_failed_for_following_actions"] = True
+                    compared["recovery_reason"] = reopen_result.get("reason") or "Failed to reopen target page after leaving/closing action."
             print(
                 f"[{page_id}] COMPARE result: "
                 + json.dumps(
@@ -2324,7 +2324,23 @@ class RegressionEngine:
                 },
             )
             results.append(compared)
-            if should_reopen_target and compared.get("status") == "BLOCKED":
+            if should_reopen_target and reopen_result is not None and reopen_result.get("status") != "PASS":
+                results.append(
+                    {
+                        "page_id": page_id,
+                        "risk": mapping.get("risk"),
+                        "action": "Recover target page for remaining checklist actions",
+                        "action_type": "target_reopen",
+                        "status": "BLOCKED",
+                        "reason": reopen_result.get("reason") or "Failed to reopen target page after leaving/closing action.",
+                        "legacy_screenshot": (legacy_action.get("state") or {}).get("screenshot"),
+                        "new_screenshot": (new_action.get("state") or {}).get("screenshot"),
+                        "legacy_action": (reopen_result.get("legacy") or {}),
+                        "new_action": (reopen_result.get("new") or {}),
+                        "post_action_reopen": reopen_result,
+                        "plan_source": plan_source,
+                    }
+                )
                 break
 
         self._write_full_test_log(
@@ -2370,6 +2386,15 @@ class RegressionEngine:
             "close_window",
             "back_action",
             "link_navigation",
+            "assert_attached",
+            "assert_checked",
+            "assert_disabled",
+            "assert_enabled",
+            "assert_text",
+            "assert_unchecked",
+            "assert_url",
+            "assert_value",
+            "assert_visible",
             "upload_select",
             "upload_without_file",
             "upload_submit",
