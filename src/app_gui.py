@@ -15,7 +15,7 @@ if str(PROJECT_ROOT) not in sys.path:
 from src.config_parser import Config
 
 BROWSER_OPTIONS = {
-    "Chrome portable": "chrome_port",
+    "Google Chrome (portable/system)": "chrome_port",
     "Microsoft Edge": "edge",
     "Firefox": "firefox",
 }

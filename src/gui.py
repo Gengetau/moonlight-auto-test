@@ -344,7 +344,7 @@ def reg_queue_record_labels(records):
 
 LOGIN_ENTRY_NAMES = login_entry_names()
 BROWSER_OPTIONS = {
-    "Chrome portable": "chrome_port",
+    "Google Chrome (portable/system)": "chrome_port",
     "Microsoft Edge": "edge",
     "Firefox": "firefox",
 }

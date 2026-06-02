@@ -245,10 +245,8 @@ def browser(browser_name, login_entry):
                 args=FIREFOX_ARGS,
             )
         elif browser_name == "chrome_port":
-            if not Config.CHROME_PORTABLE_PATH:
-                raise ValueError("CHROME_PORTABLE_PATH not set in .env")
             browser = p.chromium.launch(
-                executable_path=Config.CHROME_PORTABLE_PATH, 
+                **Config.chrome_launch_kwargs(),
                 headless=False,
                 args=[
                     "--force-device-scale-factor=1",

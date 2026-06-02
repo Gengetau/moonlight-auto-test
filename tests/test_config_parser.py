@@ -40,3 +40,23 @@ def test_select_login_entry_accepts_name(monkeypatch):
     assert selected["name"] == "beta"
     assert selected["legacy_url"] == "http://legacy-beta/app/"
     assert selected["new_url"] == "http://new-beta/app/"
+
+
+def test_chrome_launch_kwargs_uses_system_chrome_when_portable_path_is_blank(monkeypatch):
+    monkeypatch.setattr(Config, "CHROME_PORTABLE_PATH", "")
+
+    assert Config.chrome_launch_kwargs() == {"channel": "chrome"}
+
+
+def test_chrome_launch_kwargs_uses_system_chrome_when_portable_path_is_missing(monkeypatch, tmp_path):
+    monkeypatch.setattr(Config, "CHROME_PORTABLE_PATH", str(tmp_path / "missing-chrome.exe"))
+
+    assert Config.chrome_launch_kwargs() == {"channel": "chrome"}
+
+
+def test_chrome_launch_kwargs_prefers_existing_portable_chrome(monkeypatch, tmp_path):
+    portable_chrome = tmp_path / "chrome.exe"
+    portable_chrome.write_bytes(b"portable chrome placeholder")
+    monkeypatch.setattr(Config, "CHROME_PORTABLE_PATH", str(portable_chrome))
+
+    assert Config.chrome_launch_kwargs() == {"executable_path": str(portable_chrome)}

@@ -76,7 +76,7 @@ NEW_URLS=https://new-a.example.com,https://new-b.example.com
 TEST_USERNAME=your_username
 TEST_PASSWORD=your_password
 
-# 浏览器阵地 (便携版路径，若使用系统浏览器可留空)
+# 浏览器阵地 (可选：优先使用便携版；留空或路径不存在时自动回退系统 Google Chrome)
 CHROME_PORTABLE_PATH=/path/to/chrome_portable/chrome.exe
 
 # 下载动作保存目录。下载文件名保持浏览器 suggested filename 原样。
@@ -263,7 +263,7 @@ Windows PowerShell:
 2. `Regression`
    - `Target Page Queue`: 可选，每行填写一个 JSP 文件名，或用逗号/分号分隔；为空时执行全量或风险过滤回归。
    - `Login Entry`: 从 `.env` 中配置的入口名生成下拉框。
-   - `Browser`: 选择测试浏览器，支持 `Chrome portable`、`Microsoft Edge`、`Firefox`。
+   - `Browser`: 选择测试浏览器，支持 `Google Chrome (portable/system)`、`Microsoft Edge`、`Firefox`。Google Chrome 会优先使用 `.env` 中存在的便携版路径，否则自动调用系统安装版本。
    - `Checklist Path`: 自动化测试清单，默认 `generated\valid\migration_checklist.xlsx`。文件存在时会传给 pytest，优先执行 Excel 中的 `automation_mode=auto` 用例。
    - `Use Upload File` / `Upload File`: 勾选后选择真实本地文件，GUI 会把它传给 `--upload-file`，后续上传动作统一读取该文件。
    - `Risk-Only Mode`: 只执行高/中风险差异页面。
@@ -278,7 +278,7 @@ Windows PowerShell:
      如果 `Target JSP` 填写 `/docroot/adminTool/ProjectListUploadErr.jsp` 这样的带目录路径，文件名中的目录分隔符会自动转换为 `_`。
    - `Side`: 选择验证旧系统 `legacy` 或新系统 `new`，一次只打开一个系统。
    - `Login Entry`: 从 `.env` 中配置的入口名生成下拉框。验证路径时会传给 `route_map_runner`，避免命令在浏览器启动前停在入口选择。
-   - `Browser`: 选择路径验证浏览器，支持 `Chrome portable`、`Microsoft Edge`、`Firefox`。
+   - `Browser`: 选择路径验证浏览器，支持 `Google Chrome (portable/system)`、`Microsoft Edge`、`Firefox`。
    - `Auto Login`: 勾选后打开入口页时自动填写 `.env` 中的测试账号密码；不勾选时，遇到登录页会等待人工登录。
    - `Manual Full Route`: 不使用静态候选路径，从入口开始全程人工录制一条可回放路径。
    - `Use Upload File` / `Upload File`: 路径验证需要上传数据时，勾选并选择真实本地文件，录制出的 `manual_replay` 会使用该文件路径。

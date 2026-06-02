@@ -62,10 +62,8 @@ def _launch_browser(playwright, browser_name: str):
     if browser_name == "firefox":
         return playwright.firefox.launch(headless=False, args=FIREFOX_ARGS)
     if browser_name == "chrome_port":
-        if not Config.CHROME_PORTABLE_PATH:
-            raise ValueError("CHROME_PORTABLE_PATH not set in .env")
         return playwright.chromium.launch(
-            executable_path=Config.CHROME_PORTABLE_PATH,
+            **Config.chrome_launch_kwargs(),
             headless=False,
             args=CHROMIUM_ARGS,
         )

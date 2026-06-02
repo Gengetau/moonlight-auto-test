@@ -1,4 +1,6 @@
 import os
+from pathlib import Path
+
 from dotenv import load_dotenv
 
 # 加载 .env 文件
@@ -12,6 +14,16 @@ class Config:
     PASSWORD = os.getenv("TEST_PASSWORD", "password")
     USER_DATA_DIR = os.getenv("USER_DATA_DIR", "./output/user_data")
     DOWNLOAD_DIR = os.getenv("DOWNLOAD_DIR", os.path.expanduser("~/Downloads"))
+
+    @classmethod
+    def chrome_launch_kwargs(cls):
+        """Prefer a configured portable Chrome, then fall back to system Chrome."""
+        portable_path = str(cls.CHROME_PORTABLE_PATH or "").strip()
+        if portable_path:
+            candidate = Path(portable_path).expanduser()
+            if candidate.is_file():
+                return {"executable_path": str(candidate)}
+        return {"channel": "chrome"}
 
     @staticmethod
     def _split_env_list(value: str):
