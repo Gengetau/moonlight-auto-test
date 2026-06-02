@@ -68,13 +68,21 @@ def _record_download_result(result: Dict[str, Any], download: Any) -> None:
     result["download_path"] = str(save_path)
 
 
-def _console_font(size: int = 15):
-    candidates = [
-        r"C:\Windows\Fonts\consola.ttf",
+def _console_font(size: int = 15, sample_text: str = ""):
+    japanese_candidates = [
+        r"C:\Windows\Fonts\NotoSansJP-VF.ttf",
+        r"C:\Windows\Fonts\meiryo.ttc",
         r"C:\Windows\Fonts\YuGothM.ttc",
         r"C:\Windows\Fonts\msgothic.ttc",
+    ]
+    latin_candidates = [
+        r"C:\Windows\Fonts\consola.ttf",
         "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
     ]
+    if any(ord(char) > 127 for char in str(sample_text or "")):
+        candidates = japanese_candidates + latin_candidates
+    else:
+        candidates = latin_candidates + japanese_candidates
     for candidate in candidates:
         if Path(candidate).exists():
             try:
@@ -104,8 +112,6 @@ def _wrap_console_line(text: str, limit: int = 150) -> List[str]:
 def _render_console_evidence_image(events: List[Dict[str, Any]], output_dir: Path, name: str) -> str:
     output_dir.mkdir(parents=True, exist_ok=True)
     image_path = output_dir / f"{name}_console.png"
-    font = _console_font(15)
-    small_font = _console_font(13)
     width = 1280
     line_height = 24
     header_height = 54
@@ -124,6 +130,9 @@ def _render_console_evidence_image(events: List[Dict[str, Any]], output_dir: Pat
         for wrapped in _wrap_console_line(text):
             lines.append((level, wrapped))
 
+    evidence_text = "\n".join(text for _, text in lines)
+    font = _console_font(15, evidence_text)
+    small_font = _console_font(13, evidence_text)
     height = max(240, header_height + (len(lines) + 1) * line_height + 24)
     image = Image.new("RGB", (width, height), (31, 31, 31))
     draw = ImageDraw.Draw(image)
@@ -1014,6 +1023,16 @@ def _safe_page_url(page: Page) -> str:
         return "about:closed"
 
 
+def _safe_opener_page(page: Page) -> Optional[Page]:
+    try:
+        opener = page.opener()
+    except Exception:
+        return None
+    if opener is None or _page_is_closed(opener):
+        return None
+    return opener
+
+
 def _safe_frame_urls(page: Page) -> List[str]:
     try:
         if _page_is_closed(page):
@@ -1052,6 +1071,7 @@ def execute_action(
     action_dispatched = False
     capture_page = page
     keep_popup = bool((action_context or {}).get("keep_popup"))
+    opener_page = _safe_opener_page(page)
     before_url = _safe_page_url(page)
     before_frame_urls = _safe_frame_urls(page)
     result["before_url"] = before_url
@@ -1059,8 +1079,10 @@ def execute_action(
     console_events: List[Dict[str, Any]] = []
     event_handlers: List[Tuple[str, Any]] = []
     temporary_routes: List[Tuple[str, Any]] = []
+    event_log_initialized = False
 
     def _record_event(event_type: str, details: Any, *, level: str = "info", url: str = "", status: Optional[int] = None):
+        nonlocal event_log_initialized
         # 内部闭包用于记录 Playwright 事件
         event = {
             "time": time.strftime("%H:%M:%S"),
@@ -1075,8 +1097,10 @@ def execute_action(
         test_id_str = _safe_name(test_id or "global")
         log_dir = Path(capture_dir) if capture_dir else Path("./output/logs")
         log_dir.mkdir(parents=True, exist_ok=True)
-        with open(log_dir / f"{test_id_str}_events.log", "a", encoding="utf-8") as f:
+        mode = "a" if event_log_initialized else "w"
+        with open(log_dir / f"{test_id_str}_events.log", mode, encoding="utf-8") as f:
             f.write(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {event_type}: {details}\n")
+        event_log_initialized = True
 
     def _console_location(message: Any) -> str:
         try:
@@ -1619,9 +1643,14 @@ def execute_action(
         else:
             result.update({"status": "BLOCKED", "reason": str(exc)})
     finally:
+        action_page_closed = bool(result.get("page_closed_after_action")) or _page_is_closed(capture_page)
+        if action_page_closed and capture_page is page and opener_page is not None:
+            capture_page = opener_page
+            result["capture_scope"] = "opener_after_popup_close"
+            result["opener_url"] = _safe_page_url(opener_page)
         after_url = _safe_page_url(capture_page)
         after_frame_urls = _safe_frame_urls(capture_page)
-        page_closed_after = bool(result.get("page_closed_after_action")) or _page_is_closed(capture_page)
+        page_closed_after = action_page_closed or _page_is_closed(capture_page)
         popup_detected = bool(result.get("popup_opened"))
         navigation_detected = before_url != after_url
         frame_changed = before_frame_urls != after_frame_urls

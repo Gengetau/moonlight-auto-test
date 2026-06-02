@@ -1916,43 +1916,43 @@ class RegressionEngine:
             )
             return results
 
-        for blocked in mapping.get("missing_legacy_elements", []):
-            if self._is_dynamic_jsp_row_control(blocked):
-                print(
-                    f"[{page_id}] SKIP static dynamic row control: "
-                    + json.dumps(
-                        {
-                            "label": blocked.get("label") or blocked.get("key"),
-                            "locator": blocked.get("locator"),
-                            "reason": "covered by runtime/checklist CRUD action",
-                        },
-                        ensure_ascii=False,
-                    )
-                )
-                continue
-            missing_status, missing_reason = self._missing_legacy_element_status(blocked)
-            results.append(
-                {
-                    "page_id": page_id,
-                    "risk": mapping.get("risk"),
-                    "action": blocked.get("label") or blocked.get("key") or "missing_legacy_element",
-                    "action_type": infer_semantic_action(blocked.get("action_hint") or blocked.get("kind"), blocked),
-                    "status": missing_status,
-                    "reason": missing_reason,
-                    "legacy_locator": blocked.get("locator"),
-                    "new_locator": None,
-                    "legacy_screenshot": legacy_state.get("screenshot"),
-                    "new_screenshot": new_state.get("screenshot"),
-                    "legacy_frame": legacy_state.get("target_frame"),
-                    "new_frame": new_state.get("target_frame"),
-                    "frame_candidates": {
-                        "legacy": legacy_state.get("frame_candidates", []),
-                        "new": new_state.get("frame_candidates", []),
-                    },
-                }
-            )
-
         target_actions, plan_source = self._build_action_plan(page_id, mapping)
+        if plan_source != "checklist":
+            for blocked in mapping.get("missing_legacy_elements", []):
+                if self._is_dynamic_jsp_row_control(blocked):
+                    print(
+                        f"[{page_id}] SKIP static dynamic row control: "
+                        + json.dumps(
+                            {
+                                "label": blocked.get("label") or blocked.get("key"),
+                                "locator": blocked.get("locator"),
+                                "reason": "covered by runtime/checklist CRUD action",
+                            },
+                            ensure_ascii=False,
+                        )
+                    )
+                    continue
+                missing_status, missing_reason = self._missing_legacy_element_status(blocked)
+                results.append(
+                    {
+                        "page_id": page_id,
+                        "risk": mapping.get("risk"),
+                        "action": blocked.get("label") or blocked.get("key") or "missing_legacy_element",
+                        "action_type": infer_semantic_action(blocked.get("action_hint") or blocked.get("kind"), blocked),
+                        "status": missing_status,
+                        "reason": missing_reason,
+                        "legacy_locator": blocked.get("locator"),
+                        "new_locator": None,
+                        "legacy_screenshot": legacy_state.get("screenshot"),
+                        "new_screenshot": new_state.get("screenshot"),
+                        "legacy_frame": legacy_state.get("target_frame"),
+                        "new_frame": new_state.get("target_frame"),
+                        "frame_candidates": {
+                            "legacy": legacy_state.get("frame_candidates", []),
+                            "new": new_state.get("frame_candidates", []),
+                        },
+                    }
+                )
         self._write_full_test_log(
             page_dir,
             page_id,
@@ -2181,8 +2181,6 @@ class RegressionEngine:
                     new_reopened_state = _capture_state(new_page, page_dir, f"{action_file_id}_new_after_reopen")
                     legacy_action["state_after_reopen"] = legacy_reopened_state
                     new_action["state_after_reopen"] = new_reopened_state
-                    legacy_action["state"] = legacy_reopened_state
-                    new_action["state"] = new_reopened_state
                 self._write_full_test_log(
                     page_dir,
                     page_id,
@@ -2375,8 +2373,6 @@ class RegressionEngine:
 
         if "delete_action" in evidence or "deletefile" in evidence or english_words("delete", "remove") or any(token in evidence for token in ("削除", "消去")):
             return "delete"
-        if "search_normal" in evidence or english_words("search", "query", "find") or any(token in evidence for token in ("検索", "照会", "抽出")):
-            return "read"
         if english_words("update", "modify", "edit", "save") or any(token in evidence for token in ("更新", "変更", "編集", "保存")):
             return "update"
         if "upload_submit" in evidence or english_words("create", "insert", "entry", "register", "add") or any(token in evidence for token in ("登録", "新規", "追加", "作成", "アップロード")):
@@ -2770,7 +2766,8 @@ class RegressionEngine:
             route_step = self._page_is_route_map_step(candidate, route)
             target_match = bool(target_mapping and self._page_matches_mapping(candidate, target_mapping))
             login_like = bool(re.search(r"login", str(url or ""), re.IGNORECASE))
-            candidates.append((0 if target_match else 1, 0 if route_step else 1, 1 if login_like else 0, candidate, url, route_step, target_match))
+            negative_evidence = self._page_has_negative_marker(candidate)
+            candidates.append((1 if negative_evidence else 0, 0 if target_match else 1, 0 if route_step else 1, 1 if login_like else 0, candidate, url, route_step, target_match, negative_evidence))
             debug_candidates.append(
                 {
                     "closed": False,
@@ -2778,6 +2775,7 @@ class RegressionEngine:
                     "route_step_detected": route_step,
                     "target_page_detected": target_match,
                     "login_like": login_like,
+                    "negative_evidence": negative_evidence,
                     "selected": False,
                 }
             )
@@ -2785,8 +2783,8 @@ class RegressionEngine:
         if not candidates:
             return page, {"status": "SKIPPED", "reason": "no open sibling/container page found", "candidates": debug_candidates}
 
-        candidates.sort(key=lambda item: (item[0], item[1], item[2], str(item[4] or "")))
-        _, _, _, selected, url, route_step, target_match = candidates[0]
+        candidates.sort(key=lambda item: (item[0], item[1], item[2], item[3], str(item[5] or "")))
+        _, _, _, _, selected, url, route_step, target_match, negative_evidence = candidates[0]
         for item in debug_candidates:
             if item.get("url") == url and not item.get("closed"):
                 item["selected"] = True
@@ -2805,6 +2803,7 @@ class RegressionEngine:
             "url": url,
             "route_step_detected": route_step,
             "target_page_detected": target_match,
+            "negative_evidence": negative_evidence,
             "candidates": debug_candidates,
         }
 
@@ -2905,6 +2904,8 @@ class RegressionEngine:
     def _page_is_route_map_step(self, page: Page, route: Dict[str, Any]) -> bool:
         if self._page_is_closed(page):
             return False
+        if self._page_has_negative_marker(page):
+            return False
 
         tokens = self._route_map_step_tokens(route)
         if not tokens:
@@ -2918,6 +2919,22 @@ class RegressionEngine:
 
         haystack = "\n".join(str(url or "").replace("\\", "/").lower() for url in urls)
         return any(token in haystack for token in tokens)
+
+    @staticmethod
+    def _page_has_negative_marker(page: Page) -> bool:
+        if RegressionEngine._page_is_closed(page):
+            return False
+        try:
+            frames = list(page.frames)
+        except Exception:
+            frames = []
+        for frame in frames:
+            try:
+                if frame.locator("[data-moonlight-negative-state], #moonlight-negative-visual-evidence").count() > 0:
+                    return True
+            except Exception:
+                continue
+        return False
 
     @staticmethod
     def _route_map_step_tokens(route: Dict[str, Any]) -> List[str]:

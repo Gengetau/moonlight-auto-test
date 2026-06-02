@@ -7,12 +7,14 @@ from PIL import Image
 from src.action_executor import (
     _accept_dialog_safely,
     _capture_state,
+    _console_font,
     _download_save_path,
     _negative_visual_evidence_payload,
     _opens_popup_hint,
     _render_console_evidence_image,
     _resolve_upload_file_value,
     _safe_download_filename,
+    _safe_opener_page,
     build_steps_from_page_mapping,
     infer_semantic_action,
 )
@@ -459,6 +461,34 @@ def test_console_evidence_image_renders_events(tmp_path):
     with Image.open(image_path) as image:
         assert image.width >= 1000
         assert image.height >= 200
+
+
+def test_console_font_prefers_japanese_font_for_non_ascii_text():
+    expected = Path(r"C:\Windows\Fonts\NotoSansJP-VF.ttf")
+    if not expected.exists():
+        pytest.skip("Windows Japanese font is not installed")
+
+    font = _console_font(15, "項目を選択してください")
+
+    assert Path(font.path).name == expected.name
+
+
+def test_safe_opener_page_returns_open_parent():
+    class Page:
+        def __init__(self, *, closed=False, opener=None):
+            self._closed = closed
+            self._opener = opener
+
+        def is_closed(self):
+            return self._closed
+
+        def opener(self):
+            return self._opener
+
+    parent = Page()
+
+    assert _safe_opener_page(Page(opener=parent)) is parent
+    assert _safe_opener_page(Page(opener=Page(closed=True))) is None
 
 
 def test_negative_visual_evidence_payload_names_visible_error_state():
@@ -1441,7 +1471,7 @@ def test_database_operation_kind_covers_crud_actions():
     assert RegressionEngine._database_operation_kind({"case_type": "create_action", "label": "登録"}, "click", "click") == "create"
     assert RegressionEngine._database_operation_kind({"case_type": "update_action", "label": "更新"}, "click", "click") == "update"
     assert RegressionEngine._database_operation_kind({"case_type": "delete_action", "label": "削除"}, "click", "click") == "delete"
-    assert RegressionEngine._database_operation_kind({"case_type": "search_normal", "label": "検索"}, "search", "click") == "read"
+    assert RegressionEngine._database_operation_kind({"case_type": "search_normal", "label": "検索"}, "search", "click") is None
     assert RegressionEngine._database_operation_kind({"case_type": "upload_submit", "label": "アップロード確認"}, "upload_submit", "upload") is None
 
 
@@ -1536,7 +1566,71 @@ def test_reopen_prefers_open_route_step_page_before_login_recovery(tmp_path):
     assert parent.front == 1
 
 
-def test_closing_action_report_uses_reopened_target_state(tmp_path, monkeypatch):
+def test_reopen_ignores_negative_evidence_page_when_parent_route_step_is_open(tmp_path):
+    class Locator:
+        def __init__(self, count):
+            self._count = count
+
+        def count(self):
+            return self._count
+
+    class Frame:
+        def __init__(self, url, *, negative=False):
+            self.url = url
+            self.negative = negative
+
+        def locator(self, selector):
+            return Locator(1 if self.negative else 0)
+
+    class Context:
+        def __init__(self):
+            self.pages = []
+
+    class Page:
+        def __init__(self, url, *, negative=False):
+            self.url = url
+            self._closed = False
+            self.frames = [Frame(url, negative=negative)]
+            self.context = None
+            self.front = 0
+
+        def is_closed(self):
+            return self._closed
+
+        def bring_to_front(self):
+            self.front += 1
+
+        def wait_for_load_state(self, state, timeout=None):
+            return None
+
+    context = Context()
+    negative_page = Page("http://example.test/patlics/WwSearchAidSearch.do?method=forEasySearch", negative=True)
+    parent = Page("http://example.test/patlics/PatlicsTopMain.do")
+    for page in (negative_page, parent):
+        page.context = context
+    context.pages = [negative_page, parent]
+
+    mapping_path = tmp_path / "page_mapping.json"
+    mapping_path.write_text(json.dumps({"page_mappings": []}), encoding="utf-8")
+    engine = RegressionEngine(mapping_path=str(mapping_path), output_dir=str(tmp_path))
+    route = {
+        "target_page": "WwSearchAid.jsp",
+        "steps": [
+            {"active_page_url": "http://example.test/patlics/PatlicsTopMain.do"},
+            {"active_page_url": "http://example.test/patlics/WwSearchAidSearch.do?method=forEasySearch"},
+        ],
+    }
+
+    selected, nav = engine._takeover_recovery_page(negative_page, route)
+
+    assert selected is parent
+    assert nav["status"] == "PASS"
+    assert nav["negative_evidence"] is False
+    assert parent.front == 1
+    assert engine._page_is_route_map_step(negative_page, route) is False
+
+
+def test_closing_action_report_preserves_parent_state_and_keeps_reopened_state_for_recovery(tmp_path, monkeypatch):
     class Page:
         def __init__(self, url):
             self.url = url
@@ -1580,10 +1674,10 @@ def test_closing_action_report_uses_reopened_target_state(tmp_path, monkeypatch)
         "status": "PASS",
         "page_closed_after_action": True,
         "state": {
-            "screenshot": str(tmp_path / "closed.png"),
-            "url": "about:closed",
-            "dom": "<page-closed />",
-            "page_closed": True,
+            "screenshot": str(tmp_path / f"{kwargs['side']}_parent_after_close.png"),
+            "url": f"http://{kwargs['side']}/parent.jsp",
+            "dom": "<parent-page />",
+            "capture_scope": "opener_after_popup_close",
         },
     }
     engine._reopen_target_pair = lambda legacy_page, new_page, mapping, page_dir, browser_name, *, reason: (
@@ -1605,11 +1699,70 @@ def test_closing_action_report_uses_reopened_target_state(tmp_path, monkeypatch)
     )
 
     action_result = next(item for item in results if item["action"] == "download")
-    assert action_result["legacy_screenshot"].endswith("01_download_legacy_after_reopen.png")
-    assert action_result["new_screenshot"].endswith("01_download_new_after_reopen.png")
-    assert action_result["legacy_action"]["state_before_reopen"]["page_closed"] is True
+    assert action_result["legacy_screenshot"].endswith("legacy_parent_after_close.png")
+    assert action_result["new_screenshot"].endswith("new_parent_after_close.png")
+    assert action_result["legacy_action"]["state_before_reopen"]["capture_scope"] == "opener_after_popup_close"
+    assert action_result["legacy_action"]["state_after_reopen"]["screenshot"].endswith("01_download_legacy_after_reopen.png")
+    assert action_result["new_action"]["state_after_reopen"]["screenshot"].endswith("01_download_new_after_reopen.png")
     assert action_result["post_action_reopen"]["status"] == "PASS"
     log_text = (tmp_path / "full_test_log.jsonl").read_text(encoding="utf-8")
     assert '"event": "action_executed"' in log_text
     assert '"event": "target_reopen_finished"' in log_text
     assert '"event": "compare_result"' in log_text
+
+
+def test_guided_checklist_plan_skips_static_missing_element_noise(tmp_path, monkeypatch):
+    class Page:
+        def __init__(self, url):
+            self.url = url
+
+    mapping_path = tmp_path / "page_mapping.json"
+    mapping_path.write_text(json.dumps({"page_mappings": []}), encoding="utf-8")
+    engine = RegressionEngine(mapping_path=str(mapping_path), output_dir=str(tmp_path))
+
+    def fake_capture_state(page, output_dir, name):
+        return {
+            "screenshot": str(Path(output_dir) / f"{name}.png"),
+            "url": page.url,
+            "dom": name,
+            "text": name,
+        }
+
+    def fake_compare_state(page_id, risk, action, legacy_state, new_state, diff_path, **extra):
+        return {
+            "page_id": page_id,
+            "risk": risk,
+            "action": action,
+            "status": "PASS",
+            "legacy_screenshot": legacy_state.get("screenshot"),
+            "new_screenshot": new_state.get("screenshot"),
+            **extra,
+        }
+
+    monkeypatch.setattr(regression_engine_module, "_capture_state", fake_capture_state)
+    engine._compare_state = fake_compare_state
+    engine._build_action_plan = lambda page_id, mapping: ([], "checklist")
+
+    results = engine._run_captured_page_pair(
+        Page("http://legacy/WwSearchAid.do"),
+        Page("http://new/WwSearchAid.do"),
+        {
+            "page_id": "WwSearchAid.jsp",
+            "risk": "High",
+            "missing_legacy_elements": [
+                {
+                    "key": "KEY",
+                    "kind": "input",
+                    "locator": "[name='KEY']",
+                    "action_hint": "fill",
+                }
+            ],
+        },
+        tmp_path,
+        "chrome",
+        {"status": "PASS"},
+        {"status": "PASS"},
+        manual=False,
+    )
+
+    assert [item["action"] for item in results] == ["page_snapshot"]
