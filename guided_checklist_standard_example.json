@@ -1,0 +1,423 @@
+{
+  "schema": "moonlight.guided_checklist.v1",
+  "page_id": "ExampleAdministration.jsp",
+  "actual_page_id": "ExampleAdministrationMain.do",
+  "template_id": "standard_guided_checklist_example",
+  "title": "Standard guided checklist example",
+  "example_only": true,
+  "generation_contract": {
+    "output_filename": "<ScreenId>_checklist.json",
+    "output_directory": "generated/valid/guided_checklists",
+    "required_top_level_fields": [
+      "schema",
+      "page_id",
+      "actual_page_id",
+      "route_policy",
+      "observed_evidence",
+      "notes",
+      "cases"
+    ],
+    "required_case_fields": [
+      "case_id",
+      "title",
+      "risk_level",
+      "automation_mode",
+      "destructive",
+      "steps",
+      "expected"
+    ],
+    "required_step_fields": [
+      "action_type",
+      "locator"
+    ],
+    "authoring_rules": [
+      "Every case, including manual cases, must contain a non-empty steps array.",
+      "Use stable CSS locators observed in the live DOM. Do not invent locators from labels alone.",
+      "Do not assert environment-specific row counts, record IDs, dates, user names or business data unless the value is a deliberate stable fixture.",
+      "After select, fill, check or uncheck actions, add assert_value, assert_text, assert_visible or snapshot steps that prove the state change.",
+      "A matrix description must match the executed steps. Split multiple option values into separate cases unless every value is actually exercised.",
+      "Put prerequisite operations in pre_steps when a child action requires row selection, menu expansion or checkbox activation.",
+      "For child/subpage entries, use action_type=child_navigation or open_child_page, set expected_page or expected_url, and leave keep_popup unset so opened popup pages are closed after evidence capture.",
+      "Use semi-auto for popup reflection into an opener or actions that require human review after navigation.",
+      "Use manual for downloads, print dialogs, mutations, registrations, deletions and irreversible business actions unless the user explicitly approves automation.",
+      "Use destructive=true for deletion, approval, submission or persistent update boundaries.",
+      "Add applicable auto-negative cases for HTTP 500, network abort and JavaScript errors.",
+      "Popup dimensions are system-defined. Do not resize popup windows.",
+      "Record route dependencies and frame paths. Do not assume direct URL navigation is valid."
+    ]
+  },
+  "route_policy": {
+    "direct_url_allowed": false,
+    "entry_path": [
+      "Describe the business menu path",
+      "Describe the parent page action",
+      "Reach the target page through the real workflow"
+    ],
+    "note": "Replace this with the observed route dependency. Keep direct_url_allowed=false when session state or opener state is required."
+  },
+  "observed_evidence": {
+    "recorded_at": "YYYY-MM-DD",
+    "recorded_url": "http://host/application/ExampleAdministrationMain.do",
+    "recorded_title": "Replace with the observed document title",
+    "frame_path": [
+      "top",
+      "frMain"
+    ],
+    "form": {
+      "name": "ExampleAdministrationForm",
+      "method": "post",
+      "action": "/application/ExampleAdministrationPaging.do"
+    },
+    "stable_controls": [
+      {
+        "label": "List filter",
+        "locator": "select[name='selectDispType']",
+        "options": [
+          {
+            "value": "all",
+            "label": "All"
+          },
+          {
+            "value": "mine",
+            "label": "Mine"
+          }
+        ]
+      },
+      {
+        "label": "Sort button",
+        "locator": "input[name='sortButton']"
+      },
+      {
+        "label": "Child route",
+        "locator": "input[name='openDetail']"
+      }
+    ],
+    "dynamic_state_notes": [
+      "Replace this with observed row-selection, menu-expansion and popup-reflection dependencies.",
+      "Keep dynamic business values as evidence only. Do not copy them into automatic assertions."
+    ]
+  },
+  "notes": [
+    "This file is an authoring example. Copy it and replace every Example value before execution.",
+    "Safe auto cases compare the legacy and new systems after the same action.",
+    "Manual cases remain visible in report coverage but are not executed automatically.",
+    "Auto-negative cases run only when Include negative and the matching negative profile are enabled."
+  ],
+  "cases": [
+    {
+      "case_id": "example_initial_display",
+      "title": "Initial layout and stable headings are visible",
+      "risk_level": "safe",
+      "automation_mode": "auto",
+      "destructive": false,
+      "steps": [
+        {
+          "action_type": "assert_visible",
+          "locator": "form[name='ExampleAdministrationForm']"
+        },
+        {
+          "action_type": "assert_text",
+          "locator": "__page__",
+          "value": "Example administration"
+        },
+        {
+          "action_type": "assert_visible",
+          "locator": "table[name='resultTable']"
+        }
+      ],
+      "expected": {
+        "type": "visible",
+        "value": "stable page layout"
+      }
+    },
+    {
+      "case_id": "example_controls_visible",
+      "title": "Stable filter, sort and child-route controls are visible",
+      "risk_level": "safe",
+      "automation_mode": "auto",
+      "destructive": false,
+      "steps": [
+        {
+          "action_type": "assert_visible",
+          "locator": "select[name='selectDispType']"
+        },
+        {
+          "action_type": "assert_visible",
+          "locator": "select[name='selectSortType']"
+        },
+        {
+          "action_type": "assert_visible",
+          "locator": "input[name='sortButton']"
+        },
+        {
+          "action_type": "assert_visible",
+          "locator": "input[name='openDetail']"
+        }
+      ],
+      "expected": {
+        "type": "visible",
+        "value": "stable controls"
+      }
+    },
+    {
+      "case_id": "example_filter_all",
+      "title": "Selecting the all-items filter updates the selected value and result view",
+      "risk_level": "safe",
+      "automation_mode": "auto",
+      "destructive": false,
+      "steps": [
+        {
+          "action_type": "select",
+          "locator": "select[name='selectDispType']",
+          "value": "all"
+        },
+        {
+          "action_type": "assert_value",
+          "locator": "select[name='selectDispType']",
+          "value": "all"
+        },
+        {
+          "action_type": "assert_visible",
+          "locator": "table[name='resultTable']"
+        },
+        {
+          "action_type": "snapshot",
+          "locator": "__page__"
+        }
+      ],
+      "expected": {
+        "type": "selected_value_and_visual_compare",
+        "value": "all"
+      }
+    },
+    {
+      "case_id": "example_sort_updated_at_ascending",
+      "title": "Sorting by updated date in ascending order refreshes the list",
+      "risk_level": "safe",
+      "automation_mode": "auto",
+      "destructive": false,
+      "steps": [
+        {
+          "action_type": "select",
+          "locator": "select[name='selectSortType']",
+          "value": "updatedAt"
+        },
+        {
+          "action_type": "select",
+          "locator": "select[name='selectOrderType']",
+          "value": "asc"
+        },
+        {
+          "action_type": "click",
+          "locator": "input[name='sortButton']"
+        },
+        {
+          "action_type": "assert_value",
+          "locator": "select[name='selectSortType']",
+          "value": "updatedAt"
+        },
+        {
+          "action_type": "assert_value",
+          "locator": "select[name='selectOrderType']",
+          "value": "asc"
+        },
+        {
+          "action_type": "snapshot",
+          "locator": "__page__"
+        }
+      ],
+      "expected": {
+        "type": "selected_values_and_visual_compare",
+        "value": "updatedAt asc"
+      }
+    },
+    {
+      "case_id": "example_required_selection_dialog",
+      "title": "Opening a child route without selecting a row shows a validation dialog",
+      "risk_level": "safe",
+      "automation_mode": "auto",
+      "destructive": false,
+      "steps": [
+        {
+          "action_type": "browser_dialog",
+          "locator": "input[name='openDetail']"
+        }
+      ],
+      "expected": {
+        "type": "browser_dialog",
+        "value": "Replace with the observed stable validation message"
+      }
+    },
+    {
+      "case_id": "example_open_detail_after_row_selection",
+      "title": "Selecting a row opens the same child detail page in both systems",
+      "risk_level": "safe",
+      "automation_mode": "auto",
+      "destructive": false,
+      "case_type": "child_navigation",
+      "action_type": "child_navigation",
+      "expected_page": "ExampleDetail.jsp",
+      "opens_popup": true,
+      "pre_steps": [
+        {
+          "action_type": "click",
+          "locator": "tr[data-row-index='0']"
+        }
+      ],
+      "steps": [
+        {
+          "action_type": "child_navigation",
+          "locator": "input[name='openDetail']",
+          "expected_page": "ExampleDetail.jsp",
+          "opens_popup": true
+        }
+      ],
+      "expected": {
+        "type": "child_navigation",
+        "value": "ExampleDetail.jsp"
+      }
+    },
+    {
+      "case_id": "example_popup_reflection_manual",
+      "title": "Popup confirmation reflects the selected value into the opener",
+      "risk_level": "manual",
+      "automation_mode": "manual",
+      "destructive": false,
+      "steps": [
+        {
+          "action_type": "manual",
+          "locator": "input[name='openAssist']",
+          "value": "Open the assist popup through the parent-page control."
+        },
+        {
+          "action_type": "manual",
+          "locator": "input[name='confirm']",
+          "value": "Choose a representative value and confirm."
+        },
+        {
+          "action_type": "manual_assert",
+          "locator": "parent page",
+          "value": "The popup closes and the selected value is reflected into the opener field."
+        }
+      ],
+      "expected": {
+        "type": "parent_reflection",
+        "value": "selected value is reflected into the opener"
+      }
+    },
+    {
+      "case_id": "example_download_manual",
+      "title": "Download entry is checked manually",
+      "risk_level": "manual",
+      "automation_mode": "manual",
+      "destructive": false,
+      "steps": [
+        {
+          "action_type": "manual",
+          "locator": "input[name='fileDownload']",
+          "value": "Open the download flow and confirm its target window. Do not save a file unless approved."
+        },
+        {
+          "action_type": "manual_assert",
+          "locator": "download child window",
+          "value": "The expected download flow opens without resizing the child window."
+        }
+      ],
+      "expected": {
+        "type": "download_boundary",
+        "value": "download flow is reachable"
+      }
+    },
+    {
+      "case_id": "example_delete_manual",
+      "title": "Delete boundary is documented without committing deletion",
+      "risk_level": "destructive",
+      "automation_mode": "manual",
+      "destructive": true,
+      "steps": [
+        {
+          "action_type": "manual",
+          "locator": "input[name='delete']",
+          "value": "Verify the delete entry and stop before confirmation."
+        },
+        {
+          "action_type": "manual_assert",
+          "locator": "browser dialog",
+          "value": "A confirmation boundary is displayed. Never confirm deletion during regression."
+        }
+      ],
+      "expected": {
+        "type": "destructive_boundary",
+        "value": "delete confirmation boundary only"
+      }
+    },
+    {
+      "case_id": "example_negative_initial_http_500",
+      "title": "Initial-page HTTP 500 evidence is captured",
+      "risk_level": "negative",
+      "automation_mode": "auto-negative",
+      "destructive": false,
+      "case_type": "negative_http_500",
+      "action_type": "negative_http_500",
+      "value": "**/ExampleAdministrationMain.do*",
+      "test_data": "**/ExampleAdministrationMain.do*",
+      "generated_by": "negative_http_500",
+      "steps": [
+        {
+          "action_type": "negative_http_500",
+          "locator": "__page__",
+          "value": "**/ExampleAdministrationMain.do*",
+          "trigger_url": "/application/ExampleAdministrationMain.do"
+        }
+      ],
+      "expected": {
+        "type": "http_error",
+        "value": "**/ExampleAdministrationMain.do*"
+      }
+    },
+    {
+      "case_id": "example_negative_filter_network_abort",
+      "title": "Filter-refresh network-abort evidence is captured",
+      "risk_level": "negative",
+      "automation_mode": "auto-negative",
+      "destructive": false,
+      "case_type": "negative_network_abort",
+      "action_type": "negative_network_abort",
+      "value": "**/ExampleAdministrationPaging.do*",
+      "test_data": "**/ExampleAdministrationPaging.do*",
+      "generated_by": "negative_network_abort",
+      "steps": [
+        {
+          "action_type": "negative_network_abort",
+          "locator": "__page__",
+          "value": "**/ExampleAdministrationPaging.do*",
+          "trigger_url": "/application/ExampleAdministrationPaging.do"
+        }
+      ],
+      "expected": {
+        "type": "network_abort",
+        "value": "**/ExampleAdministrationPaging.do*"
+      }
+    },
+    {
+      "case_id": "example_negative_filter_js_error",
+      "title": "Filter-control JavaScript error evidence is captured",
+      "risk_level": "negative",
+      "automation_mode": "auto-negative",
+      "destructive": false,
+      "case_type": "negative_js_error",
+      "action_type": "negative_js_error",
+      "generated_by": "negative_js_error",
+      "steps": [
+        {
+          "action_type": "negative_js_error",
+          "locator": "select[name='selectDispType']"
+        }
+      ],
+      "expected": {
+        "type": "console_error",
+        "value": "MOONLIGHT_NEGATIVE"
+      }
+    }
+  ]
+}

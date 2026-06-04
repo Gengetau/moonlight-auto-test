@@ -31,7 +31,25 @@ NEGATIVE_CASE_TYPES = {
 DOWNLOAD_CASE_TYPES = {"download", "download_template", "file_download"}
 BROWSER_DIALOG_CASE_TYPES = {"browser_dialog", "dialog", "alert", "confirm", "prompt"}
 PRINT_CASE_TYPES = {"print", "print_output", "print_dialog", "print_invocation"}
-NON_VISUAL_ACTION_TYPES = DOWNLOAD_CASE_TYPES | BROWSER_DIALOG_CASE_TYPES | PRINT_CASE_TYPES | {"close_window"}
+CHILD_NAVIGATION_CASE_TYPES = {
+    "child_navigation",
+    "child_page",
+    "child_route",
+    "link_navigation",
+    "open_child",
+    "open_child_page",
+    "open_subpage",
+    "popup_navigation",
+    "popup_or_navigation",
+    "subpage_navigation",
+}
+NON_VISUAL_ACTION_TYPES = (
+    DOWNLOAD_CASE_TYPES
+    | BROWSER_DIALOG_CASE_TYPES
+    | PRINT_CASE_TYPES
+    | CHILD_NAVIGATION_CASE_TYPES
+    | {"close_window"}
+)
 
 
 def _judge_compare_status(
@@ -59,7 +77,8 @@ def _judge_compare_status(
 
     normalized_action = (action_type or "page_snapshot").lower()
     visual_required = normalized_action not in NON_VISUAL_ACTION_TYPES
-    url_required = normalized_action in {"navigate", "page_snapshot"}
+    url_required_actions = {"navigate", "page_snapshot"} | CHILD_NAVIGATION_CASE_TYPES
+    url_required = normalized_action in url_required_actions
 
     if visual_status == "BLOCKED":
         return "BLOCKED"
@@ -1380,6 +1399,21 @@ class RegressionEngine:
                 }
 
             expected_type, expected_value = expected_parts(item)
+            for key in (
+                "expected_url",
+                "expected_url_fragment",
+                "target_url",
+                "url_pattern",
+                "expected_page",
+                "target_page",
+                "target_jsp",
+                "opens_popup",
+                "popup",
+                "keep_popup",
+                "close_after",
+            ):
+                if key in item and key not in main_step:
+                    main_step[key] = item.get(key)
             if expected_value and not main_step.get("value") and str(main_step.get("action_type") or "").lower() in {
                 "assert_text",
                 "expect_text",
@@ -1430,6 +1464,11 @@ class RegressionEngine:
                 "test_data": as_text(item.get("test_data") or item.get("value")),
                 "expected_type": expected_type,
                 "expected_value": expected_value,
+                "expected_url": as_text(item.get("expected_url") or item.get("expected_url_fragment") or item.get("target_url") or item.get("url_pattern")),
+                "expected_page": as_text(item.get("expected_page") or item.get("target_page") or item.get("target_jsp")),
+                "opens_popup": item.get("opens_popup") if "opens_popup" in item else item.get("popup"),
+                "keep_popup": item.get("keep_popup"),
+                "close_after": item.get("close_after"),
                 "risk_level": risk_level,
                 "destructive": destructive_value,
                 "source": "guided_json_checklist",
@@ -2598,6 +2637,14 @@ class RegressionEngine:
                 json.dumps(action_case.get("main_step") or {}, ensure_ascii=False, default=str),
             )
         ).lower()
+        if any(marker in evidence for marker in CHILD_NAVIGATION_CASE_TYPES):
+            if not (legacy_action.get("popup_detected") or new_action.get("popup_detected")) and (
+                legacy_action.get("navigation_detected")
+                or new_action.get("navigation_detected")
+                or legacy_action.get("frame_changed")
+                or new_action.get("frame_changed")
+            ):
+                return True
         if any(marker in evidence for marker in ("close_window", "window.close", "parent.close")):
             return True
         if any(marker in evidence for marker in ("back_action", "キャンセル", "取消", "戻る", "戻り", "戻 ")):
@@ -3028,6 +3075,82 @@ class RegressionEngine:
         except Exception:
             return ""
 
+    @classmethod
+    def _action_url_candidates(cls, state: Dict[str, Any], action: Dict[str, Any]) -> List[str]:
+        urls: List[str] = []
+        for value in (
+            action.get("popup_url"),
+            action.get("after_url"),
+            action.get("current_url"),
+            state.get("url"),
+        ):
+            if value:
+                urls.append(str(value))
+
+        target_frame = state.get("target_frame") if isinstance(state.get("target_frame"), dict) else {}
+        if target_frame.get("url"):
+            urls.append(str(target_frame["url"]))
+        for value in action.get("after_frame_urls") or []:
+            if value:
+                urls.append(str(value))
+
+        unique: List[str] = []
+        seen = set()
+        for url in urls:
+            normalized = str(url or "").strip()
+            if not normalized or normalized in seen:
+                continue
+            seen.add(normalized)
+            unique.append(normalized)
+        return unique
+
+    @classmethod
+    def _same_child_target(cls, legacy_urls: List[str], new_urls: List[str]) -> Optional[bool]:
+        if not legacy_urls or not new_urls:
+            return None
+        for legacy_url in legacy_urls:
+            legacy_normalized = cls._normalized_url(legacy_url)
+            legacy_aliases = page_aliases(legacy_url)
+            for new_url in new_urls:
+                if legacy_normalized and legacy_normalized == cls._normalized_url(new_url):
+                    return True
+                if legacy_aliases and legacy_aliases & page_aliases(new_url):
+                    return True
+        return False
+
+    @classmethod
+    def _child_navigation_compare_fields(
+        cls,
+        legacy_state: Dict[str, Any],
+        new_state: Dict[str, Any],
+        legacy_action: Dict[str, Any],
+        new_action: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        legacy_urls = cls._action_url_candidates(legacy_state, legacy_action)
+        new_urls = cls._action_url_candidates(new_state, new_action)
+        same_target = cls._same_child_target(legacy_urls, new_urls)
+        legacy_expected = legacy_action.get("expected_navigation_match")
+        new_expected = new_action.get("expected_navigation_match")
+        expected_match: Optional[bool] = None
+        if legacy_expected is not None or new_expected is not None:
+            expected_match = bool(legacy_expected) and bool(new_expected)
+
+        if expected_match is not None:
+            child_match = expected_match
+        else:
+            child_match = same_target
+
+        return {
+            "child_navigation_match": child_match,
+            "child_same_target": same_target,
+            "legacy_child_url_candidates": legacy_urls[:20],
+            "new_child_url_candidates": new_urls[:20],
+            "legacy_expected_navigation_match": legacy_expected,
+            "new_expected_navigation_match": new_expected,
+            "legacy_expected_navigation_needles": legacy_action.get("expected_navigation_needles") or [],
+            "new_expected_navigation_needles": new_action.get("expected_navigation_needles") or [],
+        }
+
 
     def _compare_state(
         self,
@@ -3056,6 +3179,16 @@ class RegressionEngine:
             )
         url_match = self._normalized_url(legacy_state.get("url", "")) == self._normalized_url(new_state.get("url", ""))
         dom_match = str(legacy_state.get("dom", "")) == str(new_state.get("dom", ""))
+        child_navigation_compare = {}
+        if normalized_action_type in CHILD_NAVIGATION_CASE_TYPES:
+            child_navigation_compare = self._child_navigation_compare_fields(
+                legacy_state,
+                new_state,
+                extra.get("legacy_action") or {},
+                extra.get("new_action") or {},
+            )
+            if child_navigation_compare.get("child_navigation_match") is not None:
+                url_match = bool(child_navigation_compare["child_navigation_match"])
         status = _judge_compare_status(
             action_type=action_type,
             visual_status=visual.get("status"),
@@ -3097,6 +3230,12 @@ class RegressionEngine:
             if print_compare.get("print_invocation_match") is False:
                 status = "DIFF"
 
+        if normalized_action_type in CHILD_NAVIGATION_CASE_TYPES:
+            if child_navigation_compare.get("child_navigation_match") is False:
+                status = "DIFF"
+            elif child_navigation_compare.get("child_navigation_match") is None and status == "PASS":
+                status = "WARN"
+
         return {
             "page_id": page_id,
             "risk": risk,
@@ -3119,6 +3258,7 @@ class RegressionEngine:
             **download_compare,
             **dialog_compare,
             **print_compare,
+            **child_navigation_compare,
             **extra,
         }
 

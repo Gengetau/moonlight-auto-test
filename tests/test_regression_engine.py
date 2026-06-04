@@ -376,6 +376,8 @@ def test_infer_semantic_action_uses_scanner_hints():
     assert infer_semantic_action("download_template", {"kind": "link"}) == "download"
     assert infer_semantic_action("browser_dialog", {"expected_type": "browser_dialog"}) == "browser_dialog"
     assert infer_semantic_action("click", {"onclick": "window.print()", "expected_type": "print_invocation"}) == "print"
+    assert infer_semantic_action("child_navigation", {}) == "click"
+    assert infer_semantic_action("open_child_page", {}) == "click"
     assert infer_semantic_action("assert_visible", {}) == "assert_visible"
     assert infer_semantic_action("assert_attached", {}) == "assert_attached"
     assert infer_semantic_action("expect_text", {}) == "assert_text"
@@ -422,6 +424,54 @@ def test_action_dedupe_prefers_locator_change_over_full_action_fallback(tmp_path
 def test_popup_hint_detects_targeted_links():
     assert _opens_popup_hint({"attributes": {"target": "winHelp"}}) is True
     assert _opens_popup_hint({"attributes": {"target": "_self"}}) is False
+    assert _opens_popup_hint({"action_type": "child_navigation"}) is True
+    assert _opens_popup_hint({"action_type": "open_child_page", "opens_popup": True}) is True
+
+
+def test_child_navigation_compare_is_url_only_and_accepts_page_aliases(tmp_path):
+    mapping_path = tmp_path / "page_mapping.json"
+    mapping_path.write_text(json.dumps({"page_mappings": []}), encoding="utf-8")
+    engine = RegressionEngine(mapping_path=str(mapping_path), output_dir=str(tmp_path / "out"))
+
+    result = engine._compare_state(
+        "WwBiblioList.jsp",
+        "High",
+        "open detail",
+        {"url": "http://legacy.test/patlics/WwClassCodeDetail.do", "screenshot": str(tmp_path / "legacy.png")},
+        {"url": "http://new.test/patlics/WwClassCodeDetail.jsp", "screenshot": str(tmp_path / "new.png")},
+        tmp_path / "diff.png",
+        action_type="child_navigation",
+        legacy_action={"status": "PASS"},
+        new_action={"status": "PASS"},
+    )
+
+    assert result["status"] == "PASS"
+    assert result["visual"]["status"] == "SKIPPED"
+    assert result["url_match"] is True
+    assert result["child_navigation_match"] is True
+
+
+def test_child_navigation_requires_target_reopen_only_for_same_window_navigation():
+    action_case = {
+        "case_type": "child_navigation",
+        "action_type": "child_navigation",
+        "main_step": {"action_type": "child_navigation"},
+    }
+
+    assert RegressionEngine._requires_target_reopen_after_action(
+        action_case,
+        "child_navigation",
+        "click",
+        {"status": "PASS", "frame_changed": True, "popup_detected": False},
+        {"status": "PASS", "frame_changed": True, "popup_detected": False},
+    )
+    assert not RegressionEngine._requires_target_reopen_after_action(
+        action_case,
+        "child_navigation",
+        "click",
+        {"status": "PASS", "frame_changed": True, "popup_detected": True},
+        {"status": "PASS", "frame_changed": True, "popup_detected": True},
+    )
 
 
 def test_download_filename_is_windows_safe():

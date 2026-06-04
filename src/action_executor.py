@@ -12,6 +12,7 @@ from PIL import Image, ImageDraw, ImageFont, ImageGrab
 from src.assert_engine import compare_visual_screenshot
 from src.browser_window import capture_window_metrics
 from src.config_parser import Config
+from src.page_aliases import page_aliases
 
 
 def _safe_name(value: Any) -> str:
@@ -621,6 +622,15 @@ ACTION_ALIASES = {
     "print": "print",
     "print_dialog": "print",
     "print_invocation": "print",
+    "child_navigation": "click",
+    "child_page": "click",
+    "child_route": "click",
+    "open_child": "click",
+    "open_child_page": "click",
+    "open_subpage": "click",
+    "popup_navigation": "click",
+    "popup_or_navigation": "click",
+    "subpage_navigation": "click",
     "negative_js_error": "negative_js_error",
     "negative_http_500": "negative_http_500",
     "negative_network_abort": "negative_network_abort",
@@ -1010,8 +1020,217 @@ def _opens_popup_hint(context: Optional[Dict[str, Any]]) -> bool:
     context = context or {}
     attributes = {str(key).lower(): value for key, value in (context.get("attributes") or {}).items()}
     target = str(attributes.get("target") or "").strip().lower()
-    evidence = " ".join(str(context.get(key) or "").lower() for key in ("raw", "label", "semantic_key"))
-    return bool(target and target not in {"_self", "self"}) or "window.open" in evidence or "target=" in evidence
+    evidence = " ".join(
+        str(context.get(key) or "").lower()
+        for key in (
+            "action_type",
+            "action_hint",
+            "case_type",
+            "expected_type",
+            "expected_value",
+            "raw",
+            "label",
+            "semantic_key",
+            "onclick",
+            "href",
+            "target",
+        )
+    )
+    explicit_popup = _truthy_context_value(context.get("opens_popup")) or _truthy_context_value(context.get("popup"))
+    child_or_popup_navigation = any(
+        token in evidence
+        for token in (
+            "child_navigation",
+            "child_page",
+            "child route",
+            "child_route",
+            "open_child",
+            "popup_navigation",
+            "popup_or_navigation",
+            "subpage_navigation",
+        )
+    )
+    return (
+        bool(target and target not in {"_self", "self"})
+        or explicit_popup
+        or "window.open" in evidence
+        or "target=" in evidence
+        or child_or_popup_navigation
+    )
+
+
+def _truthy_context_value(value: Any) -> bool:
+    return str(value or "").strip().lower() in {"true", "1", "yes", "y", "on"}
+
+
+def _is_child_navigation_context(context: Optional[Dict[str, Any]]) -> bool:
+    context = context or {}
+    evidence = " ".join(
+        str(context.get(key) or "").lower()
+        for key in (
+            "action_type",
+            "action_hint",
+            "case_type",
+            "expected_type",
+            "label",
+            "semantic_key",
+        )
+    )
+    return any(
+        token in evidence
+        for token in (
+            "child_navigation",
+            "child_page",
+            "child route",
+            "child_route",
+            "open_child",
+            "open child",
+            "popup_navigation",
+            "popup_or_navigation",
+            "subpage_navigation",
+            "subpage",
+            "sub page",
+        )
+    )
+
+
+def _expected_navigation_needles(context: Optional[Dict[str, Any]]) -> List[str]:
+    context = context or {}
+    expected = context.get("expected")
+    needles: List[str] = []
+
+    for key in (
+        "expected_url",
+        "expected_url_fragment",
+        "target_url",
+        "url_pattern",
+        "expected_page",
+        "target_page",
+        "target_jsp",
+    ):
+        value = str(context.get(key) or "").strip()
+        if value:
+            needles.append(value)
+
+    if isinstance(expected, dict):
+        for key in (
+            "url",
+            "url_pattern",
+            "expected_url",
+            "page",
+            "expected_page",
+            "target_page",
+            "value",
+        ):
+            value = str(expected.get(key) or "").strip()
+            if value:
+                needles.append(value)
+
+    expected_type = str(context.get("expected_type") or "").lower()
+    expected_value = str(context.get("expected_value") or "").strip()
+    if expected_value and (
+        _is_child_navigation_context(context)
+        or any(token in expected_type for token in ("url", "page", "navigation", "route", "popup"))
+    ):
+        needles.append(expected_value)
+
+    unique: List[str] = []
+    seen = set()
+    for needle in needles:
+        normalized = re.sub(r"\s+", " ", needle).strip()
+        if not normalized or normalized.lower() in {"same page", "same target page", "child page opens"}:
+            continue
+        key = normalized.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(normalized)
+    return unique
+
+
+def _navigation_url_candidates(result: Dict[str, Any]) -> List[str]:
+    state = result.get("state") or {}
+    candidates: List[str] = []
+    for value in (
+        result.get("popup_url"),
+        result.get("after_url"),
+        result.get("current_url"),
+        state.get("url"),
+    ):
+        if value:
+            candidates.append(str(value))
+    target_frame = state.get("target_frame") if isinstance(state.get("target_frame"), dict) else {}
+    if target_frame.get("url"):
+        candidates.append(str(target_frame["url"]))
+    for value in result.get("after_frame_urls") or []:
+        if value:
+            candidates.append(str(value))
+
+    unique: List[str] = []
+    seen = set()
+    for candidate in candidates:
+        key = candidate.strip()
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        unique.append(key)
+    return unique
+
+
+def _url_needle_matches(needle: str, candidates: Iterable[str]) -> bool:
+    needle_text = str(needle or "").strip()
+    if not needle_text:
+        return True
+    needle_lower = needle_text.lower()
+    needle_aliases = page_aliases(needle_text)
+    needle_url = normalize_url_for_compare(needle_text).lower()
+
+    for candidate in candidates:
+        candidate_text = str(candidate or "").strip()
+        if not candidate_text:
+            continue
+        candidate_lower = candidate_text.lower()
+        if needle_lower in candidate_lower:
+            return True
+        candidate_url = normalize_url_for_compare(candidate_text).lower()
+        if needle_url and (needle_url in candidate_url or candidate_url in needle_url):
+            return True
+        if needle_aliases and needle_aliases & page_aliases(candidate_text):
+            return True
+    return False
+
+
+def _apply_navigation_expectation(result: Dict[str, Any], context: Optional[Dict[str, Any]]) -> None:
+    child_navigation = _is_child_navigation_context(context)
+    needles = _expected_navigation_needles(context)
+    if not child_navigation and not needles:
+        return
+
+    candidates = _navigation_url_candidates(result)
+    result["child_navigation"] = bool(child_navigation)
+    result["navigation_url_candidates"] = candidates[:20]
+    if needles:
+        matches = {needle: _url_needle_matches(needle, candidates) for needle in needles}
+        result["expected_navigation_needles"] = needles
+        result["expected_navigation_matches"] = matches
+        result["expected_navigation_match"] = all(matches.values())
+        if result.get("status") == "PASS" and not result["expected_navigation_match"]:
+            result.update(
+                {
+                    "status": "BLOCKED",
+                    "reason": "Expected child navigation target was not reached: "
+                    + ", ".join(needle for needle, matched in matches.items() if not matched),
+                }
+            )
+    elif result.get("status") == "PASS" and not (
+        result.get("popup_detected") or result.get("navigation_detected") or result.get("frame_changed")
+    ):
+        result.update(
+            {
+                "status": "BLOCKED",
+                "reason": "Expected child navigation did not open a popup or change the page/frame.",
+            }
+        )
 
 
 def _safe_page_url(page: Page) -> str:
@@ -1075,7 +1294,7 @@ def execute_action(
     }
     action_dispatched = False
     capture_page = page
-    keep_popup = bool((action_context or {}).get("keep_popup"))
+    keep_popup = _truthy_context_value((action_context or {}).get("keep_popup"))
     opener_page = _safe_opener_page(page)
     before_url = _safe_page_url(page)
     before_frame_urls = _safe_frame_urls(page)
@@ -1687,6 +1906,7 @@ def execute_action(
         if capture_dir:
             name = _safe_name(test_id or f"{action_type}_{int(time.time() * 1000)}")
             result["state"] = _capture_state(capture_page, Path(capture_dir), name)
+            _apply_navigation_expectation(result, action_context)
             if console_events or _needs_console_evidence(action_context, action_type):
                 result["console_evidence_screenshot"] = _render_console_evidence_image(
                     console_events,
