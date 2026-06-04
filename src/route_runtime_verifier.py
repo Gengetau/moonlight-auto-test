@@ -4,11 +4,13 @@ import re
 import time
 from pathlib import Path, PureWindowsPath
 from typing import Any, Dict, Iterable, List, Optional
+from urllib.parse import urlsplit
 
 from playwright.sync_api import Error as PlaywrightError
 from playwright.sync_api import Page, TimeoutError as PlaywrightTimeoutError
 
 from src.action_executor import _capture_state, execute_action
+from src.page_aliases import page_aliases
 from src.runtime_page_profile import capture_runtime_page_profile
 
 
@@ -167,6 +169,39 @@ def _pages_for_context(page: Page) -> List[Page]:
         return []
 
 
+def _is_print_transient_url(value: Any) -> bool:
+    text = str(value or "").strip().lower()
+    if not text:
+        return False
+    if text.startswith(("chrome://print", "edge://print", "chrome-untrusted://print")):
+        return True
+    try:
+        path = urlsplit(text).path.rstrip("/").lower()
+    except Exception:
+        path = text.split("?", 1)[0].split("#", 1)[0].rstrip("/")
+    return path.endswith("/wait.jsp") or path.endswith("wait.jsp")
+
+
+def _takeover_candidate_rank(page: Page) -> int:
+    urls: List[str] = []
+    try:
+        if page.url:
+            urls.append(str(page.url))
+    except PlaywrightError:
+        pass
+    try:
+        urls.extend(str(frame.url or "") for frame in page.frames)
+    except PlaywrightError:
+        pass
+
+    meaningful_urls = [url for url in urls if url and url.lower() != "about:blank"]
+    if meaningful_urls and all(_is_print_transient_url(url) for url in meaningful_urls):
+        return 2
+    if any(_is_print_transient_url(url) for url in meaningful_urls):
+        return 1
+    return 0
+
+
 def _takeover_page_after_action(
     current_page: Page,
     pages_before: List[Page],
@@ -185,10 +220,14 @@ def _takeover_page_after_action(
             candidates.append(candidate)
 
     seen = set()
+    unique_candidates: List[Page] = []
     for candidate in candidates:
         if id(candidate) in seen or _page_is_closed(candidate):
             continue
         seen.add(id(candidate))
+        unique_candidates.append(candidate)
+
+    for candidate in sorted(unique_candidates, key=_takeover_candidate_rank):
         try:
             candidate.wait_for_load_state("domcontentloaded", timeout=min(timeout, 10000))
         except (PlaywrightTimeoutError, PlaywrightError):
@@ -878,7 +917,10 @@ def _manual_route_target_needles(route: Optional[Dict[str, Any]]) -> List[str]:
                 needles.append(lower)
 
     for key in ("target_page", "target_page_name", "target_node"):
-        add(route.get(key))
+        value = route.get(key)
+        add(value)
+        for alias in sorted(page_aliases(value)):
+            add(alias)
     return needles
 
 

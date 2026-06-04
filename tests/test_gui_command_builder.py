@@ -15,8 +15,10 @@ from src.gui_command_builder import (
     load_upload_case_options,
     load_page_options,
     negative_profile_labels,
+    pause_regression_queue_run,
     regression_output_dir,
     record_regression_queue_result,
+    resume_regression_queue_run,
     run_regression_queue,
     write_starter_guided_checklist,
     upload_case_option_labels,
@@ -104,6 +106,24 @@ def test_persistent_regression_queue_run_advances_all_cards_after_failures():
         "Page8.jsp",
     ]
     assert [item["return_code"] for item in queue_run["results"]] == [0, 0, 0, 1, 0, 0, 0, 0]
+
+
+def test_paused_regression_queue_does_not_expose_next_card_until_resumed():
+    queue_run = create_regression_queue_run(
+        [{"target_page": "First.jsp"}, {"target_page": "Second.jsp"}]
+    )
+    queue_run = record_regression_queue_result(queue_run, {"return_code": 0})
+    queue_run = pause_regression_queue_run(queue_run, reason="report_preview")
+
+    assert queue_run["status"] == "paused"
+    assert queue_run["pause_reason"] == "report_preview"
+    assert current_regression_queue_config(queue_run) is None
+
+    queue_run = resume_regression_queue_run(queue_run)
+
+    assert queue_run["status"] == "running"
+    assert "pause_reason" not in queue_run
+    assert current_regression_queue_config(queue_run)["target_page"] == "Second.jsp"
 
 
 def test_bounded_console_output_keeps_recent_tail():

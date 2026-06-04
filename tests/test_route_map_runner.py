@@ -26,6 +26,7 @@ def test_launch_browser_uses_system_chrome_fallback(monkeypatch):
     assert result["channel"] == "chrome"
     assert result["headless"] is False
     assert result["args"] == CHROMIUM_ARGS
+    assert "--start-maximized" in result["args"]
 
 
 def test_close_browser_safely_detaches_dialog_handlers_before_context_close():

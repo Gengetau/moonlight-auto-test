@@ -2,6 +2,7 @@ import re
 
 import pytest
 from playwright.sync_api import sync_playwright
+from src.browser_print import install_print_suppression
 from src.browser_window import set_main_window_bounds
 from src.config_parser import Config
 
@@ -16,6 +17,7 @@ def _make_process_dpi_aware():
 
 
 CHROMIUM_ARGS = [
+    "--start-maximized",
     "--force-device-scale-factor=1",
     "--high-dpi-support=1",
     "--disable-popup-blocking",
@@ -249,6 +251,7 @@ def browser(browser_name, login_entry):
                 **Config.chrome_launch_kwargs(),
                 headless=False,
                 args=[
+                    "--start-maximized",
                     "--force-device-scale-factor=1",
                     "--high-dpi-support=1",
                     "--disable-popup-blocking",
@@ -274,6 +277,7 @@ def _authenticated_page(browser, base_url):
         no_viewport=True,
         user_agent="Moonlight-Automation-Agent"
     )
+    install_print_suppression(context)
     # 自动处理旧系统的 Alert/Confirm 弹窗
     # 增加 try-except 保护，防止 Dialog 已经关闭时的 ProtocolError
     def _safe_accept(dialog):

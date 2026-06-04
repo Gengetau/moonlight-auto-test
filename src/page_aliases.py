@@ -40,6 +40,14 @@ KNOWN_PAGE_ALIAS_GROUPS = (
         "wwpersonaidresultdisp.do",
         "wwpersonaidresultdisp.jsp",
     },
+    {
+        "wwprintview",
+        "wwprintview.do",
+        "wwprintview.jsp",
+        "wwexpprint",
+        "wwexpprint.do",
+        "wwexpprint.jsp",
+    },
 )
 
 

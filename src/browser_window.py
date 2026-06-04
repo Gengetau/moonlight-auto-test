@@ -24,10 +24,19 @@ def capture_window_metrics(page) -> Dict[str, Any]:
         return {"error": str(exc)}
 
 
-def set_main_window_bounds(page, *, width: int = 1920, height: int = 1080, left: int = 0, top: int = 0) -> Dict[str, Any]:
-    """Resize only a top-level regression window without affecting future popups."""
+def set_main_window_bounds(
+    page,
+    *,
+    maximize: bool = True,
+    width: int = 1920,
+    height: int = 1080,
+    left: int = 0,
+    top: int = 0,
+) -> Dict[str, Any]:
+    """Maximize only a top-level regression window without affecting future popups."""
     result: Dict[str, Any] = {
         "applied": False,
+        "target_window_state": "maximized" if maximize else "normal",
         "target_bounds": {
             "left": left,
             "top": top,
@@ -47,21 +56,28 @@ def set_main_window_bounds(page, *, width: int = 1920, height: int = 1080, left:
         window_info = session.send("Browser.getWindowForTarget")
         window_id = window_info.get("windowId")
         if window_id is not None:
-            session.send("Browser.setWindowBounds", {"windowId": window_id, "bounds": {"windowState": "normal"}})
-            session.send(
-                "Browser.setWindowBounds",
-                {
-                    "windowId": window_id,
-                    "bounds": {
-                        "left": left,
-                        "top": top,
-                        "width": width,
-                        "height": height,
+            if maximize:
+                session.send(
+                    "Browser.setWindowBounds",
+                    {"windowId": window_id, "bounds": {"windowState": "maximized"}},
+                )
+                result["method"] = "cdp_browser_window_maximized"
+            else:
+                session.send("Browser.setWindowBounds", {"windowId": window_id, "bounds": {"windowState": "normal"}})
+                session.send(
+                    "Browser.setWindowBounds",
+                    {
+                        "windowId": window_id,
+                        "bounds": {
+                            "left": left,
+                            "top": top,
+                            "width": width,
+                            "height": height,
+                        },
                     },
-                },
-            )
+                )
+                result["method"] = "cdp_browser_window_bounds"
             result["applied"] = True
-            result["method"] = "cdp_browser_window_bounds"
         try:
             session.detach()
         except Exception:
@@ -72,14 +88,19 @@ def set_main_window_bounds(page, *, width: int = 1920, height: int = 1080, left:
     if not result["applied"]:
         try:
             page.evaluate(
-                """({left, top, width, height}) => {
+                """({maximize, left, top, width, height}) => {
+                    if (maximize) {
+                        window.moveTo(screen.availLeft || 0, screen.availTop || 0);
+                        window.resizeTo(screen.availWidth, screen.availHeight);
+                        return;
+                    }
                     window.moveTo(left, top);
                     window.resizeTo(width, height);
                 }""",
-                {"left": left, "top": top, "width": width, "height": height},
+                {"maximize": maximize, "left": left, "top": top, "width": width, "height": height},
             )
             result["applied"] = True
-            result["method"] = "window_resizeTo"
+            result["method"] = "window_resizeTo_available_screen" if maximize else "window_resizeTo"
         except Exception as exc:
             result["resize_to_error"] = str(exc)
 

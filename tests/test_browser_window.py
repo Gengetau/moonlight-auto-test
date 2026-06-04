@@ -52,14 +52,29 @@ class FakePage:
         self.waited.append(timeout)
 
 
-def test_set_main_window_bounds_only_updates_explicit_page():
+def test_set_main_window_bounds_maximizes_only_explicit_page_by_default():
     page = FakePage()
 
     result = set_main_window_bounds(page)
 
     assert result["applied"] is True
-    assert result["method"] == "cdp_browser_window_bounds"
+    assert result["method"] == "cdp_browser_window_maximized"
+    assert result["target_window_state"] == "maximized"
     assert page.front is True
+    assert page.session.commands == [
+        ("Browser.getWindowForTarget", None),
+        ("Browser.setWindowBounds", {"windowId": 7, "bounds": {"windowState": "maximized"}}),
+    ]
+
+
+def test_set_main_window_bounds_keeps_explicit_fixed_size_mode():
+    page = FakePage()
+
+    result = set_main_window_bounds(page, maximize=False, width=1600, height=900, left=10, top=20)
+
+    assert result["applied"] is True
+    assert result["method"] == "cdp_browser_window_bounds"
+    assert result["target_window_state"] == "normal"
     assert page.session.commands == [
         ("Browser.getWindowForTarget", None),
         ("Browser.setWindowBounds", {"windowId": 7, "bounds": {"windowState": "normal"}}),
@@ -68,10 +83,10 @@ def test_set_main_window_bounds_only_updates_explicit_page():
             {
                 "windowId": 7,
                 "bounds": {
-                    "left": 0,
-                    "top": 0,
-                    "width": 1920,
-                    "height": 1080,
+                    "left": 10,
+                    "top": 20,
+                    "width": 1600,
+                    "height": 900,
                 },
             },
         ),

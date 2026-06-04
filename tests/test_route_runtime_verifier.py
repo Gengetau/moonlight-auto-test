@@ -64,6 +64,35 @@ def test_refresh_manual_route_page_takes_over_popup_before_reload():
     assert original_page.reloads == 0
 
 
+def test_manual_route_target_needles_include_ww_print_actual_page_alias():
+    needles = verifier._manual_route_target_needles({"target_page": "WwPrintView.jsp"})
+
+    assert "wwprintview.jsp" in needles
+    assert "wwexpprint.do" in needles
+
+
+def test_takeover_page_after_action_prefers_print_target_over_wait_page():
+    original_page = FakePage("http://example.test/menu")
+    wait_page = FakePage("http://example.test/patlics/Wait.jsp")
+    print_page = FakePage("http://example.test/patlics/WwExpPrint.do")
+    context = FakeContext()
+    context.pages = [original_page, wait_page, print_page]
+    original_page.context = context
+    wait_page.context = context
+    print_page.context = context
+
+    selected = verifier._takeover_page_after_action(
+        original_page,
+        [original_page],
+        {},
+        timeout=5000,
+    )
+
+    assert selected is print_page
+    assert print_page.brought_to_front >= 1
+    assert wait_page.brought_to_front == 0
+
+
 def test_refresh_manual_route_page_waits_for_manual_page_selection(monkeypatch):
     original_page = FakePage("http://example.test/menu")
     popup_page = FakePage("http://example.test/unmatched-popup")

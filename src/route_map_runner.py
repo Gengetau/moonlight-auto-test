@@ -7,12 +7,14 @@ from typing import Any, Dict, List, Optional
 
 from playwright.sync_api import Page, sync_playwright
 
+from src.browser_print import install_print_suppression
 from src.browser_window import set_main_window_bounds
 from src.config_parser import Config
 from src.route_runtime_verifier import record_manual_route, verify_candidate_route, write_usable_route_map
 
 
 CHROMIUM_ARGS = [
+    "--start-maximized",
     "--force-device-scale-factor=1",
     "--high-dpi-support=1",
     "--disable-popup-blocking",
@@ -183,6 +185,7 @@ def _new_context(browser):
         no_viewport=True,
         user_agent="Moonlight-Automation-Agent",
     )
+    install_print_suppression(context)
     context.on("dialog", _safe_accept)
     return context
 
@@ -246,6 +249,7 @@ def _prepare_page(browser, page: Optional[Page], entry_url: str, timeout: int, *
         context = _new_context(browser)
         page = context.new_page()
     else:
+        install_print_suppression(page.context)
         for extra_page in list(page.context.pages):
             if extra_page is page:
                 continue

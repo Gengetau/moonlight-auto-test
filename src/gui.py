@@ -40,8 +40,10 @@ from src.gui_command_builder import (
     load_page_options,
     negative_profile_labels,
     page_option_labels,
+    pause_regression_queue_run,
     record_regression_queue_result,
     regression_output_dir,
+    resume_regression_queue_run,
     upload_case_option_labels,
     upload_profile_config_path,
     write_starter_guided_checklist,
@@ -435,12 +437,20 @@ def portable_report_bytes(report_path):
     return portable_report_html(report_path).encode("utf-8")
 
 
+def pause_running_regression_queue_for_report_action(reason="report_action"):
+    queue_run = st.session_state.get("reg_queue_runtime")
+    if not queue_run:
+        return
+    st.session_state["reg_queue_runtime"] = pause_regression_queue_run(queue_run, reason=reason)
+
+
 def render_report_links(report_path, *, key_prefix):
     if not report_path or not report_path.exists():
         return
     report_bytes = portable_report_bytes(report_path)
     display_name = report_display_name(report_path)
     if st.button(f"预览 {display_name}", key=f"{key_prefix}_preview_{report_path.as_posix()}"):
+        pause_running_regression_queue_for_report_action("report_preview")
         st.session_state["selected_report_path"] = str(report_path)
     st.download_button(
         "下载自包含报告",
@@ -448,6 +458,8 @@ def render_report_links(report_path, *, key_prefix):
         file_name=f"{Path(display_name).stem}_portable.html",
         mime="text/html",
         key=f"{key_prefix}_download_{report_path.as_posix()}",
+        on_click=pause_running_regression_queue_for_report_action,
+        kwargs={"reason": "report_download"},
     )
     st.caption(str(report_path))
 
@@ -464,6 +476,7 @@ def render_recent_page_reports(limit=10):
         page_name = report_display_name(report_path)
         modified = datetime.fromtimestamp(report_path.stat().st_mtime).strftime("%m/%d %H:%M")
         if st.button(f"{index}. {page_name}", key=f"recent_report_{index}_{report_path.as_posix()}"):
+            pause_running_regression_queue_for_report_action("recent_report_preview")
             st.session_state["selected_report_path"] = str(report_path)
         st.caption(f"{modified}  {report_path}")
 
@@ -487,6 +500,8 @@ def render_selected_report_viewer():
         file_name=f"{Path(report_display_name(report_path)).stem}_portable.html",
         mime="text/html",
         key=f"selected_report_download_{report_path.as_posix()}",
+        on_click=pause_running_regression_queue_for_report_action,
+        kwargs={"reason": "selected_report_download"},
     )
     st.caption(str(report_path))
 
@@ -1193,6 +1208,8 @@ with tabs[0]:
                 render_report_links(report_path, key_prefix=f"completed_{report_path.as_posix()}")
         if queue_run.get("status") == "running":
             st.info(f"Regression Queue Progress: {len(queue_results)}/{len(queue_run.get('configs') or [])} completed.")
+        elif queue_run.get("status") == "paused":
+            st.warning(f"Regression Queue Paused after {len(queue_results)}/{len(queue_run.get('configs') or [])} page(s).")
         elif queue_run.get("status") == "stopped":
             st.warning(f"Regression Queue Stopped after {len(queue_results)}/{len(queue_run.get('configs') or [])} page(s).")
         elif failed_pages:
@@ -1215,15 +1232,20 @@ with tabs[0]:
 
     queue_run = st.session_state.get("reg_queue_runtime")
     if queue_run:
-        queue_control_col1, queue_control_col2 = st.columns([1, 4])
+        queue_control_col1, queue_control_col2, queue_control_col3 = st.columns([1, 1, 4])
         with queue_control_col1:
             if st.button("Stop Queue", key="reg_queue_stop", disabled=queue_run.get("status") != "running"):
                 queue_run["status"] = "stopped"
                 st.session_state["reg_queue_runtime"] = queue_run
                 st.rerun()
         with queue_control_col2:
+            if st.button("Resume Queue", key="reg_queue_resume", disabled=queue_run.get("status") != "paused"):
+                st.session_state["reg_queue_runtime"] = resume_regression_queue_run(queue_run)
+                st.rerun()
+        with queue_control_col3:
             render_queue_results(queue_run)
 
+        queue_run = st.session_state.get("reg_queue_runtime", queue_run)
         runtime_config = current_regression_queue_config(queue_run)
         if runtime_config:
             try:

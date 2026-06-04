@@ -2,6 +2,7 @@ import json
 import time
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
+from urllib.parse import urlsplit
 
 from playwright.sync_api import Error as PlaywrightError, Page
 
@@ -117,14 +118,18 @@ def _mark_manual_replay_target(
 
     value = str(replay.get("value") or "")
     text = str(replay.get("text") or "")
+    onclick = str(replay.get("onclick") or "")
+    href = str(replay.get("href") or "")
     action_type = _manual_replay_action_type(replay)
     marker = f"ml-{_safe_id(test_id)}-{replay_index}-{int(time.time() * 1000)}"
     marker_selector = f'[data-moonlight-manual-replay-id="{marker}"]'
     script = """
-    ({ selector, marker, value, text, actionType, allowFallback }) => {
+    ({ selector, marker, value, text, onclick, href, actionType, allowFallback }) => {
       const normalize = raw => String(raw || '').replace(/\\s+/g, ' ').trim();
       const wantedValue = normalize(value);
       const wantedText = normalize(text);
+      const wantedOnclick = normalize(onclick).toLowerCase();
+      const wantedHref = normalize(href).toLowerCase();
       const action = String(actionType || '').toLowerCase();
       const wantsChoice = ['check', 'uncheck'].includes(action);
       const wantsFill = ['fill', 'clear', 'set_value'].includes(action);
@@ -153,27 +158,48 @@ def _mark_manual_replay_target(
         if (!isCompatible(el, tag, type)) return null;
         const elementValue = normalize(el.value || el.getAttribute('value') || '');
         const elementText = normalize(el.innerText || el.textContent || el.getAttribute('title') || el.getAttribute('aria-label') || '');
+        const elementOnclick = normalize(el.getAttribute('onclick') || '').toLowerCase();
+        const elementHref = normalize(el.getAttribute('href') || '').toLowerCase();
         const valueExact = !!wantedValue && elementValue === wantedValue;
         const valuePartial = !!wantedValue && !valueExact && elementValue.includes(wantedValue);
         const textExact = !!wantedText && elementText === wantedText;
         const textPartial = !!wantedText && !textExact && elementText.includes(wantedText);
-        if (!fromSelector && (wantedValue || wantedText) && !valueExact && !valuePartial && !textExact && !textPartial) {
+        const onclickExact = !!wantedOnclick && elementOnclick === wantedOnclick;
+        const onclickPartial = !!wantedOnclick && !!elementOnclick && !onclickExact && (elementOnclick.includes(wantedOnclick) || wantedOnclick.includes(elementOnclick));
+        const hrefExact = !!wantedHref && elementHref === wantedHref;
+        const hrefPartial = !!wantedHref && !!elementHref && !hrefExact && (elementHref.includes(wantedHref) || wantedHref.includes(elementHref));
+        const hasWantedIdentity = !!(wantedValue || wantedText || wantedOnclick || wantedHref);
+        const identityMatched = valueExact || valuePartial || textExact || textPartial || onclickExact || onclickPartial || hrefExact || hrefPartial;
+        if (!fromSelector && hasWantedIdentity && !identityMatched) {
           return null;
         }
-        if (!fromSelector && !wantedValue && !wantedText) return null;
+        if (!fromSelector && !hasWantedIdentity && !wantsChoice) return null;
         let score = fromSelector ? 1 : 0;
         if (wantsChoice && tag === 'input' && ['checkbox', 'radio'].includes(type)) score += 80;
+        if (onclickExact) score += 360;
+        else if (onclickPartial) score += 180;
+        if (hrefExact) score += 280;
+        else if (hrefPartial) score += 120;
         if (valueExact) score += 240;
         else if (valuePartial) score += 90;
         if (textExact) score += 220;
         else if (textPartial) score += 80;
         if (isVisible(el)) score += 10;
-        return { score, tag, type, value: elementValue, text: elementText.slice(0, 120), visible: isVisible(el) };
+        return {
+          score,
+          tag,
+          type,
+          value: elementValue,
+          text: elementText.slice(0, 120),
+          onclick: elementOnclick,
+          href: elementHref,
+          visible: isVisible(el)
+        };
       };
 
       let selectorElements = [];
       try { selectorElements = Array.from(document.querySelectorAll(selector)); } catch (_) {}
-      const fallbackElements = allowFallback && (wantedText || wantedValue || wantsChoice)
+      const fallbackElements = allowFallback && (wantedText || wantedValue || wantedOnclick || wantedHref || wantsChoice)
         ? Array.from(document.querySelectorAll('input,select,textarea,button,a,td,span,div,[onclick]'))
         : [];
       const candidates = selectorElements.map(el => ({ el, fromSelector: true }))
@@ -198,6 +224,8 @@ def _mark_manual_replay_target(
         type: best.type,
         value: best.value,
         text: best.text,
+        onclick: best.onclick,
+        href: best.href,
         visible: best.visible,
       };
     }
@@ -207,6 +235,8 @@ def _mark_manual_replay_target(
 
     def _try_mark(allow_fallback: bool) -> Tuple[Optional[str], Optional[Dict[str, Any]], bool]:
         saw_original_selector = False
+        best_selector: Optional[str] = None
+        best_state: Optional[Dict[str, Any]] = None
         for frame in page.frames:
             try:
                 marked = frame.evaluate(
@@ -216,6 +246,8 @@ def _mark_manual_replay_target(
                         "marker": marker,
                         "value": value,
                         "text": text,
+                        "onclick": onclick,
+                        "href": href,
                         "actionType": action_type,
                         "allowFallback": allow_fallback,
                     },
@@ -228,12 +260,18 @@ def _mark_manual_replay_target(
                 marked["allow_fallback"] = allow_fallback
                 if int(marked.get("selector_count") or 0) > 0:
                     saw_original_selector = True
+            if marked:
+                diagnostics.append(marked)
             if marked and marked.get("marked"):
                 marked["original_selector"] = selector
                 marked["resolved_selector"] = marker_selector
-                return marker_selector, marked, saw_original_selector
-            if marked:
-                diagnostics.append(marked)
+                score = int(marked.get("score") or 0)
+                best_score = int((best_state or {}).get("score") or 0)
+                if best_state is None or score > best_score:
+                    best_selector = marker_selector
+                    best_state = marked
+        if best_selector and best_state:
+            return best_selector, best_state, saw_original_selector
         return None, None, saw_original_selector
 
     marked_selector, marked_state, saw_original_selector = _try_mark(False)
@@ -272,6 +310,64 @@ def _manual_replay_start_offset(page: Page, replay_steps: List[Dict[str, Any]]) 
         if _selector_exists_in_any_frame(page, selector):
             return index
     return 0
+
+
+def _recorded_target_paths(route: Dict[str, Any]) -> List[str]:
+    values = [
+        (route.get("state") or {}).get("url"),
+        (route.get("runtime_profile_summary") or {}).get("url"),
+    ]
+    steps = list(route.get("steps") or [])
+    if steps:
+        values.append(steps[-1].get("active_page_url"))
+
+    paths: List[str] = []
+    for value in values:
+        path = urlsplit(str(value or "")).path.rstrip("/").lower()
+        if path and path not in paths:
+            paths.append(path)
+    return paths
+
+
+def _takeover_recorded_target_page(page: Page, route: Dict[str, Any], timeout: int) -> Tuple[Page, Dict[str, Any]]:
+    """Select an existing named popup reused by the final route action."""
+    target_paths = _recorded_target_paths(route)
+    if not target_paths:
+        return page, {"status": "SKIPPED", "reason": "route map has no recorded target URL"}
+
+    candidates = []
+    for candidate in _pages_for_context(page) or [page]:
+        if _page_is_closed(candidate):
+            continue
+        try:
+            candidate_urls = [str(candidate.url or "")]
+            candidate_urls.extend(str(frame.url or "") for frame in candidate.frames)
+        except PlaywrightError:
+            continue
+        candidate_paths = [urlsplit(value).path.rstrip("/").lower() for value in candidate_urls]
+        if any(target_path == candidate_path for target_path in target_paths for candidate_path in candidate_paths):
+            candidates.append(candidate)
+
+    if not candidates:
+        return page, {
+            "status": "BLOCKED",
+            "reason": "Route replay did not reach the recorded target page.",
+            "target_paths": target_paths,
+        }
+
+    selected = page if page in candidates else candidates[0]
+    try:
+        selected.bring_to_front()
+        selected.wait_for_load_state("domcontentloaded", timeout=min(timeout, 5000))
+    except PlaywrightError:
+        pass
+    return selected, {
+        "status": "PASS",
+        "strategy": "recorded_target_page_takeover",
+        "target_paths": target_paths,
+        "url": "" if _page_is_closed(selected) else str(selected.url or ""),
+        "reused_named_popup": selected is not page,
+    }
 
 
 def _execute_manual_replay(
@@ -320,6 +416,8 @@ def _execute_manual_replay(
                 "recorded_selector": recorded_selector,
                 "recorded_text": replay.get("text") or "",
                 "recorded_value": replay.get("value") or "",
+                "recorded_onclick": replay.get("onclick") or "",
+                "recorded_href": replay.get("href") or "",
                 "keep_popup": True,
             },
         )
@@ -477,6 +575,19 @@ class RouteNavigator:
                         "blocked_at": 1,
                         "reason": replay_result.get("reason") or "Manual full-route replay failed",
                         "state": replay_result.get("state") or _capture_state(page, route_capture_dir, f"{_safe_id(route_id)}_manual_full_route_failed"),
+                        "visible_controls": _visible_controls(page),
+                    }
+                )
+                return page, result
+
+            page, target_takeover = _takeover_recorded_target_page(page, route, self.timeout)
+            result["target_takeover"] = target_takeover
+            if target_takeover.get("status") == "BLOCKED":
+                result.update(
+                    {
+                        "status": "BLOCKED",
+                        "reason": target_takeover.get("reason"),
+                        "state": _capture_state(page, route_capture_dir, f"{_safe_id(route_id)}_manual_route_target_missing"),
                         "visible_controls": _visible_controls(page),
                     }
                 )

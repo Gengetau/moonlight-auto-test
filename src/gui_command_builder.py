@@ -854,6 +854,22 @@ def current_regression_queue_config(queue_run: Dict[str, Any]) -> Optional[Dict[
     return dict(configs[next_index])
 
 
+def pause_regression_queue_run(queue_run: Dict[str, Any], *, reason: str = "") -> Dict[str, Any]:
+    updated = dict(queue_run)
+    if str(updated.get("status") or "") == "running":
+        updated["status"] = "paused"
+        updated["pause_reason"] = reason
+    return updated
+
+
+def resume_regression_queue_run(queue_run: Dict[str, Any]) -> Dict[str, Any]:
+    updated = dict(queue_run)
+    if str(updated.get("status") or "") == "paused":
+        updated["status"] = "running"
+        updated.pop("pause_reason", None)
+    return updated
+
+
 def record_regression_queue_result(queue_run: Dict[str, Any], result: Dict[str, Any]) -> Dict[str, Any]:
     updated = dict(queue_run)
     configs = list(updated.get("configs") or [])
