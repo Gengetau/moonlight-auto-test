@@ -14,6 +14,7 @@ from playwright.sync_api import Page, Error as PlaywrightError, TimeoutError as 
 
 from src.action_executor import _capture_state, execute_action, infer_semantic_action
 from src.assert_engine import compare_visual_screenshot
+from src.browser_print import install_print_suppression
 from src.config_parser import Config
 from src.page_aliases import page_aliases
 from src.route_navigator import RouteMapCatalog, RouteNavigator
@@ -31,6 +32,7 @@ NEGATIVE_CASE_TYPES = {
 DOWNLOAD_CASE_TYPES = {"download", "download_template", "file_download"}
 BROWSER_DIALOG_CASE_TYPES = {"browser_dialog", "dialog", "alert", "confirm", "prompt"}
 PRINT_CASE_TYPES = {"print", "print_output", "print_dialog", "print_invocation"}
+PDF_SAVE_CASE_TYPES = {"save_pdf", "pdf_save", "saved_pdf", "print_to_pdf"}
 CHILD_NAVIGATION_CASE_TYPES = {
     "child_navigation",
     "child_page",
@@ -47,6 +49,7 @@ NON_VISUAL_ACTION_TYPES = (
     DOWNLOAD_CASE_TYPES
     | BROWSER_DIALOG_CASE_TYPES
     | PRINT_CASE_TYPES
+    | PDF_SAVE_CASE_TYPES
     | CHILD_NAVIGATION_CASE_TYPES
     | {"close_window"}
 )
@@ -146,6 +149,15 @@ class RegressionEngine:
         self.current_browser_name = ""
         self.mapping = self.load_mapping()
         self.route_map_catalog = RouteMapCatalog(self._route_map_paths(route_map_path))
+
+    @staticmethod
+    def _install_print_suppression(page: Optional[Page]) -> Dict[str, Any]:
+        if page is None:
+            return {"installed": False, "reason": "missing_page"}
+        try:
+            return install_print_suppression(page.context)
+        except Exception as exc:
+            return {"installed": False, "reason": str(exc)}
 
     @staticmethod
     def _resolve_checklist_path(checklist_path: Optional[str]) -> Optional[Path]:
@@ -421,6 +433,10 @@ class RegressionEngine:
         )
         page_dir.mkdir(parents=True, exist_ok=True)
         self._reset_full_test_log(page_dir)
+        print_suppression = {
+            "legacy": self._install_print_suppression(legacy_page),
+            "new": self._install_print_suppression(new_page),
+        }
 
         entry_url = (
             mapping.get("entry_url")
@@ -448,6 +464,7 @@ class RegressionEngine:
                 "entry_url": entry_url,
                 "legacy_target_url": legacy_url,
                 "new_target_url": new_url,
+                "print_suppression": print_suppression,
                 "mapping_keys": sorted(str(key) for key in mapping.keys()),
                 "legacy_page": self._page_debug_summary(legacy_page),
                 "new_page": self._page_debug_summary(new_page),
@@ -1820,7 +1837,7 @@ class RegressionEngine:
                 if not locator:
                     locator = "form"
 
-            if not locator and semantic_action not in {"goto"}:
+            if not locator and semantic_action not in {"goto", "save_pdf"}:
                 return {
                     "status": "BLOCKED",
                     "reason": f"Missing locator for scenario step {index}: {action_type}",
@@ -2354,6 +2371,15 @@ class RegressionEngine:
                         "legacy_path": compared.get("legacy_download_path"),
                         "new_path": compared.get("new_download_path"),
                     },
+                    "pdf_save": {
+                        "success_match": compared.get("pdf_save_success_match"),
+                        "legacy_saved": compared.get("legacy_pdf_saved"),
+                        "new_saved": compared.get("new_pdf_saved"),
+                        "legacy_path": compared.get("legacy_pdf_path"),
+                        "new_path": compared.get("new_pdf_path"),
+                        "legacy_size": compared.get("legacy_pdf_size"),
+                        "new_size": compared.get("new_pdf_size"),
+                    },
                     "legacy_screenshot": compared.get("legacy_screenshot"),
                     "new_screenshot": compared.get("new_screenshot"),
                     "diff_screenshot": compared.get("diff_screenshot"),
@@ -2422,6 +2448,10 @@ class RegressionEngine:
             "download_template",
             "file_download",
             "download",
+            "save_pdf",
+            "pdf_save",
+            "saved_pdf",
+            "print_to_pdf",
             "close_window",
             "back_action",
             "link_navigation",
@@ -3230,6 +3260,15 @@ class RegressionEngine:
             if print_compare.get("print_invocation_match") is False:
                 status = "DIFF"
 
+        pdf_compare = {}
+        if normalized_action_type in PDF_SAVE_CASE_TYPES:
+            pdf_compare = self._pdf_save_compare_fields(
+                extra.get("legacy_action") or {},
+                extra.get("new_action") or {},
+            )
+            if pdf_compare.get("pdf_save_success_match") is False:
+                status = "DIFF"
+
         if normalized_action_type in CHILD_NAVIGATION_CASE_TYPES:
             if child_navigation_compare.get("child_navigation_match") is False:
                 status = "DIFF"
@@ -3258,6 +3297,7 @@ class RegressionEngine:
             **download_compare,
             **dialog_compare,
             **print_compare,
+            **pdf_compare,
             **child_navigation_compare,
             **extra,
         }
@@ -3290,6 +3330,30 @@ class RegressionEngine:
             "new_download_suggested_filename": new_action.get("download_suggested_filename"),
             "legacy_download_path": legacy_action.get("download_path"),
             "new_download_path": new_action.get("download_path"),
+        }
+
+    @staticmethod
+    def _pdf_save_success(action: Dict[str, Any]) -> bool:
+        try:
+            size = int(action.get("pdf_size") or 0)
+        except (TypeError, ValueError):
+            size = 0
+        return bool(action.get("status") == "PASS" and action.get("pdf_path") and size > 0)
+
+    @classmethod
+    def _pdf_save_compare_fields(cls, legacy_action: Dict[str, Any], new_action: Dict[str, Any]) -> Dict[str, Any]:
+        legacy_success = cls._pdf_save_success(legacy_action)
+        new_success = cls._pdf_save_success(new_action)
+        return {
+            "pdf_save_success_match": legacy_success == new_success,
+            "legacy_pdf_saved": legacy_success,
+            "new_pdf_saved": new_success,
+            "legacy_pdf_path": legacy_action.get("pdf_path"),
+            "new_pdf_path": new_action.get("pdf_path"),
+            "legacy_pdf_size": legacy_action.get("pdf_size"),
+            "new_pdf_size": new_action.get("pdf_size"),
+            "legacy_pdf_backend": legacy_action.get("pdf_backend"),
+            "new_pdf_backend": new_action.get("pdf_backend"),
         }
 
     @staticmethod
@@ -3519,6 +3583,7 @@ class RegressionEngine:
       <b>Upload file</b><span>{html.escape(str(item.get('upload_file') or '-'))}</span>
       <b>Submit locator</b><span>{html.escape(str(item.get('submit_locator') or '-'))}</span>
       {self._render_download_detail_rows(item)}
+      {self._render_pdf_save_detail_rows(item)}
       <b>After URL</b><span>{html.escape(str(item.get('legacy_after_url') or '-'))} / {html.escape(str(item.get('new_after_url') or '-'))}</span>
       <b>Runtime</b><span>navigation={item.get('navigation_detected')} / popup={item.get('popup_detected')} / frame={item.get('frame_changed')} / validation_only={item.get('validation_only')}</span>
       {self._render_console_detail_rows(item)}
@@ -3617,6 +3682,35 @@ class RegressionEngine:
             f"<b>Legacy download file</b><span>{html.escape(str(item.get('legacy_download_filename') or '-'))}</span>"
             f"<b>New download file</b><span>{html.escape(str(item.get('new_download_filename') or '-'))}</span>"
             f"<b>Download path</b><span>{html.escape(str(item.get('legacy_download_path') or '-'))} / {html.escape(str(item.get('new_download_path') or '-'))}</span>"
+        )
+
+    @staticmethod
+    def _render_pdf_save_detail_rows(item: Dict[str, Any]) -> str:
+        has_pdf_save = any(
+            item.get(key) is not None
+            for key in (
+                "pdf_save_success_match",
+                "legacy_pdf_saved",
+                "new_pdf_saved",
+                "legacy_pdf_path",
+                "new_pdf_path",
+                "legacy_pdf_size",
+                "new_pdf_size",
+                "legacy_pdf_backend",
+                "new_pdf_backend",
+            )
+        )
+        if not has_pdf_save:
+            return ""
+        legacy_pdf = f"{item.get('legacy_pdf_path') or '-'} ({item.get('legacy_pdf_size') or '-'} bytes)"
+        new_pdf = f"{item.get('new_pdf_path') or '-'} ({item.get('new_pdf_size') or '-'} bytes)"
+        return (
+            f"<b>PDF save match</b><span>{html.escape(str(item.get('pdf_save_success_match') if item.get('pdf_save_success_match') is not None else '-'))}</span>"
+            f"<b>Legacy PDF saved</b><span>{html.escape(str(item.get('legacy_pdf_saved') if item.get('legacy_pdf_saved') is not None else '-'))}</span>"
+            f"<b>New PDF saved</b><span>{html.escape(str(item.get('new_pdf_saved') if item.get('new_pdf_saved') is not None else '-'))}</span>"
+            f"<b>Legacy PDF</b><span>{html.escape(legacy_pdf)}</span>"
+            f"<b>New PDF</b><span>{html.escape(new_pdf)}</span>"
+            f"<b>PDF backend</b><span>{html.escape(str(item.get('legacy_pdf_backend') or '-'))} / {html.escape(str(item.get('new_pdf_backend') or '-'))}</span>"
         )
 
     def _render_console_figures(self, item: Dict[str, Any], report_dir: Path) -> str:
@@ -3780,6 +3874,15 @@ class RegressionEngine:
             "new_download_filename": item.get("new_download_filename"),
             "legacy_download_path": item.get("legacy_download_path"),
             "new_download_path": item.get("new_download_path"),
+            "pdf_save_success_match": item.get("pdf_save_success_match"),
+            "legacy_pdf_saved": item.get("legacy_pdf_saved"),
+            "new_pdf_saved": item.get("new_pdf_saved"),
+            "legacy_pdf_path": item.get("legacy_pdf_path"),
+            "new_pdf_path": item.get("new_pdf_path"),
+            "legacy_pdf_size": item.get("legacy_pdf_size"),
+            "new_pdf_size": item.get("new_pdf_size"),
+            "legacy_pdf_backend": item.get("legacy_pdf_backend"),
+            "new_pdf_backend": item.get("new_pdf_backend"),
             "legacy_console_screenshot": item.get("legacy_console_screenshot"),
             "new_console_screenshot": item.get("new_console_screenshot"),
             "legacy_console_error_count": item.get("legacy_console_error_count"),

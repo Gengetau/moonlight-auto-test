@@ -124,7 +124,7 @@ def _mark_manual_replay_target(
     marker = f"ml-{_safe_id(test_id)}-{replay_index}-{int(time.time() * 1000)}"
     marker_selector = f'[data-moonlight-manual-replay-id="{marker}"]'
     script = """
-    ({ selector, marker, value, text, onclick, href, actionType, allowFallback }) => {
+    ({ selector, marker, value, text, onclick, href, actionType, allowFallback, mark }) => {
       const normalize = raw => String(raw || '').replace(/\\s+/g, ' ').trim();
       const wantedValue = normalize(value);
       const wantedText = normalize(text);
@@ -152,10 +152,17 @@ def _mark_manual_replay_target(
         if (wantsFill) return isEditable(el, tag, type);
         return true;
       };
+      const isDisabled = el => {
+        if (!el) return false;
+        if (el.disabled) return true;
+        const ariaDisabled = String(el.getAttribute('aria-disabled') || '').toLowerCase();
+        return ariaDisabled === 'true';
+      };
       const scoreElement = (el, fromSelector) => {
         const tag = (el.tagName || '').toLowerCase();
         const type = (el.getAttribute('type') || '').toLowerCase();
         if (!isCompatible(el, tag, type)) return null;
+        if (['click', 'submit', 'navigate', 'browser_dialog', 'print'].includes(action) && isDisabled(el)) return null;
         const elementValue = normalize(el.value || el.getAttribute('value') || '');
         const elementText = normalize(el.innerText || el.textContent || el.getAttribute('title') || el.getAttribute('aria-label') || '');
         const elementOnclick = normalize(el.getAttribute('onclick') || '').toLowerCase();
@@ -170,6 +177,8 @@ def _mark_manual_replay_target(
         const hrefPartial = !!wantedHref && !!elementHref && !hrefExact && (elementHref.includes(wantedHref) || wantedHref.includes(elementHref));
         const hasWantedIdentity = !!(wantedValue || wantedText || wantedOnclick || wantedHref);
         const identityMatched = valueExact || valuePartial || textExact || textPartial || onclickExact || onclickPartial || hrefExact || hrefPartial;
+        if (wantedOnclick && !onclickExact && !onclickPartial) return null;
+        if (wantedHref && !hrefExact && !hrefPartial) return null;
         if (!fromSelector && hasWantedIdentity && !identityMatched) {
           return null;
         }
@@ -193,7 +202,8 @@ def _mark_manual_replay_target(
           text: elementText.slice(0, 120),
           onclick: elementOnclick,
           href: elementHref,
-          visible: isVisible(el)
+          visible: isVisible(el),
+          disabled: isDisabled(el)
         };
       };
 
@@ -214,9 +224,9 @@ def _mark_manual_replay_target(
       if (!best || best.score <= 0) {
         return { marked: false, selector_count: selectorElements.length, reason: 'no scored target' };
       }
-      best.el.setAttribute('data-moonlight-manual-replay-id', marker);
+      if (mark) best.el.setAttribute('data-moonlight-manual-replay-id', marker);
       return {
-        marked: true,
+        marked: !!mark,
         selector_count: selectorElements.length,
         score: best.score,
         from_selector: best.fromSelector,
@@ -227,6 +237,7 @@ def _mark_manual_replay_target(
         onclick: best.onclick,
         href: best.href,
         visible: best.visible,
+        disabled: best.disabled,
       };
     }
     """
@@ -235,6 +246,7 @@ def _mark_manual_replay_target(
 
     def _try_mark(allow_fallback: bool) -> Tuple[Optional[str], Optional[Dict[str, Any]], bool]:
         saw_original_selector = False
+        best_frame = None
         best_selector: Optional[str] = None
         best_state: Optional[Dict[str, Any]] = None
         for frame in page.frames:
@@ -250,6 +262,7 @@ def _mark_manual_replay_target(
                         "href": href,
                         "actionType": action_type,
                         "allowFallback": allow_fallback,
+                        "mark": False,
                     },
                 )
             except PlaywrightError as exc:
@@ -262,15 +275,39 @@ def _mark_manual_replay_target(
                     saw_original_selector = True
             if marked:
                 diagnostics.append(marked)
-            if marked and marked.get("marked"):
+            if marked and int(marked.get("score") or 0) > 0:
                 marked["original_selector"] = selector
                 marked["resolved_selector"] = marker_selector
                 score = int(marked.get("score") or 0)
                 best_score = int((best_state or {}).get("score") or 0)
                 if best_state is None or score > best_score:
+                    best_frame = frame
                     best_selector = marker_selector
                     best_state = marked
         if best_selector and best_state:
+            try:
+                final_state = best_frame.evaluate(
+                    script,
+                    {
+                        "selector": selector,
+                        "marker": marker,
+                        "value": value,
+                        "text": text,
+                        "onclick": onclick,
+                        "href": href,
+                        "actionType": action_type,
+                        "allowFallback": allow_fallback,
+                        "mark": True,
+                    },
+                )
+                if final_state:
+                    final_state["frame_url"] = getattr(best_frame, "url", "")
+                    final_state["allow_fallback"] = allow_fallback
+                    final_state["original_selector"] = selector
+                    final_state["resolved_selector"] = marker_selector
+                    return best_selector, final_state, saw_original_selector
+            except PlaywrightError as exc:
+                best_state["mark_error"] = str(exc)
             return best_selector, best_state, saw_original_selector
         return None, None, saw_original_selector
 
@@ -418,6 +455,8 @@ def _execute_manual_replay(
                 "recorded_value": replay.get("value") or "",
                 "recorded_onclick": replay.get("onclick") or "",
                 "recorded_href": replay.get("href") or "",
+                "onclick": replay.get("onclick") or "",
+                "href": replay.get("href") or "",
                 "keep_popup": True,
             },
         )
@@ -433,6 +472,11 @@ def _execute_manual_replay(
                 "selector_resolution": selector_resolution,
                 "status": action_result.get("status"),
                 "reason": action_result.get("reason"),
+                "popup_expected": action_result.get("popup_expected"),
+                "popup_opened": action_result.get("popup_opened"),
+                "popup_url": action_result.get("popup_url"),
+                "popup_wait_strategy": action_result.get("popup_wait_strategy"),
+                "popup_wait_error": action_result.get("popup_wait_error"),
                 "popup_taken_over": takeover_page is not None,
                 "active_page_url": page.url if not _page_is_closed(page) else None,
             }

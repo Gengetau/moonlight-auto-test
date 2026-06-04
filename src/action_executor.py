@@ -1,4 +1,5 @@
 from playwright.sync_api import Frame, Page, Error as PlaywrightError, TimeoutError as PlaywrightTimeoutError
+import base64
 import os
 import json
 import re
@@ -614,6 +615,10 @@ ACTION_ALIASES = {
     "file": "upload",
     "upload": "upload",
     "download": "download",
+    "save_pdf": "save_pdf",
+    "pdf_save": "save_pdf",
+    "saved_pdf": "save_pdf",
+    "print_to_pdf": "save_pdf",
     "browser_dialog": "browser_dialog",
     "dialog": "browser_dialog",
     "alert": "browser_dialog",
@@ -702,6 +707,10 @@ def infer_semantic_action(action_type: Optional[str], context: Optional[Dict[str
         return "check"
     if "press" in raw or "special_key" in raw:
         return "press"
+    if "save_pdf" in raw or "pdf_save" in raw or "saved_pdf" in raw or "print_to_pdf" in raw:
+        return "save_pdf"
+    if "saved_pdf" in evidence or "save as pdf" in evidence:
+        return "save_pdf"
     if "print" in raw or "window.print" in evidence or "print_invocation" in evidence or "印刷" in evidence:
         return "print"
     if _expects_browser_dialog(context):
@@ -1034,9 +1043,23 @@ def _opens_popup_hint(context: Optional[Dict[str, Any]]) -> bool:
             "onclick",
             "href",
             "target",
+            "recorded_onclick",
+            "recorded_href",
         )
     )
     explicit_popup = _truthy_context_value(context.get("opens_popup")) or _truthy_context_value(context.get("popup"))
+    submit_target_match = re.search(
+        r"submitform\s*\([^)]*,\s*[^)]*,\s*['\"]([^'\"]+)['\"]",
+        evidence,
+        re.IGNORECASE,
+    )
+    submit_target = submit_target_match.group(1).strip().lower() if submit_target_match else ""
+    popup_submit_target = bool(
+        submit_target
+        and submit_target not in {"_self", "self", "_parent", "parent", "_top", "top"}
+        and not submit_target.startswith("fr")
+        and "dummy" not in submit_target
+    )
     child_or_popup_navigation = any(
         token in evidence
         for token in (
@@ -1053,6 +1076,7 @@ def _opens_popup_hint(context: Optional[Dict[str, Any]]) -> bool:
     return (
         bool(target and target not in {"_self", "self"})
         or explicit_popup
+        or popup_submit_target
         or "window.open" in evidence
         or "target=" in evidence
         or child_or_popup_navigation
@@ -1264,6 +1288,22 @@ def _safe_frame_urls(page: Page) -> List[str]:
         return [str(frame.url or "") for frame in page.frames]
     except Exception:
         return []
+
+
+def _safe_context_pages(page: Page) -> List[Page]:
+    try:
+        return list(page.context.pages)
+    except Exception:
+        return []
+
+
+def _first_new_context_page(page: Page, pages_before: List[Page]) -> Optional[Page]:
+    before_ids = {id(item) for item in pages_before}
+    for candidate in _safe_context_pages(page):
+        if id(candidate) in before_ids or _page_is_closed(candidate):
+            continue
+        return candidate
+    return None
 
 
 def execute_action(
@@ -1569,6 +1609,10 @@ def execute_action(
             action_dispatched = True
             page.goto(selector, wait_until="domcontentloaded", timeout=max(timeout, 30000))
             navigated_directly = True
+        elif semantic_action == "save_pdf":
+            frame = page.main_frame
+            result["target_frame"] = _frame_identity(frame)
+            result["selector_found"] = True
         else:
             frame, frame_state = _frame_for_selector(page, selector, timeout=min(timeout, 5000))
             result.update(frame_state)
@@ -1601,20 +1645,33 @@ def execute_action(
             try:
                 locator.wait_for(state="visible", timeout=timeout)
                 if _opens_popup_hint(action_context):
+                    result["popup_expected"] = True
+                    result["popup_wait_strategy"] = "context.expect_page"
+                    popup_pages_before = _safe_context_pages(page)
+                    popup: Optional[Page] = None
                     try:
-                        with page.expect_popup(timeout=3000) as popup_info:
+                        with page.context.expect_page(timeout=min(max(timeout, 3000), 8000)) as popup_info:
                             locator.click(timeout=timeout)
                         popup = popup_info.value
-                        popup.wait_for_load_state("domcontentloaded", timeout=min(timeout, 10000))
+                    except PlaywrightTimeoutError as exc:
+                        result["popup_opened"] = False
+                        result["popup_wait_error"] = str(exc)
+                        try:
+                            page.wait_for_timeout(800)
+                        except PlaywrightError:
+                            pass
+                        popup = _first_new_context_page(page, popup_pages_before)
+
+                    if popup is not None and not _page_is_closed(popup):
+                        try:
+                            popup.wait_for_load_state("domcontentloaded", timeout=min(timeout, 10000))
+                        except PlaywrightError as exc:
+                            result["popup_load_error"] = str(exc)
                         capture_page = popup
                         result["popup_opened"] = True
                         result["popup_url"] = popup.url
                         if keep_popup:
                             result["popup_page"] = popup
-                    except PlaywrightTimeoutError as exc:
-                        if "popup" not in str(exc).lower():
-                            raise
-                        result["popup_opened"] = False
                 else:
                     locator.click(timeout=timeout)
             except (PlaywrightTimeoutError, PlaywrightError):
@@ -1845,6 +1902,50 @@ def execute_action(
                     )
                 else:
                     result.update({"status": "BLOCKED", "reason": f"Download blocked or failed: {e}"})
+        elif semantic_action == "save_pdf":
+            action_dispatched = True
+            pdf_dir = Path(capture_dir or ".") / "pdf"
+            pdf_dir.mkdir(parents=True, exist_ok=True)
+            pdf_name_source = value or (action_context or {}).get("value") or test_id or "print_page"
+            pdf_name_stem = Path(str(pdf_name_source)).stem or str(pdf_name_source)
+            pdf_path = pdf_dir / f"{_safe_name(pdf_name_stem)}_{_safe_name(browser_name)}.pdf"
+            result["pdf_path"] = str(pdf_path)
+            pdf_error: Optional[Exception] = None
+            try:
+                result["pdf_backend"] = "playwright_page_pdf"
+                page.pdf(path=str(pdf_path), print_background=True, prefer_css_page_size=True)
+            except Exception as exc:
+                pdf_error = exc
+                try:
+                    result["pdf_backend"] = "cdp_print_to_pdf"
+                    session = page.context.new_cdp_session(page)
+                    pdf_payload = session.send(
+                        "Page.printToPDF",
+                        {
+                            "printBackground": True,
+                            "preferCSSPageSize": True,
+                        },
+                    )
+                    pdf_path.write_bytes(base64.b64decode(str(pdf_payload.get("data") or "")))
+                except Exception as cdp_exc:
+                    result.update(
+                        {
+                            "status": "BLOCKED",
+                            "pdf_backend": "unavailable",
+                            "reason": (
+                                "PDF save is not available through Playwright page.pdf or CDP Page.printToPDF: "
+                                f"page.pdf={pdf_error}; cdp={cdp_exc}"
+                            ),
+                        }
+                    )
+            if result.get("status") == "PASS":
+                if not pdf_path.exists():
+                    result.update({"status": "BLOCKED", "reason": f"PDF file was not created: {pdf_path}"})
+                else:
+                    result["pdf_size"] = pdf_path.stat().st_size
+                    result["pdf_filename"] = pdf_path.name
+                    if int(result["pdf_size"]) <= 0:
+                        result.update({"status": "BLOCKED", "reason": f"PDF file is empty: {pdf_path}"})
         elif semantic_action == "wait":
             frame.locator(selector).first.wait_for(timeout=20000)
         else:
@@ -2083,6 +2184,13 @@ COMPARE_POLICY = {
         "visual_required": False,
     },
     "print": {
+        "url_required": False,
+        "title_required": False,
+        "text_required": False,
+        "dom_required": False,
+        "visual_required": False,
+    },
+    "save_pdf": {
         "url_required": False,
         "title_required": False,
         "text_required": False,

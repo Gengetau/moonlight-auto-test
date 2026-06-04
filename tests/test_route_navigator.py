@@ -19,9 +19,12 @@ class FakeFrame:
         self.text = text
         self.onclick = onclick
         self.allow_fallback_calls = []
+        self.mark_calls = []
 
     def evaluate(self, script, args):
         allow_fallback = bool(args.get("allowFallback"))
+        if args.get("mark"):
+            self.mark_calls.append(args.get("marker"))
         self.allow_fallback_calls.append(allow_fallback)
         if self.selector_match and not allow_fallback:
             return {
@@ -105,6 +108,8 @@ def test_manual_replay_prefers_recorded_onclick_across_generic_button_frames():
     assert selector.startswith('[data-moonlight-manual-replay-id="')
     assert state["frame_url"] == "http://example.test/WwEasySearch.do"
     assert state["onclick"] == "submitForm('WwHistoryForm','./WwExpPrint.do','winPrintView')"
+    assert input_frame.mark_calls == []
+    assert len(history_frame.mark_calls) == 1
 
 
 class CountLocator:

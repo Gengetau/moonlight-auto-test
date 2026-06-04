@@ -275,15 +275,16 @@ def _install_manual_recorder(page: Page, *, route_id: str, index: int) -> Dict[s
         const value = el.getAttribute('value');
         const href = el.getAttribute('href');
         const onclick = el.getAttribute('onclick');
+        const compactOnclick = onclick ? onclick.replace(/\\s+/g, ' ').trim() : '';
+        const isClickControl = tag === 'button' || (tag === 'input' && ['button', 'submit', 'reset', 'image'].includes(String(type || '').toLowerCase()));
         if (id) return `${tag}#${cssEscape(id)}`;
         if (name && type && ['checkbox', 'radio'].includes(type) && value) return `${tag}[name="${attrEscape(name)}"][type="${attrEscape(type)}"][value="${attrEscape(value)}"]`;
+        if (isClickControl && compactOnclick.length >= 12) return `${tag}[onclick*="${attrEscape(compactOnclick.slice(0, 80))}"]`;
+        if (isClickControl && value) return `${tag}[type="${attrEscape(type || '')}"][value="${attrEscape(value)}"]`;
         if (name && type) return `${tag}[name="${attrEscape(name)}"][type="${attrEscape(type)}"]`;
         if (name) return `${tag}[name="${attrEscape(name)}"]`;
         if (href && href !== '#') return `${tag}[href="${attrEscape(href)}"]`;
-        if (onclick) {
-          const compact = onclick.replace(/\\s+/g, ' ').trim();
-          if (compact.length >= 12) return `${tag}[onclick*="${attrEscape(compact.slice(0, 80))}"]`;
-        }
+        if (compactOnclick.length >= 12) return `${tag}[onclick*="${attrEscape(compactOnclick.slice(0, 80))}"]`;
         const path = [];
         let node = el;
         while (node && node.nodeType === 1 && node !== document.body && path.length < 5) {

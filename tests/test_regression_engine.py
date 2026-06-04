@@ -426,6 +426,8 @@ def test_popup_hint_detects_targeted_links():
     assert _opens_popup_hint({"attributes": {"target": "_self"}}) is False
     assert _opens_popup_hint({"action_type": "child_navigation"}) is True
     assert _opens_popup_hint({"action_type": "open_child_page", "opens_popup": True}) is True
+    assert _opens_popup_hint({"recorded_onclick": "submitForm('WwHistoryForm','./WwExpPrint.do','winPrintView')"}) is True
+    assert _opens_popup_hint({"onclick": "submitForm('WwEasySearchForm','./WwEasySearch.do','frHistoryFrame')"}) is False
 
 
 def test_child_navigation_compare_is_url_only_and_accepts_page_aliases(tmp_path):
