@@ -30,6 +30,12 @@ CHROMIUM_ARGS = [
 FIREFOX_ARGS = []
 
 
+def _download_launch_kwargs() -> Dict[str, str]:
+    download_dir = Path(Config.DOWNLOAD_DIR).expanduser()
+    download_dir.mkdir(parents=True, exist_ok=True)
+    return {"downloads_path": str(download_dir)}
+
+
 def _configure_stdio() -> None:
     for stream in (sys.stdout, sys.stderr):
         try:
@@ -60,15 +66,26 @@ def _route_matches(route: Dict[str, Any], target: Optional[str]) -> bool:
 
 def _launch_browser(playwright, browser_name: str):
     if browser_name == "edge":
-        return playwright.chromium.launch(channel="msedge", headless=False, args=CHROMIUM_ARGS)
-    if browser_name == "firefox":
-        return playwright.firefox.launch(headless=False, args=FIREFOX_ARGS)
-    if browser_name == "chrome_port":
         return playwright.chromium.launch(
-            **Config.chrome_launch_kwargs(),
+            channel="msedge",
             headless=False,
             args=CHROMIUM_ARGS,
+            **_download_launch_kwargs(),
         )
+    if browser_name == "firefox":
+        return playwright.firefox.launch(
+            headless=False,
+            args=FIREFOX_ARGS,
+            **_download_launch_kwargs(),
+        )
+    if browser_name == "chrome_port":
+        chrome_kwargs = {
+            **Config.chrome_launch_kwargs(),
+            **_download_launch_kwargs(),
+            "headless": False,
+            "args": CHROMIUM_ARGS,
+        }
+        return playwright.chromium.launch(**chrome_kwargs)
     raise ValueError(f"不支持的浏览器类型: {browser_name}")
 
 

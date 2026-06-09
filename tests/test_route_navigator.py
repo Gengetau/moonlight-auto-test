@@ -1,4 +1,10 @@
-from src.route_navigator import RouteNavigator, _manual_replay_start_offset, _mark_manual_replay_target
+from src.route_navigator import (
+    RouteNavigator,
+    _execute_manual_replay,
+    _manual_replay_start_offset,
+    _mark_manual_replay_target,
+    _takeover_recorded_target_page,
+)
 
 
 class FakeFrame:
@@ -203,3 +209,177 @@ def test_manual_route_navigation_takes_over_reused_named_target_popup(tmp_path, 
     assert result["target_takeover"]["status"] == "PASS"
     assert result["target_takeover"]["reused_named_popup"] is True
     assert result["url"] == popup.url
+
+
+def test_recorded_target_takeover_waits_for_async_named_popup():
+    class Context:
+        def __init__(self):
+            self.pages = []
+            self.target = None
+            self.waits = 0
+
+    class Page:
+        def __init__(self, url, context):
+            self.url = url
+            self.context = context
+            self.frames = []
+            self.front = 0
+
+        def is_closed(self):
+            return False
+
+        def bring_to_front(self):
+            self.front += 1
+
+        def wait_for_load_state(self, *_args, **_kwargs):
+            return None
+
+        def wait_for_timeout(self, *_args, **_kwargs):
+            self.context.waits += 1
+            if self.context.target not in self.context.pages:
+                self.context.pages.append(self.context.target)
+
+    context = Context()
+    parent = Page("http://example.test/patlics/WwAbstPDFDownloadDispForBiblioList.do", context)
+    target = Page("http://example.test/patlics/WwAbstPDFDownload.do", context)
+    context.target = target
+    context.pages = [parent]
+
+    selected, result = _takeover_recorded_target_page(
+        parent,
+        {"state": {"url": "http://legacy.test/patlics/WwAbstPDFDownload.do"}},
+        timeout=1000,
+    )
+
+    assert selected is target
+    assert result["status"] == "PASS"
+    assert result["attempts"] >= 2
+    assert target.front == 1
+
+
+def test_manual_replay_returns_to_opener_after_popup_closes(tmp_path, monkeypatch):
+    class ReplayPage:
+        def __init__(self, url, *, opener=None):
+            self.url = url
+            self.frames = []
+            self._opener = opener
+            self._closed = False
+            self.front = 0
+
+        def is_closed(self):
+            return self._closed
+
+        def opener(self):
+            return self._opener
+
+        def wait_for_load_state(self, *_args, **_kwargs):
+            return None
+
+        def wait_for_timeout(self, *_args, **_kwargs):
+            return None
+
+        def bring_to_front(self):
+            self.front += 1
+
+    parent = ReplayPage("http://example.test/patlics/EvalFocusJpBiblioListDisp.do")
+    popup = ReplayPage("http://example.test/patlics/EvalFocusSetDispForJpBib.do", opener=parent)
+    executed_pages = []
+
+    def fake_execute_action(page, action_type, selector, *_args, **_kwargs):
+        executed_pages.append((page, action_type, selector))
+        if page is popup:
+            popup._closed = True
+            return {
+                "status": "PASS",
+                "page_closed_after_action": True,
+                "capture_scope": "opener_after_popup_close",
+            }
+        return {"status": "PASS"}
+
+    monkeypatch.setattr(
+        "src.route_navigator._mark_manual_replay_target",
+        lambda _page, replay, **_kwargs: (replay["selector"], {"marked": True}),
+    )
+    monkeypatch.setattr("src.route_navigator._pages_for_context", lambda _page: [parent, popup])
+    monkeypatch.setattr("src.route_navigator._takeover_page_after_action", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr("src.route_navigator._selector_exists_in_any_frame", lambda page, selector: page is parent)
+    monkeypatch.setattr("src.route_navigator.execute_action", fake_execute_action)
+    monkeypatch.setattr("src.route_navigator._capture_state", lambda page, *_args, **_kwargs: {"url": page.url})
+
+    final_page, result = _execute_manual_replay(
+        popup,
+        [
+            {"action_type": "click", "selector": "input[onclick*='evalFocus();']"},
+            {"action_type": "click", "selector": "a[onclick*='EvalBlocUpdateDispForJpBiblioList']"},
+        ],
+        capture_dir=tmp_path,
+        test_id="manual_evalblocupdate",
+        browser_name="edge",
+        timeout=1000,
+    )
+
+    assert result["status"] == "PASS"
+    assert final_page is parent
+    assert executed_pages[0][0] is popup
+    assert executed_pages[1][0] is parent
+    assert result["steps"][0]["opener_recovered_after_popup_close"] is True
+
+
+def test_manual_replay_passes_recorded_browser_dialog_metadata(tmp_path, monkeypatch):
+    class ReplayPage:
+        def __init__(self, url):
+            self.url = url
+            self.frames = []
+
+        def is_closed(self):
+            return False
+
+    page = ReplayPage("http://example.test/patlics/EvalFocusJpBiblioListDisp.do")
+    captured_contexts = []
+
+    def fake_execute_action(_page, _action_type, _selector, *_args, **kwargs):
+        captured_contexts.append(kwargs["action_context"])
+        return {
+            "status": "PASS",
+            "dialogs": [
+                {
+                    "type": "confirm",
+                    "message": "真内評価情報にチェックを入れます。よろしいですか？",
+                    "handled_action": "accept",
+                    "accept_status": "accepted",
+                }
+            ],
+        }
+
+    monkeypatch.setattr(
+        "src.route_navigator._mark_manual_replay_target",
+        lambda _page, replay, **_kwargs: (replay["selector"], {"marked": True}),
+    )
+    monkeypatch.setattr("src.route_navigator._pages_for_context", lambda _page: [page])
+    monkeypatch.setattr("src.route_navigator._takeover_page_after_action", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr("src.route_navigator.execute_action", fake_execute_action)
+    monkeypatch.setattr("src.route_navigator._capture_state", lambda page, *_args, **_kwargs: {"url": page.url})
+
+    _, result = _execute_manual_replay(
+        page,
+        [
+            {
+                "action_type": "click",
+                "selector": "input[onclick*='evalFocus();']",
+                "dialog_expected": True,
+                "dialog_type": "confirm",
+                "dialog_message": "真内評価情報にチェックを入れます。よろしいですか？",
+                "dialog_action": "accept",
+            }
+        ],
+        capture_dir=tmp_path,
+        test_id="manual_evalblocupdate",
+        browser_name="edge",
+        timeout=1000,
+    )
+
+    assert result["status"] == "PASS"
+    assert captured_contexts[0]["manual_replay"] is True
+    assert captured_contexts[0]["dialog_expected"] is True
+    assert captured_contexts[0]["dialog_message"] == "真内評価情報にチェックを入れます。よろしいですか？"
+    assert result["steps"][0]["dialogs"][0]["accept_status"] == "accepted"

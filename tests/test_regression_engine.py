@@ -6,16 +6,31 @@ from PIL import Image
 
 from src.action_executor import (
     _accept_dialog_safely,
+    _attach_cdp_download_observer,
     _capture_state,
     _console_font,
+    _configure_browser_download_dir,
+    _dialog_action_from_context,
+    _completed_cdp_download_file_from_dirs,
+    _download_dir_snapshot,
+    _download_expect_timeout_ms,
     _download_save_path,
+    _download_watch_dirs,
+    _handle_dialog_safely,
+    _is_pdf_child_navigation_context,
     _negative_visual_evidence_payload,
     _opens_popup_hint,
+    _pump_playwright_events,
+    _record_download_result,
+    _record_filesystem_download_result,
     _render_console_evidence_image,
     _resolve_upload_file_value,
     _safe_download_filename,
     _safe_opener_page,
     _should_close_capture_page,
+    _should_capture_browser_dialogs,
+    _state_capture_page_after_child_navigation,
+    _stable_download_from_dirs,
     build_steps_from_page_mapping,
     infer_semantic_action,
 )
@@ -384,6 +399,22 @@ def test_infer_semantic_action_uses_scanner_hints():
     assert infer_semantic_action("expect_value", {}) == "assert_value"
     assert infer_semantic_action("assert_url", {}) == "assert_url"
     assert infer_semantic_action("fill", {"label": "Selected result can be confirmed"}) == "fill"
+    assert infer_semantic_action("fill", {"expected_type": "browser_dialog"}) == "fill"
+    assert infer_semantic_action("select", {"expected_type": "browser_dialog"}) == "select"
+    assert (
+        infer_semantic_action(
+            "manual_assert",
+            {"locator": "select[name='drawingOut']", "value": "Representative drawing output is disabled."},
+        )
+        == "assert_disabled"
+    )
+    assert (
+        infer_semantic_action(
+            "manual_assert",
+            {"locator": "browser dialog", "value": "The native dialog is shown."},
+        )
+        == "manual_assert"
+    )
 
 
 def test_action_dedupe_prefers_locator_change_over_full_action_fallback(tmp_path):
@@ -476,6 +507,103 @@ def test_child_navigation_requires_target_reopen_only_for_same_window_navigation
     )
 
 
+def test_action_left_target_page_requires_reopen_for_same_window_navigation(tmp_path):
+    mapping_path = tmp_path / "page_mapping.json"
+    mapping_path.write_text(json.dumps({"page_mappings": []}), encoding="utf-8")
+    engine = RegressionEngine(mapping_path=str(mapping_path), output_dir=str(tmp_path / "out"))
+
+    class Frame:
+        def __init__(self, url):
+            self.url = url
+
+    class Page:
+        url = "http://legacy.test/patlics/PatlicsTopMain.do"
+        frames = [Frame("http://legacy.test/patlics/WwClassCodeDetail.do")]
+
+        def is_closed(self):
+            return False
+
+    state = engine._action_left_target_page(
+        {"page_id": "WwBiblioList.jsp"},
+        Page(),
+        Page(),
+        {"status": "PASS", "frame_changed": True, "popup_detected": False},
+        {"status": "PASS", "frame_changed": True, "popup_detected": False},
+    )
+
+    assert state["requires_reopen"] is True
+    assert state["legacy_matches_target"] is False
+    assert state["new_matches_target"] is False
+
+
+def test_action_left_target_page_ignores_popup_when_parent_stays_on_target(tmp_path):
+    mapping_path = tmp_path / "page_mapping.json"
+    mapping_path.write_text(json.dumps({"page_mappings": []}), encoding="utf-8")
+    engine = RegressionEngine(mapping_path=str(mapping_path), output_dir=str(tmp_path / "out"))
+
+    class Frame:
+        def __init__(self, url):
+            self.url = url
+
+    class Page:
+        url = "http://legacy.test/patlics/PatlicsTopMain.do"
+        frames = [Frame("http://legacy.test/patlics/WwBiblioList.do")]
+
+        def is_closed(self):
+            return False
+
+    state = engine._action_left_target_page(
+        {"page_id": "WwBiblioList.jsp"},
+        Page(),
+        Page(),
+        {"status": "PASS", "navigation_detected": True, "popup_detected": True},
+        {"status": "PASS", "navigation_detected": True, "popup_detected": True},
+    )
+
+    assert state["requires_reopen"] is False
+
+
+def test_action_left_target_page_ignores_popup_when_alias_mapping_misses_preserved_parent(tmp_path):
+    mapping_path = tmp_path / "page_mapping.json"
+    mapping_path.write_text(json.dumps({"page_mappings": []}), encoding="utf-8")
+    engine = RegressionEngine(mapping_path=str(mapping_path), output_dir=str(tmp_path / "out"))
+
+    class Page:
+        def __init__(self, url):
+            self.url = url
+            self.frames = []
+
+        def is_closed(self):
+            return False
+
+    legacy_url = "http://legacy.test/patlics/GazetteForBiblioList.do"
+    new_url = "http://new.test/patlics/GazetteForBiblioList.do"
+    state = engine._action_left_target_page(
+        {"page_id": "GazetteMainFrame.jsp"},
+        Page(legacy_url),
+        Page(new_url),
+        {
+            "status": "PASS",
+            "before_url": legacy_url,
+            "after_url": "http://legacy.test/patlics/EvalListForJpGazetteHTML.do",
+            "navigation_detected": True,
+            "frame_changed": True,
+            "popup_detected": True,
+        },
+        {
+            "status": "PASS",
+            "before_url": new_url,
+            "after_url": "http://new.test/patlics/EvalListForJpGazetteHTML.do",
+            "navigation_detected": True,
+            "frame_changed": True,
+            "popup_detected": True,
+        },
+    )
+
+    assert state["requires_reopen"] is False
+    assert state["popup_parent_preserved"] is True
+
+
 def test_download_filename_is_windows_safe():
     name = _safe_download_filename('a[onclick="x"]?.xls', "chrome:port")
 
@@ -498,6 +626,553 @@ def test_download_save_path_does_not_overwrite_existing_file(tmp_path, monkeypat
     path = _download_save_path("report.pdf")
 
     assert path == tmp_path / "report (1).pdf"
+
+
+def test_download_watch_dir_detects_new_stable_file(tmp_path, monkeypatch):
+    monkeypatch.setenv("DOWNLOAD_DIR", str(tmp_path))
+    watch_dirs = _download_watch_dirs({})
+    started_at = 1.0
+    before = _download_dir_snapshot(watch_dirs)
+    created = tmp_path / "report.tsv"
+    created.write_bytes(b"downloaded")
+    stable_seen = {}
+
+    assert _stable_download_from_dirs(
+        watch_dirs,
+        before,
+        stable_seen,
+        started_at=started_at,
+        stability_ms=0,
+    ) is None
+    detected = _stable_download_from_dirs(
+        watch_dirs,
+        before,
+        stable_seen,
+        started_at=started_at,
+        stability_ms=0,
+    )
+
+    assert detected == created
+
+
+def test_download_watch_dir_ignores_browser_uuid_temp_file(tmp_path, monkeypatch):
+    monkeypatch.setenv("DOWNLOAD_DIR", str(tmp_path))
+    watch_dirs = _download_watch_dirs({})
+    started_at = 1.0
+    before = _download_dir_snapshot(watch_dirs)
+    temp_file = tmp_path / "0ecdece6-6a98-4958-9ad0-bef1b668db12"
+    temp_file.write_bytes(b"partial")
+    stable_seen = {}
+
+    assert _stable_download_from_dirs(
+        watch_dirs,
+        before,
+        stable_seen,
+        started_at=started_at,
+        stability_ms=0,
+    ) is None
+    assert _stable_download_from_dirs(
+        watch_dirs,
+        before,
+        stable_seen,
+        started_at=started_at,
+        stability_ms=0,
+    ) is None
+
+
+def test_download_watch_dir_allows_browser_uuid_fallback_file(tmp_path, monkeypatch):
+    monkeypatch.setenv("DOWNLOAD_DIR", str(tmp_path))
+    watch_dirs = _download_watch_dirs({})
+    started_at = 1.0
+    before = _download_dir_snapshot(watch_dirs)
+    guid = "0ecdece6-6a98-4958-9ad0-bef1b668db12"
+    completed_file = tmp_path / guid
+    completed_file.write_bytes(b"zip")
+    stable_seen = {}
+
+    assert _stable_download_from_dirs(
+        watch_dirs,
+        before,
+        stable_seen,
+        started_at=started_at,
+        stability_ms=0,
+        allow_browser_uuid_names=True,
+    ) is None
+    detected = _stable_download_from_dirs(
+        watch_dirs,
+        before,
+        stable_seen,
+        started_at=started_at,
+        stability_ms=0,
+        allow_browser_uuid_names=True,
+    )
+
+    assert detected == completed_file
+
+
+def test_download_watch_dir_allows_completed_cdp_uuid_file(tmp_path, monkeypatch):
+    monkeypatch.setenv("DOWNLOAD_DIR", str(tmp_path))
+    watch_dirs = _download_watch_dirs({})
+    started_at = 1.0
+    before = _download_dir_snapshot(watch_dirs)
+    guid = "0ecdece6-6a98-4958-9ad0-bef1b668db12"
+    completed_file = tmp_path / guid
+    completed_file.write_bytes(b"zip")
+    stable_seen = {}
+
+    assert _stable_download_from_dirs(
+        watch_dirs,
+        before,
+        stable_seen,
+        started_at=started_at,
+        stability_ms=0,
+        allow_temp_names=[guid],
+    ) is None
+    detected = _stable_download_from_dirs(
+        watch_dirs,
+        before,
+        stable_seen,
+        started_at=started_at,
+        stability_ms=0,
+        allow_temp_names=[guid],
+    )
+
+    assert detected == completed_file
+
+
+def test_completed_cdp_download_file_detects_guid_without_waiting_for_stability(tmp_path, monkeypatch):
+    monkeypatch.setenv("DOWNLOAD_DIR", str(tmp_path))
+    watch_dirs = _download_watch_dirs({})
+    started_at = 1.0
+    before = _download_dir_snapshot(watch_dirs)
+    guid = "0ecdece6-6a98-4958-9ad0-bef1b668db12"
+    completed_file = tmp_path / guid
+    completed_file.write_bytes(b"zip")
+
+    detected, metadata = _completed_cdp_download_file_from_dirs(
+        {
+            guid: {
+                "guid": guid,
+                "state": "completed",
+                "suggested_filename": "patent_PDF_20260608161131.zip",
+                "completed_at": 2.0,
+            }
+        },
+        watch_dirs,
+        before,
+        started_at=started_at,
+    )
+
+    assert detected == completed_file
+    assert metadata["suggested_filename"] == "patent_PDF_20260608161131.zip"
+
+
+def test_completed_cdp_download_file_ignores_preexisting_guid_file(tmp_path, monkeypatch):
+    monkeypatch.setenv("DOWNLOAD_DIR", str(tmp_path))
+    guid = "0ecdece6-6a98-4958-9ad0-bef1b668db12"
+    (tmp_path / guid).write_bytes(b"old")
+    watch_dirs = _download_watch_dirs({})
+    before = _download_dir_snapshot(watch_dirs)
+
+    detected, metadata = _completed_cdp_download_file_from_dirs(
+        {guid: {"guid": guid, "state": "completed", "suggested_filename": "report.zip"}},
+        watch_dirs,
+        before,
+        started_at=1.0,
+    )
+
+    assert detected is None
+    assert metadata is None
+
+
+def test_download_expect_timeout_keeps_filesystem_monitor_responsive():
+    assert _download_expect_timeout_ms({}, action_timeout_ms=150000, download_timeout_ms=150000) == 10000
+    assert _download_expect_timeout_ms(
+        {"download_expect_timeout_ms": 3000},
+        action_timeout_ms=150000,
+        download_timeout_ms=150000,
+    ) == 3000
+
+
+def test_pump_playwright_events_uses_live_context_page_when_action_page_closed():
+    class Context:
+        pages = []
+
+    class Page:
+        def __init__(self, *, closed=False):
+            self._closed = closed
+            self.context = Context()
+            self.waited = []
+
+        def is_closed(self):
+            return self._closed
+
+        def wait_for_timeout(self, timeout_ms):
+            self.waited.append(timeout_ms)
+
+    closed_page = Page(closed=True)
+    live_page = Page()
+    context = Context()
+    context.pages = [closed_page, live_page]
+    closed_page.context = context
+    live_page.context = context
+
+    assert _pump_playwright_events(250, closed_page) is True
+    assert live_page.waited == [250]
+
+
+def test_configure_browser_download_dir_uses_cdp_browser_behavior(tmp_path):
+    calls = []
+
+    class Session:
+        def send(self, method, payload):
+            calls.append((method, payload))
+
+        def detach(self):
+            calls.append(("detach", {}))
+
+    class Context:
+        def __init__(self):
+            self.pages = []
+
+        def new_cdp_session(self, page):
+            return Session()
+
+    class Page:
+        def __init__(self):
+            self.context = Context()
+            self.context.pages = [self]
+            self.url = "http://example.test/download"
+
+        def is_closed(self):
+            return False
+
+    state = _configure_browser_download_dir(Page(), tmp_path)
+
+    assert state["status"] == "PASS"
+    assert calls[0] == (
+        "Browser.setDownloadBehavior",
+        {
+            "behavior": "allowAndName",
+            "downloadPath": str(tmp_path),
+            "eventsEnabled": True,
+        },
+    )
+
+
+def test_attach_cdp_download_observer_registers_download_events(tmp_path):
+    calls = []
+    event_handlers = {}
+
+    class Session:
+        def send(self, method, payload):
+            calls.append((method, payload))
+
+        def on(self, event_name, handler):
+            event_handlers[event_name] = handler
+
+        def detach(self):
+            calls.append(("detach", {}))
+
+    class Context:
+        def __init__(self):
+            self.pages = []
+
+        def new_cdp_session(self, page):
+            return Session()
+
+    class Page:
+        def __init__(self):
+            self.context = Context()
+            self.context.pages = [self]
+            self.url = "http://example.test/download"
+
+        def is_closed(self):
+            return False
+
+    state, sessions = _attach_cdp_download_observer(
+        Page(),
+        tmp_path,
+        on_will_begin=lambda params: None,
+        on_progress=lambda params: None,
+    )
+
+    assert state["status"] == "PASS"
+    assert len(sessions) == 1
+    assert calls[0] == (
+        "Browser.setDownloadBehavior",
+        {
+            "behavior": "allowAndName",
+            "downloadPath": str(tmp_path),
+            "eventsEnabled": True,
+        },
+    )
+    assert "Browser.downloadWillBegin" in event_handlers
+    assert "Browser.downloadProgress" in event_handlers
+
+
+def test_record_filesystem_download_result_uses_existing_file(tmp_path, monkeypatch):
+    monkeypatch.setenv("DOWNLOAD_DIR", str(tmp_path))
+    downloaded = tmp_path / "report.tsv"
+    downloaded.write_bytes(b"downloaded")
+    result = {}
+
+    _record_filesystem_download_result(result, downloaded)
+
+    assert result["download_source"] == "filesystem"
+    assert result["download_filename"] == "report.tsv"
+    assert result["download_path"] == str(downloaded)
+    assert result["download_saved_path"] == str(downloaded)
+    assert result["download_renamed"] is False
+    assert result["download_size"] == len(b"downloaded")
+
+
+def test_record_download_result_uses_playwright_suggested_filename(tmp_path, monkeypatch):
+    download_dir = tmp_path / "downloads"
+    monkeypatch.setenv("DOWNLOAD_DIR", str(download_dir))
+
+    class Download:
+        suggested_filename = "patent_PDF_20260605181936.zip"
+
+        def save_as(self, path):
+            Path(path).write_bytes(b"zip")
+
+    result = {}
+
+    _record_download_result(result, Download())
+
+    saved_path = download_dir / "patent_PDF_20260605181936.zip"
+    assert saved_path.exists()
+    assert result["download_source"] == "playwright_event"
+    assert result["download_filename"] == "patent_PDF_20260605181936.zip"
+    assert result["saved_filename"] == "patent_PDF_20260605181936.zip"
+    assert result["download_path"] == str(saved_path)
+
+
+def test_record_download_result_uses_response_hint_when_playwright_name_is_generic(tmp_path, monkeypatch):
+    download_dir = tmp_path / "downloads"
+    monkeypatch.setenv("DOWNLOAD_DIR", str(download_dir))
+
+    class Download:
+        suggested_filename = "download"
+
+        def save_as(self, path):
+            Path(path).write_bytes(b"zip")
+
+    result = {}
+
+    _record_download_result(result, Download(), suggested_filename="patent_PDF_20260605181936.zip")
+
+    saved_path = download_dir / "patent_PDF_20260605181936.zip"
+    assert saved_path.exists()
+    assert result["download_playwright_suggested_filename"] == "download"
+    assert result["download_suggested_filename"] == "patent_PDF_20260605181936.zip"
+    assert result["download_path"] == str(saved_path)
+
+
+def test_record_filesystem_download_result_persists_temp_uuid_file_with_original_name(tmp_path, monkeypatch):
+    download_dir = tmp_path / "browser_downloads"
+    stable_dir = tmp_path / "stable_downloads"
+    download_dir.mkdir()
+    stable_dir.mkdir()
+    monkeypatch.setenv("DOWNLOAD_DIR", str(stable_dir))
+    downloaded = download_dir / "17e060f2-fec6-425c-9f98-3a66b2493823"
+    downloaded.write_bytes(b"downloaded")
+    report_dir = tmp_path / "report"
+    result = {}
+
+    _record_filesystem_download_result(
+        result,
+        downloaded,
+        capture_dir=report_dir,
+        test_id="20_case_legacy",
+        browser_name="edge",
+        suggested_filename="report.tsv",
+    )
+
+    saved_path = stable_dir / "report.tsv"
+    archive_path = Path(result["download_archive_path"])
+    assert saved_path.exists()
+    assert saved_path.read_bytes() == b"downloaded"
+    assert archive_path.parent == report_dir / "downloads"
+    assert archive_path.exists()
+    assert archive_path.read_bytes() == b"downloaded"
+    assert result["download_original_path"] == str(downloaded)
+    assert result["download_detected_filename"] == downloaded.name
+    assert result["download_filename"] == "report.tsv"
+    assert result["download_path"] == str(saved_path)
+    assert result["download_saved_path"] == str(saved_path)
+    assert result["download_archive_path"] == str(archive_path)
+    assert result["download_size"] == len(b"downloaded")
+    assert result["download_sha256"]
+
+
+def test_record_filesystem_download_result_does_not_save_temp_uuid_as_test_id(tmp_path, monkeypatch):
+    download_dir = tmp_path / "browser_downloads"
+    stable_dir = tmp_path / "stable_downloads"
+    report_dir = tmp_path / "report"
+    download_dir.mkdir()
+    stable_dir.mkdir()
+    monkeypatch.setenv("DOWNLOAD_DIR", str(stable_dir))
+    downloaded = download_dir / "17e060f2-fec6-425c-9f98-3a66b2493823"
+    downloaded.write_bytes(b"downloaded")
+    result = {}
+
+    _record_filesystem_download_result(
+        result,
+        downloaded,
+        capture_dir=report_dir,
+        test_id="09_Default_public_and_registered_gazette_kinds_download_a_ZIP_legacy_step7",
+        browser_name="edge",
+    )
+
+    assert result["download_filename_unknown"] is True
+    assert result["download_filename"] == ""
+    assert result["download_saved_path"] == ""
+    assert not list(stable_dir.iterdir())
+    assert Path(result["download_archive_path"]).exists()
+    assert Path(result["download_path"]).parent == report_dir / "downloads"
+
+
+def test_record_filesystem_download_result_does_not_reuse_generated_step_name(tmp_path, monkeypatch):
+    stable_dir = tmp_path / "stable_downloads"
+    report_dir = tmp_path / "report"
+    stable_dir.mkdir()
+    monkeypatch.setenv("DOWNLOAD_DIR", str(stable_dir))
+    generated_name = "09_Default_public_and_registered_gazette_kinds_download_a_ZIP_legacy_step7"
+    downloaded = stable_dir / generated_name
+    downloaded.write_bytes(b"downloaded")
+    result = {}
+
+    _record_filesystem_download_result(
+        result,
+        downloaded,
+        capture_dir=report_dir,
+        test_id=generated_name,
+        browser_name="edge",
+    )
+
+    assert result["download_filename_unknown"] is True
+    assert result["download_filename"] == ""
+    assert result["download_saved_path"] == ""
+    assert Path(result["download_archive_path"]).exists()
+
+
+def test_record_filesystem_download_result_uses_response_suggested_filename(tmp_path, monkeypatch):
+    download_dir = tmp_path / "browser_downloads"
+    stable_dir = tmp_path / "stable_downloads"
+    download_dir.mkdir()
+    stable_dir.mkdir()
+    monkeypatch.setenv("DOWNLOAD_DIR", str(stable_dir))
+    downloaded = download_dir / "17e060f2-fec6-425c-9f98-3a66b2493823"
+    downloaded.write_bytes(b"downloaded")
+    result = {}
+
+    _record_filesystem_download_result(
+        result,
+        downloaded,
+        test_id="20_case_legacy",
+        browser_name="edge",
+        suggested_filename="server_report.tsv",
+    )
+
+    assert result["download_filename"] == "server_report.tsv"
+    assert result["download_path"] == str(stable_dir / "server_report.tsv")
+    assert not (stable_dir / "20_case_legacy").exists()
+
+
+def test_record_filesystem_download_result_renames_uuid_inside_download_dir(tmp_path, monkeypatch):
+    stable_dir = tmp_path / "stable_downloads"
+    stable_dir.mkdir()
+    monkeypatch.setenv("DOWNLOAD_DIR", str(stable_dir))
+    guid = "17e060f2-fec6-425c-9f98-3a66b2493823"
+    downloaded = stable_dir / guid
+    downloaded.write_bytes(b"downloaded")
+    result = {}
+
+    _record_filesystem_download_result(
+        result,
+        downloaded,
+        test_id="20_case_legacy",
+        browser_name="edge",
+        suggested_filename="server_report.tsv",
+    )
+
+    assert result["download_filename"] == "server_report.tsv"
+    assert result["download_path"] == str(stable_dir / "server_report.tsv")
+    assert (stable_dir / "server_report.tsv").read_bytes() == b"downloaded"
+    assert not downloaded.exists()
+
+
+def test_record_filesystem_download_result_adds_suffix_for_existing_original_name(tmp_path, monkeypatch):
+    download_dir = tmp_path / "browser_downloads"
+    stable_dir = tmp_path / "stable_downloads"
+    download_dir.mkdir()
+    stable_dir.mkdir()
+    monkeypatch.setenv("DOWNLOAD_DIR", str(stable_dir))
+    (stable_dir / "report.tsv").write_bytes(b"old")
+    downloaded = download_dir / "17e060f2-fec6-425c-9f98-3a66b2493823"
+    downloaded.write_bytes(b"new")
+    result = {}
+
+    _record_filesystem_download_result(
+        result,
+        downloaded,
+        test_id="20_case_legacy",
+        browser_name="edge",
+        suggested_filename="report.tsv",
+    )
+
+    assert result["download_filename"] == "report.tsv"
+    assert result["saved_filename"] == "report (1).tsv"
+    assert result["download_path"] == str(stable_dir / "report (1).tsv")
+    assert (stable_dir / "report.tsv").read_bytes() == b"old"
+    assert (stable_dir / "report (1).tsv").read_bytes() == b"new"
+
+
+def test_record_filesystem_download_result_reuses_named_file_already_in_download_dir(tmp_path, monkeypatch):
+    stable_dir = tmp_path / "stable_downloads"
+    stable_dir.mkdir()
+    monkeypatch.setenv("DOWNLOAD_DIR", str(stable_dir))
+    downloaded = stable_dir / "report (1).tsv"
+    downloaded.write_bytes(b"downloaded")
+    result = {}
+
+    _record_filesystem_download_result(
+        result,
+        downloaded,
+        test_id="20_case_legacy",
+        browser_name="edge",
+        suggested_filename="report.tsv",
+    )
+
+    assert result["download_filename"] == "report.tsv"
+    assert result["saved_filename"] == "report (1).tsv"
+    assert result["download_path"] == str(downloaded)
+    assert list(stable_dir.iterdir()) == [downloaded]
+
+
+def test_prepare_page_output_dir_clears_previous_artifacts(tmp_path):
+    mapping_path = tmp_path / "page_mapping.json"
+    mapping_path.write_text(json.dumps({"page_mappings": []}), encoding="utf-8")
+    output_dir = tmp_path / "out"
+    page_dir = output_dir / "0001_WwSample.jsp"
+    downloads_dir = page_dir / "downloads"
+    route_dir = page_dir / "legacy_route"
+    downloads_dir.mkdir(parents=True)
+    route_dir.mkdir()
+    (page_dir / "00_legacy_initial.png").write_bytes(b"old screenshot")
+    (downloads_dir / "old.tsv").write_bytes(b"old download")
+    (route_dir / "old.png").write_bytes(b"old route screenshot")
+
+    engine = RegressionEngine(mapping_path=str(mapping_path), output_dir=str(output_dir))
+    summary = engine._prepare_page_output_dir(page_dir)
+
+    assert summary["status"] == "PASS"
+    assert summary["removed_files"] == 1
+    assert summary["removed_dirs"] == 2
+    assert page_dir.exists()
+    assert list(page_dir.iterdir()) == []
 
 
 def test_console_evidence_image_renders_events(tmp_path):
@@ -554,6 +1229,92 @@ def test_opener_capture_page_is_not_closed_after_popup_reflection():
     assert _should_close_capture_page(opened_child, popup, opener, keep_popup=True) is False
 
 
+def test_child_navigation_state_capture_prefers_action_page_when_requested():
+    class Page:
+        def __init__(self, *, closed=False):
+            self._closed = closed
+
+        def is_closed(self):
+            return self._closed
+
+    action_page = Page()
+    child_page = Page()
+    opener_page = Page()
+
+    selected, scope = _state_capture_page_after_child_navigation(
+        child_page,
+        action_page,
+        opener_page,
+        {"capture_opener_after_child": True},
+    )
+
+    assert selected is action_page
+    assert scope == "action_page_after_child_navigation"
+
+
+def test_child_navigation_state_capture_falls_back_to_opener_when_action_page_closed():
+    class Page:
+        def __init__(self, *, closed=False):
+            self._closed = closed
+
+        def is_closed(self):
+            return self._closed
+
+    action_page = Page(closed=True)
+    child_page = Page()
+    opener_page = Page()
+
+    selected, scope = _state_capture_page_after_child_navigation(
+        child_page,
+        action_page,
+        opener_page,
+        {"capture_opener_after_child": True},
+    )
+
+    assert selected is opener_page
+    assert scope == "opener_after_child_navigation"
+
+
+def test_pdf_child_navigation_uses_action_page_for_state_capture_automatically():
+    class Page:
+        def __init__(self, *, closed=False):
+            self._closed = closed
+
+        def is_closed(self):
+            return self._closed
+
+    action_page = Page()
+    child_page = Page()
+
+    selected, scope = _state_capture_page_after_child_navigation(
+        child_page,
+        action_page,
+        None,
+        {
+            "case_type": "child_navigation",
+            "expected_url": "GazetteContentFrame.do?method=viewPDF",
+        },
+    )
+
+    assert selected is action_page
+    assert scope == "action_page_after_pdf_child_navigation"
+
+
+def test_pdf_child_navigation_detection_does_not_match_regular_child_page():
+    assert _is_pdf_child_navigation_context(
+        {
+            "case_type": "child_navigation",
+            "expected_url": "GazetteContentFrame.do?method=viewPDF",
+        }
+    )
+    assert not _is_pdf_child_navigation_context(
+        {
+            "case_type": "child_navigation",
+            "expected_url": "EvalListForJpGazetteHTML.do",
+        }
+    )
+
+
 def test_negative_visual_evidence_payload_names_visible_error_state():
     payload = _negative_visual_evidence_payload(
         "negative_http_500",
@@ -587,6 +1348,35 @@ def test_accept_dialog_safely_reports_accept_success():
 
     assert _accept_dialog_safely(dialog) == "accepted"
     assert dialog.accepted is True
+
+
+def test_dialog_action_from_context_supports_cancel_buttons():
+    assert _dialog_action_from_context({"dialog_action": "accept"}) == "accept"
+    assert _dialog_action_from_context({"dialog_button": "OK"}) == "accept"
+    assert _dialog_action_from_context({"dialog_button": "キャンセル"}) == "dismiss"
+    assert _dialog_action_from_context({"confirm_action": "cancel"}) == "dismiss"
+
+
+def test_handle_dialog_safely_can_dismiss_confirm():
+    class Dialog:
+        accepted = False
+        dismissed = False
+
+        def accept(self):
+            self.accepted = True
+
+        def dismiss(self):
+            self.dismissed = True
+
+    dialog = Dialog()
+
+    assert _handle_dialog_safely(dialog, "dismiss") == "dismissed"
+    assert dialog.dismissed is True
+    assert dialog.accepted is False
+
+
+def test_manual_replay_context_always_captures_browser_dialogs():
+    assert _should_capture_browser_dialogs({"manual_replay": True, "action_type": "click"}, "click") is True
 
 
 def test_upload_file_resolver_handles_placeholders_and_multiple_files(tmp_path):
@@ -754,6 +1544,47 @@ def test_scenario_step_semantics_do_not_inherit_parent_kind(tmp_path, monkeypatc
     assert calls[-1]["semantic_action"] == "assert_text"
 
 
+def test_scenario_pre_steps_do_not_inherit_parent_navigation_expectation(tmp_path, monkeypatch):
+    mapping_path = tmp_path / "page_mapping.json"
+    mapping_path.write_text(json.dumps({"page_mappings": []}), encoding="utf-8")
+    engine = RegressionEngine(mapping_path=str(mapping_path), output_dir=str(tmp_path / "out"))
+    contexts = []
+
+    def fake_execute_action(page, action_type, locator, value=None, **kwargs):
+        contexts.append(kwargs.get("action_context") or {})
+        return {"status": "PASS", "state": {"url": "http://example.test/after", "screenshot": str(tmp_path / "after.png")}}
+
+    monkeypatch.setattr(regression_engine_module, "execute_action", fake_execute_action)
+    action_case = {
+        "case_id": "dedicated-download-popup",
+        "case_type": "child_navigation",
+        "action_type": "child_navigation",
+        "expected_type": "download_popup",
+        "expected_value": "EvalFileDownloadConfirm.do",
+        "expected_url": "EvalFileDownloadConfirm.do",
+        "pre_steps": [{"action_type": "check", "locator": "input[name='downloadScr']"}],
+        "main_step": {"action_type": "child_navigation", "locator": "#btnOutput"},
+    }
+
+    result = engine._execute_action_case(
+        object(),
+        action_case,
+        side="legacy",
+        browser_name="edge",
+        capture_dir=tmp_path,
+        test_id="download_popup",
+    )
+
+    assert result["status"] == "PASS"
+    assert contexts[0]["action_type"] == "check"
+    assert contexts[0]["case_type"] == "check"
+    assert "expected_type" not in contexts[0]
+    assert "expected_value" not in contexts[0]
+    assert contexts[1]["expected_type"] == "download_popup"
+    assert contexts[1]["expected_value"] == "EvalFileDownloadConfirm.do"
+    assert contexts[1]["expected_url"] == "EvalFileDownloadConfirm.do"
+
+
 def test_scenario_stops_after_step_closes_page(tmp_path, monkeypatch):
     mapping_path = tmp_path / "page_mapping.json"
     mapping_path.write_text(json.dumps({"page_mappings": []}), encoding="utf-8")
@@ -885,6 +1716,35 @@ def test_guided_json_checklist_loader_builds_scenario(tmp_path):
     assert cases[0]["pre_steps"] == [{"action_type": "assert_visible", "locator": "table"}]
     assert cases[0]["main_step"]["action_type"] == "assert_text"
     assert cases[0]["main_step"]["value"] == "検索結果一覧"
+
+
+def test_guided_json_checklist_loader_accepts_utf8_bom(tmp_path):
+    mapping_path = tmp_path / "page_mapping.json"
+    mapping_path.write_text(json.dumps({"page_mappings": []}), encoding="utf-8")
+    checklist = tmp_path / "guided_checklist.json"
+    checklist.write_text(
+        json.dumps(
+            {
+                "schema": "moonlight.guided_checklist.v1",
+                "page_id": "WwBiblioFileDownloadDisp.jsp",
+                "cases": [
+                    {
+                        "case_id": "download-output",
+                        "title": "Download output file",
+                        "automation_mode": "auto",
+                        "steps": [{"action_type": "download", "locator": "#btnOutput"}],
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8-sig",
+    )
+
+    engine = RegressionEngine(mapping_path=str(mapping_path), output_dir=str(tmp_path / "out"), checklist_path=str(checklist))
+    cases = engine._load_checklist_cases("WwBiblioFileDownloadDisp.jsp")
+
+    assert engine._last_checklist_debug["status"] == "loaded"
+    assert [case["case_id"] for case in cases] == ["download-output"]
 
 
 def test_guided_json_checklist_loader_filters_modes_and_destructive(tmp_path):
@@ -1221,6 +2081,7 @@ def test_report_coverage_matrix_renders_checklist_case_rows(tmp_path):
         [
             {
                 "page_id": "Upload.jsp",
+                "case_id": "upload-001",
                 "risk": "High",
                 "action": "uploadFile",
                 "action_type": "upload",
@@ -1234,6 +2095,7 @@ def test_report_coverage_matrix_renders_checklist_case_rows(tmp_path):
             },
             {
                 "page_id": "Download.jsp",
+                "case_id": "download-001",
                 "risk": "High",
                 "action": "TemplateDownload",
                 "action_type": "download",
@@ -1263,6 +2125,13 @@ def test_report_coverage_matrix_renders_checklist_case_rows(tmp_path):
 
     html = Path(report).read_text(encoding="utf-8")
     assert "Checklist Cases" in html
+    assert "<td><b>status</b></td>" in html
+    assert 'href="#case-0001-upload-001"' in html
+    assert 'id="case-0001-upload-001"' in html
+    assert 'href="#case-0002-download-001"' in html
+    assert '<span class="status PASS">PASS</span>' in html
+    assert '<span class="status EXCLUDED">EXCLUDED</span>' in html
+    assert 'class="back-to-top" href="#top"' in html
     assert "upload-001" in html
     assert "Upload main path" in html
     assert "auto-db" in html
@@ -1275,11 +2144,15 @@ def test_report_coverage_matrix_renders_checklist_case_rows(tmp_path):
     assert "HTTP errors" in html
 
 
-def test_download_compare_marks_filename_mismatch_as_diff(tmp_path):
+def test_download_compare_tolerates_filename_mismatch_when_content_matches(tmp_path):
     mapping_path = tmp_path / "page_mapping.json"
     mapping_path.write_text(json.dumps({"page_mappings": []}), encoding="utf-8")
     screenshot = tmp_path / "shot.png"
     Image.new("RGB", (1, 1), "white").save(screenshot)
+    legacy_download = tmp_path / "legacy.tsv"
+    new_download = tmp_path / "new.tsv"
+    legacy_download.write_bytes(b"same")
+    new_download.write_bytes(b"same")
 
     engine = RegressionEngine(mapping_path=str(mapping_path), output_dir=str(tmp_path))
     compared = engine._compare_state(
@@ -1290,14 +2163,45 @@ def test_download_compare_marks_filename_mismatch_as_diff(tmp_path):
         {"url": "https://new/app", "dom": "", "screenshot": str(screenshot)},
         tmp_path / "diff.png",
         action_type="download",
-        legacy_action={"status": "PASS", "saved_filename": "legacy.tsv", "download_path": str(tmp_path / "legacy.tsv")},
-        new_action={"status": "PASS", "saved_filename": "new.tsv", "download_path": str(tmp_path / "new.tsv")},
+        legacy_action={"status": "PASS", "saved_filename": "legacy.tsv", "download_path": str(legacy_download)},
+        new_action={"status": "PASS", "saved_filename": "new.tsv", "download_path": str(new_download)},
+    )
+
+    assert compared["status"] == "PASS"
+    assert compared["download_success_match"] is True
+    assert compared["download_filename_match"] is False
+    assert compared["download_size_match"] is True
+    assert compared["download_hash_match"] is True
+    assert compared["legacy_download_filename"] == "legacy.tsv"
+    assert compared["new_download_filename"] == "new.tsv"
+
+
+def test_download_compare_marks_content_mismatch_as_diff(tmp_path):
+    mapping_path = tmp_path / "page_mapping.json"
+    mapping_path.write_text(json.dumps({"page_mappings": []}), encoding="utf-8")
+    screenshot = tmp_path / "shot.png"
+    Image.new("RGB", (1, 1), "white").save(screenshot)
+    legacy_download = tmp_path / "legacy.tsv"
+    new_download = tmp_path / "new.tsv"
+    legacy_download.write_bytes(b"legacy")
+    new_download.write_bytes(b"new")
+
+    engine = RegressionEngine(mapping_path=str(mapping_path), output_dir=str(tmp_path))
+    compared = engine._compare_state(
+        "Download.jsp",
+        "High",
+        "download",
+        {"url": "https://legacy/app", "dom": "", "screenshot": str(screenshot)},
+        {"url": "https://new/app", "dom": "", "screenshot": str(screenshot)},
+        tmp_path / "diff.png",
+        action_type="download",
+        legacy_action={"status": "PASS", "saved_filename": "legacy.tsv", "download_path": str(legacy_download)},
+        new_action={"status": "PASS", "saved_filename": "new.tsv", "download_path": str(new_download)},
     )
 
     assert compared["status"] == "DIFF"
-    assert compared["download_filename_match"] is False
-    assert compared["legacy_download_filename"] == "legacy.tsv"
-    assert compared["new_download_filename"] == "new.tsv"
+    assert compared["download_success_match"] is True
+    assert compared["download_hash_match"] is False
 
 
 def test_download_compare_uses_suggested_filename_before_unique_saved_name(tmp_path):
@@ -1321,6 +2225,47 @@ def test_download_compare_uses_suggested_filename_before_unique_saved_name(tmp_p
     assert compared["download_filename_match"] is True
     assert compared["legacy_download_filename"] == "report.pdf"
     assert compared["new_download_filename"] == "report.pdf"
+
+
+def test_download_compare_ignores_browser_temp_uuid_filename(tmp_path):
+    mapping_path = tmp_path / "page_mapping.json"
+    mapping_path.write_text(json.dumps({"page_mappings": []}), encoding="utf-8")
+    screenshot = tmp_path / "shot.png"
+    Image.new("RGB", (1, 1), "white").save(screenshot)
+    legacy_download = tmp_path / "17e060f2-fec6-425c-9f98-3a66b2493823"
+    new_download = tmp_path / "9cff8e81-6213-4082-ad3a-3a72e2ca331d"
+    legacy_download.write_bytes(b"same")
+    new_download.write_bytes(b"same")
+
+    engine = RegressionEngine(mapping_path=str(mapping_path), output_dir=str(tmp_path))
+    compared = engine._compare_state(
+        "Download.jsp",
+        "High",
+        "download",
+        {"url": "https://legacy/app", "dom": "", "screenshot": str(screenshot)},
+        {"url": "https://new/app", "dom": "", "screenshot": str(screenshot)},
+        tmp_path / "diff.png",
+        action_type="download",
+        legacy_action={
+            "status": "PASS",
+            "download_suggested_filename": legacy_download.name,
+            "download_filename": legacy_download.name,
+            "download_path": str(legacy_download),
+        },
+        new_action={
+            "status": "PASS",
+            "download_suggested_filename": new_download.name,
+            "download_filename": new_download.name,
+            "download_path": str(new_download),
+        },
+    )
+
+    assert compared["status"] == "PASS"
+    assert compared["download_success_match"] is True
+    assert compared["download_filename_match"] is None
+    assert compared["legacy_download_filename"] == ""
+    assert compared["new_download_filename"] == ""
+    assert compared["download_hash_match"] is True
 
 
 def test_file_download_compare_uses_download_filename_fields(tmp_path):
@@ -1536,6 +2481,14 @@ def test_database_operation_kind_covers_crud_actions():
     assert RegressionEngine._database_operation_kind({"case_type": "delete_action", "label": "削除"}, "click", "click") == "delete"
     assert RegressionEngine._database_operation_kind({"case_type": "search_normal", "label": "検索"}, "search", "click") is None
     assert RegressionEngine._database_operation_kind({"case_type": "upload_submit", "label": "アップロード確認"}, "upload_submit", "upload") is None
+
+
+def test_database_operation_kind_ignores_child_navigation_entry_word():
+    assert RegressionEngine._database_operation_kind(
+        {"case_type": "child_navigation", "label": "Evaluation-information entry opens child"},
+        "child_navigation",
+        "click",
+    ) is None
 
 
 @pytest.mark.parametrize(

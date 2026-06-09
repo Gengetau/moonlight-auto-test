@@ -1,12 +1,14 @@
 from playwright.sync_api import Frame, Page, Error as PlaywrightError, TimeoutError as PlaywrightTimeoutError
 import base64
+import hashlib
 import os
 import json
 import re
+import shutil
 import time
 from pathlib import Path, PureWindowsPath
 from typing import Any, Dict, Iterable, List, Optional, Tuple, Union
-from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
+from urllib.parse import parse_qsl, unquote, urlencode, urlparse, urlunparse
 
 from PIL import Image, ImageDraw, ImageFont, ImageGrab
 
@@ -57,17 +59,760 @@ def _download_save_path(suggested_filename: str) -> Path:
     return base_path.with_name(f"{stem} ({int(time.time() * 1000)}){suffix}")
 
 
-def _record_download_result(result: Dict[str, Any], download: Any) -> None:
-    suggested_filename = download.suggested_filename or "download"
-    save_path = _download_save_path(suggested_filename)
+def _unique_path(path: Path) -> Path:
+    if not path.exists():
+        return path
+    stem = path.stem or "download"
+    suffix = path.suffix
+    for index in range(1, 10000):
+        candidate = path.with_name(f"{stem} ({index}){suffix}")
+        if not candidate.exists():
+            return candidate
+    return path.with_name(f"{stem} ({int(time.time() * 1000)}){suffix}")
+
+
+def _sha256_file(path: Path) -> Optional[str]:
+    try:
+        digest = hashlib.sha256()
+        with path.open("rb") as f:
+            for chunk in iter(lambda: f.read(1024 * 1024), b""):
+                digest.update(chunk)
+        return digest.hexdigest()
+    except Exception:
+        return None
+
+
+def _archive_download_file(
+    source_path: Path,
+    *,
+    capture_dir: Optional[Union[str, Path]] = None,
+    test_id: Optional[str] = None,
+    browser_name: str = "download",
+) -> Tuple[Optional[Path], Optional[str]]:
+    if not capture_dir:
+        return None, None
+    try:
+        source_name = _original_download_filename(source_path.name)
+        stem, suffix = os.path.splitext(source_name)
+        safe_prefix = _safe_name(test_id or browser_name or "download")[:80]
+        safe_stem = _safe_name(stem or "download")[:80]
+        safe_suffix = re.sub(r"[^A-Za-z0-9.]+", "", suffix)[:20]
+        archive_dir = Path(capture_dir) / "downloads"
+        archive_dir.mkdir(parents=True, exist_ok=True)
+        archive_path = _unique_path(archive_dir / f"{safe_prefix}__{safe_stem}{safe_suffix}")
+        shutil.copy2(source_path, archive_path)
+        return archive_path, None
+    except Exception as exc:
+        return None, str(exc)
+
+
+def _record_download_file_metadata(result: Dict[str, Any], path: Path) -> None:
+    try:
+        result["download_size"] = path.stat().st_size
+    except Exception:
+        pass
+    digest = _sha256_file(path)
+    if digest:
+        result["download_sha256"] = digest
+
+
+def _download_timeout_ms(context: Optional[Dict[str, Any]], default_ms: int = 150000) -> int:
+    raw_value = (
+        (context or {}).get("download_timeout_ms")
+        or (context or {}).get("timeout_ms")
+        or os.getenv("DOWNLOAD_TIMEOUT_MS")
+        or default_ms
+    )
+    try:
+        return max(1000, int(raw_value))
+    except (TypeError, ValueError):
+        return default_ms
+
+
+def _download_stability_ms(context: Optional[Dict[str, Any]], default_ms: int = 750) -> int:
+    raw_value = (
+        (context or {}).get("download_stability_ms")
+        or os.getenv("DOWNLOAD_STABILITY_MS")
+        or default_ms
+    )
+    try:
+        return max(100, int(raw_value))
+    except (TypeError, ValueError):
+        return default_ms
+
+
+def _download_uuid_fallback_ms(context: Optional[Dict[str, Any]], default_ms: int = 3000) -> int:
+    raw_value = (
+        (context or {}).get("download_uuid_fallback_ms")
+        or os.getenv("DOWNLOAD_UUID_FALLBACK_MS")
+        or default_ms
+    )
+    try:
+        return max(0, int(raw_value))
+    except (TypeError, ValueError):
+        return default_ms
+
+
+def _download_expect_timeout_ms(
+    context: Optional[Dict[str, Any]],
+    *,
+    action_timeout_ms: int,
+    download_timeout_ms: int,
+    default_ms: int = 10000,
+) -> int:
+    raw_value = (
+        (context or {}).get("download_expect_timeout_ms")
+        or os.getenv("DOWNLOAD_EXPECT_TIMEOUT_MS")
+        or default_ms
+    )
+    try:
+        requested_ms = max(1000, int(raw_value))
+    except (TypeError, ValueError):
+        requested_ms = default_ms
+    return min(download_timeout_ms, max(1000, min(action_timeout_ms, requested_ms)))
+
+
+def _download_watch_dirs(context: Optional[Dict[str, Any]] = None) -> List[Path]:
+    raw_values: List[Any] = [
+        (context or {}).get("download_dir"),
+        (context or {}).get("download_watch_dir"),
+        os.getenv("DOWNLOAD_DIR"),
+        getattr(Config, "DOWNLOAD_DIR", ""),
+    ]
+    extra_dirs = (context or {}).get("download_watch_dirs") or []
+    if isinstance(extra_dirs, (str, Path)):
+        raw_values.append(extra_dirs)
+    else:
+        raw_values.extend(extra_dirs)
+
+    dirs: List[Path] = []
+    seen = set()
+    for raw_value in raw_values:
+        if not raw_value:
+            continue
+        for part in str(raw_value).split(";"):
+            text = part.strip()
+            if not text:
+                continue
+            path = Path(os.path.expandvars(os.path.expanduser(text)))
+            key = str(path.resolve() if path.exists() else path).lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            dirs.append(path)
+    return dirs
+
+
+def _configure_browser_download_dir(page: Page, download_dir: Path) -> Dict[str, Any]:
+    state: Dict[str, Any] = {
+        "download_dir": str(download_dir),
+        "attempts": [],
+        "status": "SKIPPED",
+    }
+    try:
+        download_dir.mkdir(parents=True, exist_ok=True)
+    except Exception as exc:
+        state.update({"status": "ERROR", "reason": f"Failed to create download dir: {exc}"})
+        return state
+
+    target_pages: List[Any] = []
+    seen = set()
+    for candidate in [page, *_safe_context_pages(page)]:
+        if candidate is None or _page_is_closed(candidate):
+            continue
+        key = id(candidate)
+        if key in seen:
+            continue
+        seen.add(key)
+        target_pages.append(candidate)
+
+    for target_page in target_pages:
+        session = None
+        try:
+            session = target_page.context.new_cdp_session(target_page)
+        except Exception as exc:
+            state["attempts"].append(
+                {
+                    "status": "ERROR",
+                    "method": "new_cdp_session",
+                    "page_url": _safe_page_url(target_page),
+                    "reason": str(exc),
+                }
+            )
+            continue
+
+        configured = False
+        for method, payload in (
+            (
+                "Browser.setDownloadBehavior",
+                {
+                    "behavior": "allowAndName",
+                    "downloadPath": str(download_dir),
+                    "eventsEnabled": True,
+                },
+            ),
+            (
+                "Browser.setDownloadBehavior",
+                {
+                    "behavior": "allow",
+                    "downloadPath": str(download_dir),
+                    "eventsEnabled": True,
+                },
+            ),
+            (
+                "Page.setDownloadBehavior",
+                {
+                    "behavior": "allow",
+                    "downloadPath": str(download_dir),
+                },
+            ),
+        ):
+            try:
+                session.send(method, payload)
+                state["attempts"].append(
+                    {
+                        "status": "PASS",
+                        "method": method,
+                        "page_url": _safe_page_url(target_page),
+                    }
+                )
+                configured = True
+                break
+            except Exception as exc:
+                state["attempts"].append(
+                    {
+                        "status": "ERROR",
+                        "method": method,
+                        "page_url": _safe_page_url(target_page),
+                        "reason": str(exc),
+                    }
+                )
+        try:
+            session.detach()
+        except Exception:
+            pass
+        if configured:
+            state["status"] = "PASS"
+
+    if state["status"] == "SKIPPED" and state["attempts"]:
+        state["status"] = "ERROR"
+    return state
+
+
+def _attach_cdp_download_observer(
+    page: Page,
+    download_dir: Path,
+    *,
+    on_will_begin: Any,
+    on_progress: Any,
+) -> Tuple[Dict[str, Any], List[Any]]:
+    state: Dict[str, Any] = {
+        "download_dir": str(download_dir),
+        "attempts": [],
+        "status": "SKIPPED",
+    }
+    sessions: List[Any] = []
+    try:
+        download_dir.mkdir(parents=True, exist_ok=True)
+    except Exception as exc:
+        state.update({"status": "ERROR", "reason": f"Failed to create download dir: {exc}"})
+        return state, sessions
+
+    target_pages: List[Any] = []
+    seen = set()
+    for candidate in [page, *_safe_context_pages(page)]:
+        if candidate is None or _page_is_closed(candidate):
+            continue
+        key = id(candidate)
+        if key in seen:
+            continue
+        seen.add(key)
+        target_pages.append(candidate)
+
+    for target_page in target_pages:
+        try:
+            session = target_page.context.new_cdp_session(target_page)
+        except Exception as exc:
+            state["attempts"].append(
+                {
+                    "status": "ERROR",
+                    "method": "new_cdp_session",
+                    "page_url": _safe_page_url(target_page),
+                    "reason": str(exc),
+                }
+            )
+            continue
+
+        configured = False
+        for method, payload in (
+            (
+                "Browser.setDownloadBehavior",
+                {
+                    "behavior": "allowAndName",
+                    "downloadPath": str(download_dir),
+                    "eventsEnabled": True,
+                },
+            ),
+            (
+                "Browser.setDownloadBehavior",
+                {
+                    "behavior": "allow",
+                    "downloadPath": str(download_dir),
+                    "eventsEnabled": True,
+                },
+            ),
+            (
+                "Page.setDownloadBehavior",
+                {
+                    "behavior": "allow",
+                    "downloadPath": str(download_dir),
+                },
+            ),
+        ):
+            try:
+                session.send(method, payload)
+                state["attempts"].append(
+                    {
+                        "status": "PASS",
+                        "method": method,
+                        "page_url": _safe_page_url(target_page),
+                    }
+                )
+                configured = True
+                break
+            except Exception as exc:
+                state["attempts"].append(
+                    {
+                        "status": "ERROR",
+                        "method": method,
+                        "page_url": _safe_page_url(target_page),
+                        "reason": str(exc),
+                    }
+                )
+
+        if configured:
+            try:
+                session.on("Browser.downloadWillBegin", on_will_begin)
+                session.on("Browser.downloadProgress", on_progress)
+                sessions.append(session)
+                state["status"] = "PASS"
+            except Exception as exc:
+                state["attempts"].append(
+                    {
+                        "status": "ERROR",
+                        "method": "attach_download_events",
+                        "page_url": _safe_page_url(target_page),
+                        "reason": str(exc),
+                    }
+                )
+                try:
+                    session.detach()
+                except Exception:
+                    pass
+        else:
+            try:
+                session.detach()
+            except Exception:
+                pass
+
+    if state["status"] == "SKIPPED" and state["attempts"]:
+        state["status"] = "ERROR"
+    return state, sessions
+
+
+_TEMP_DOWNLOAD_SUFFIXES = (".crdownload", ".part", ".tmp", ".download")
+_BROWSER_TEMP_DOWNLOAD_RE = re.compile(
+    r"^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+    re.IGNORECASE,
+)
+_TEST_STEP_DOWNLOAD_RE = re.compile(r".+_(?:legacy|new)_step\d+$", re.IGNORECASE)
+_DOWNLOAD_FILENAME_HINT_EXTENSIONS = {
+    ".csv",
+    ".tsv",
+    ".xls",
+    ".xlsx",
+    ".pdf",
+    ".txt",
+    ".zip",
+    ".xml",
+    ".json",
+    ".dat",
+}
+
+
+def _looks_like_browser_temp_download_name(filename: Any) -> bool:
+    name = Path(str(filename or "").replace("\\", "/")).name
+    return bool(name and not Path(name).suffix and _BROWSER_TEMP_DOWNLOAD_RE.match(name))
+
+
+def _looks_like_generated_test_download_name(filename: Any, test_id: Optional[str] = None) -> bool:
+    name = Path(str(filename or "").replace("\\", "/")).name
+    if not name:
+        return False
+    if test_id and name == _original_download_filename(str(test_id)):
+        return True
+    return bool(not Path(name).suffix and _TEST_STEP_DOWNLOAD_RE.match(name))
+
+
+def _is_temporary_download_path(path: Path) -> bool:
+    name = path.name.lower()
+    return (
+        name.startswith("unconfirmed ")
+        or any(name.endswith(suffix) for suffix in _TEMP_DOWNLOAD_SUFFIXES)
+        or _looks_like_browser_temp_download_name(path.name)
+    )
+
+
+def _filesystem_download_target_filename(
+    source_path: Path,
+    *,
+    suggested_filename: Any = None,
+    test_id: Optional[str] = None,
+    browser_name: str = "download",
+) -> str:
+    suggested = _original_download_filename(str(suggested_filename or "").strip())
+    if suggested and suggested != "download":
+        return suggested
+    source_filename = _original_download_filename(source_path.name)
+    if (
+        source_filename
+        and not _looks_like_browser_temp_download_name(source_filename)
+        and not _looks_like_generated_test_download_name(source_filename, test_id)
+    ):
+        return source_filename
+    return ""
+
+
+def _content_disposition_filename(value: Any) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+
+    match = re.search(r"filename\*\s*=\s*(?:[A-Za-z0-9_-]+)?''([^;\r\n]+)", text, re.IGNORECASE)
+    if match:
+        return _original_download_filename(unquote(match.group(1).strip().strip('"')))
+
+    match = re.search(r'filename\s*=\s*"([^"\r\n]+)"', text, re.IGNORECASE)
+    if match:
+        return _original_download_filename(match.group(1).strip())
+
+    match = re.search(r"filename\s*=\s*([^;\r\n]+)", text, re.IGNORECASE)
+    if match:
+        return _original_download_filename(match.group(1).strip().strip('"'))
+    return ""
+
+
+def _url_download_filename(value: Any) -> str:
+    try:
+        path = urlparse(str(value or "")).path
+    except Exception:
+        path = ""
+    filename = _original_download_filename(unquote(path.rsplit("/", 1)[-1] if path else ""))
+    suffix = Path(filename).suffix.lower()
+    return filename if filename and suffix in _DOWNLOAD_FILENAME_HINT_EXTENSIONS else ""
+
+
+def _download_filename_hint_from_response(response: Any) -> str:
+    headers: Dict[str, Any] = {}
+    try:
+        headers = response.headers or {}
+    except Exception:
+        headers = {}
+    content_disposition = ""
+    for key, value in headers.items():
+        if str(key or "").lower() == "content-disposition":
+            content_disposition = str(value or "")
+            break
+    filename = _content_disposition_filename(content_disposition)
+    if filename:
+        return filename
+    try:
+        return _url_download_filename(response.url)
+    except Exception:
+        return ""
+
+
+def _download_dir_snapshot(watch_dirs: Iterable[Path]) -> Dict[str, Tuple[int, int]]:
+    snapshot: Dict[str, Tuple[int, int]] = {}
+    for watch_dir in watch_dirs:
+        try:
+            entries = list(watch_dir.iterdir())
+        except Exception:
+            continue
+        for entry in entries:
+            try:
+                if not entry.is_file():
+                    continue
+                stat = entry.stat()
+            except Exception:
+                continue
+            snapshot[str(entry)] = (int(stat.st_size), int(stat.st_mtime_ns))
+    return snapshot
+
+
+def _stable_download_from_dirs(
+    watch_dirs: Iterable[Path],
+    before_snapshot: Dict[str, Tuple[int, int]],
+    stable_seen: Dict[str, Tuple[int, float]],
+    *,
+    started_at: float,
+    stability_ms: int,
+    allow_temp_names: Optional[Iterable[Any]] = None,
+    allow_browser_uuid_names: bool = False,
+) -> Optional[Path]:
+    allowed_temp_names = {
+        Path(str(name or "").replace("\\", "/")).name.lower()
+        for name in (allow_temp_names or [])
+        if str(name or "").strip()
+    }
+    candidates: List[Tuple[float, Path, int]] = []
+    for watch_dir in watch_dirs:
+        try:
+            entries = list(watch_dir.iterdir())
+        except Exception:
+            continue
+        for entry in entries:
+            try:
+                if not entry.is_file():
+                    continue
+                is_temporary = _is_temporary_download_path(entry)
+                temp_name_allowed = entry.name.lower() in allowed_temp_names
+                browser_uuid_allowed = allow_browser_uuid_names and _looks_like_browser_temp_download_name(entry.name)
+                if is_temporary and not temp_name_allowed and not browser_uuid_allowed:
+                    continue
+                stat = entry.stat()
+            except Exception:
+                continue
+            key = str(entry)
+            size = int(stat.st_size)
+            mtime_ns = int(stat.st_mtime_ns)
+            if size <= 0:
+                continue
+            existed = before_snapshot.get(key)
+            changed_since_start = existed is None or existed != (size, mtime_ns)
+            if not changed_since_start or float(stat.st_mtime) < started_at - 1.0:
+                continue
+            candidates.append((float(stat.st_mtime), entry, size))
+
+    now = time.time()
+    for _, entry, size in sorted(candidates, key=lambda item: item[0], reverse=True):
+        key = str(entry)
+        previous_size, stable_since = stable_seen.get(key, (-1, now))
+        if previous_size != size:
+            stable_seen[key] = (size, now)
+            continue
+        if (now - stable_since) * 1000 >= stability_ms:
+            return entry
+    return None
+
+
+def _changed_download_file(
+    path: Path,
+    before_snapshot: Dict[str, Tuple[int, int]],
+    *,
+    started_at: float,
+) -> Optional[Path]:
+    try:
+        if not path.is_file():
+            return None
+        stat = path.stat()
+    except Exception:
+        return None
+    size = int(stat.st_size)
+    if size <= 0:
+        return None
+    mtime_ns = int(stat.st_mtime_ns)
+    existed = before_snapshot.get(str(path))
+    if existed == (size, mtime_ns):
+        return None
+    if float(stat.st_mtime) < started_at - 1.0:
+        return None
+    return path
+
+
+def _completed_cdp_download_file_from_dirs(
+    cdp_downloads: Dict[str, Dict[str, Any]],
+    watch_dirs: Iterable[Path],
+    before_snapshot: Dict[str, Tuple[int, int]],
+    *,
+    started_at: float,
+) -> Tuple[Optional[Path], Optional[Dict[str, Any]]]:
+    completed = [
+        item
+        for item in cdp_downloads.values()
+        if str(item.get("state") or "").lower() == "completed"
+        and str(item.get("guid") or "").strip()
+    ]
+    completed.sort(key=lambda item: float(item.get("completed_at") or 0.0), reverse=True)
+    for item in completed:
+        guid = Path(str(item.get("guid") or "").replace("\\", "/")).name
+        suggested = _original_download_filename(str(item.get("suggested_filename") or ""))
+        candidate_names = [name for name in (guid, suggested) if name]
+        for watch_dir in watch_dirs:
+            for name in candidate_names:
+                candidate = _changed_download_file(
+                    watch_dir / name,
+                    before_snapshot,
+                    started_at=started_at,
+                )
+                if candidate:
+                    return candidate, item
+    return None, None
+
+
+def _record_filesystem_download_result(
+    result: Dict[str, Any],
+    path: Path,
+    *,
+    capture_dir: Optional[Union[str, Path]] = None,
+    test_id: Optional[str] = None,
+    browser_name: str = "download",
+    suggested_filename: Any = None,
+) -> None:
+    filename = path.name or "download"
+    target_filename = _filesystem_download_target_filename(
+        path,
+        suggested_filename=suggested_filename,
+        test_id=test_id,
+        browser_name=browser_name,
+    )
+    configured_download_dir = _configured_download_dir()
+    source_is_named_download = False
+    source_in_configured_dir = False
+    try:
+        source_in_configured_dir = path.resolve().parent == configured_download_dir.resolve()
+        source_is_named_download = (
+            source_in_configured_dir
+            and not _looks_like_browser_temp_download_name(path.name)
+            and not _looks_like_generated_test_download_name(path.name, test_id)
+        )
+    except OSError:
+        source_in_configured_dir = str(path.parent) == str(configured_download_dir)
+        source_is_named_download = (
+            source_in_configured_dir
+            and not _looks_like_browser_temp_download_name(path.name)
+            and not _looks_like_generated_test_download_name(path.name, test_id)
+        )
+    saved_path: Optional[Path]
+    if source_is_named_download:
+        saved_path = path
+    elif target_filename:
+        saved_path = _download_save_path(target_filename)
+    else:
+        saved_path = None
+    if saved_path:
+        saved_path.parent.mkdir(parents=True, exist_ok=True)
+    if saved_path and not source_is_named_download:
+        try:
+            if path.resolve() != saved_path.resolve():
+                if source_in_configured_dir:
+                    shutil.move(str(path), str(saved_path))
+                else:
+                    shutil.copy2(path, saved_path)
+        except OSError:
+            if str(path) != str(saved_path):
+                if source_in_configured_dir:
+                    shutil.move(str(path), str(saved_path))
+                else:
+                    shutil.copy2(path, saved_path)
+    result["download_source"] = "filesystem"
+    result["download_detected_filename"] = filename
+    if suggested_filename:
+        result["download_suggested_filename"] = _original_download_filename(str(suggested_filename))
+        result["download_filename"] = _original_download_filename(str(suggested_filename))
+    elif _looks_like_browser_temp_download_name(filename) or _looks_like_generated_test_download_name(filename, test_id):
+        result["download_suggested_filename"] = ""
+        result["download_filename"] = ""
+        result["download_filename_unknown"] = True
+    else:
+        result["download_suggested_filename"] = target_filename
+        result["download_filename"] = _original_download_filename(target_filename)
+    result["download_original_dir"] = str(path.parent)
+    result["download_original_path"] = str(path)
+    if saved_path:
+        result["saved_filename"] = saved_path.name
+        result["download_renamed"] = saved_path.name != result["download_filename"]
+        result["download_saved_dir"] = str(saved_path.parent)
+        result["download_saved_path"] = str(saved_path)
+    else:
+        result["saved_filename"] = ""
+        result["download_renamed"] = False
+        result["download_saved_dir"] = ""
+        result["download_saved_path"] = ""
+    archive_path, archive_error = _archive_download_file(
+        saved_path or path,
+        capture_dir=capture_dir,
+        test_id=test_id,
+        browser_name=browser_name,
+    )
+    if archive_path:
+        result["download_archive_path"] = str(archive_path)
+    if archive_error:
+        result["download_archive_error"] = archive_error
+    if saved_path:
+        result["download_dir"] = str(saved_path.parent)
+        result["download_path"] = str(saved_path)
+        _record_download_file_metadata(result, saved_path)
+    elif archive_path:
+        result["download_dir"] = str(archive_path.parent)
+        result["download_path"] = str(archive_path)
+        _record_download_file_metadata(result, archive_path)
+    else:
+        result["download_dir"] = str(path.parent)
+        result["download_path"] = str(path)
+        _record_download_file_metadata(result, path)
+
+
+def _record_download_result(
+    result: Dict[str, Any],
+    download: Any,
+    *,
+    capture_dir: Optional[Union[str, Path]] = None,
+    test_id: Optional[str] = None,
+    browser_name: str = "download",
+    suggested_filename: Any = None,
+) -> None:
+    playwright_filename = str(getattr(download, "suggested_filename", "") or "").strip()
+    hint_filename = str(suggested_filename or "").strip()
+    normalized_playwright_filename = _original_download_filename(playwright_filename) if playwright_filename else ""
+    normalized_hint_filename = _original_download_filename(hint_filename) if hint_filename else ""
+    save_filename = (
+        normalized_playwright_filename
+        if normalized_playwright_filename and normalized_playwright_filename != "download"
+        else normalized_hint_filename
+        if normalized_hint_filename and normalized_hint_filename != "download"
+        else normalized_playwright_filename
+        or "download"
+    )
+    save_path = _download_save_path(save_filename)
     save_path.parent.mkdir(parents=True, exist_ok=True)
     download.save_as(str(save_path))
-    result["download_suggested_filename"] = suggested_filename
-    result["download_filename"] = _original_download_filename(suggested_filename)
+    result["download_source"] = "playwright_event"
+    if playwright_filename:
+        result["download_playwright_suggested_filename"] = _original_download_filename(playwright_filename)
+    if normalized_hint_filename and normalized_hint_filename != save_filename:
+        result["download_response_filename_hint"] = normalized_hint_filename
+    result["download_suggested_filename"] = save_filename
+    result["download_filename"] = _original_download_filename(save_filename)
     result["saved_filename"] = save_path.name
     result["download_renamed"] = save_path.name != result["download_filename"]
+    result["download_original_dir"] = str(save_path.parent)
+    result["download_original_path"] = str(save_path)
+    result["download_saved_dir"] = str(save_path.parent)
+    result["download_saved_path"] = str(save_path)
+    archive_path, archive_error = _archive_download_file(
+        save_path,
+        capture_dir=capture_dir,
+        test_id=test_id,
+        browser_name=browser_name,
+    )
+    if archive_path:
+        result["download_archive_path"] = str(archive_path)
+    if archive_error:
+        result["download_archive_error"] = archive_error
     result["download_dir"] = str(save_path.parent)
     result["download_path"] = str(save_path)
+    _record_download_file_metadata(result, save_path)
 
 
 def _console_font(size: int = 15, sample_text: str = ""):
@@ -386,16 +1131,70 @@ def _expects_browser_dialog(context: Optional[Dict[str, Any]]) -> bool:
     return bool(re.search(r"\b(?:alert|confirm|prompt)\s*\(", script_evidence))
 
 
+def _should_capture_browser_dialogs(context: Optional[Dict[str, Any]], semantic_action: Any) -> bool:
+    if context and context.get("manual_replay"):
+        return True
+    if str(semantic_action or "").strip().lower() in {"browser_dialog", "download"}:
+        return True
+    return _should_accept_database_dialog(context) or _expects_browser_dialog(context)
+
+
 def _accept_dialog_safely(dialog) -> str:
+    return _handle_dialog_safely(dialog, "accept")
+
+
+def _dialog_action_from_context(context: Optional[Dict[str, Any]]) -> str:
+    if not context:
+        return "accept"
+    raw = " ".join(
+        str(context.get(key) or "")
+        for key in (
+            "dialog_action",
+            "dialog_button",
+            "dialog_response",
+            "confirm_action",
+            "confirm_button",
+        )
+    ).strip().lower()
+    if not raw:
+        return "accept"
+    if any(token in raw for token in ("dismiss", "cancel", "キャンセル", "取消", "取消し", "no", "false", "reject")):
+        return "dismiss"
+    return "accept"
+
+
+def _handle_dialog_safely(dialog, action: str = "accept", *, prompt_text: str = "") -> str:
+    action = str(action or "accept").strip().lower()
     try:
-        dialog.accept()
+        if action == "dismiss":
+            dialog.dismiss()
+            return "dismissed"
+        if prompt_text:
+            dialog.accept(prompt_text)
+        else:
+            dialog.accept()
         return "accepted"
     except Exception as exc:
         message = str(exc)
         lowered = message.lower()
         if "already handled" in lowered or "already been handled" in lowered:
             return "already_handled"
-        return f"accept_failed: {message}"
+        return f"{action}_failed: {message}"
+
+
+def _expected_dialog_message(context: Optional[Dict[str, Any]], value: Optional[str]) -> str:
+    context = context or {}
+    for candidate in (
+        value,
+        context.get("expected_message"),
+        context.get("dialog_message"),
+        context.get("expected_value"),
+        context.get("value"),
+    ):
+        text = str(candidate or "").strip()
+        if text:
+            return text
+    return ""
 
 
 def _install_print_observer(page: Page) -> Dict[str, Any]:
@@ -641,9 +1440,14 @@ ACTION_ALIASES = {
     "negative_network_abort": "negative_network_abort",
     "wait": "wait",
     "snapshot": "wait",
+    "page_snapshot": "wait",
+    "visual_check": "wait",
     "assert_visible": "assert_visible",
     "expect_visible": "assert_visible",
     "verify_visible": "assert_visible",
+    "assert_hidden": "assert_hidden",
+    "expect_hidden": "assert_hidden",
+    "verify_hidden": "assert_hidden",
     "wait_visible": "assert_visible",
     "wait_for_visible": "assert_visible",
     "assert_attached": "assert_attached",
@@ -656,9 +1460,56 @@ ACTION_ALIASES = {
     "assert_value": "assert_value",
     "expect_value": "assert_value",
     "verify_value": "assert_value",
+    "assert_enabled": "assert_enabled",
+    "expect_enabled": "assert_enabled",
+    "verify_enabled": "assert_enabled",
+    "assert_disabled": "assert_disabled",
+    "expect_disabled": "assert_disabled",
+    "verify_disabled": "assert_disabled",
+    "assert_checked": "assert_checked",
+    "expect_checked": "assert_checked",
+    "verify_checked": "assert_checked",
+    "assert_unchecked": "assert_unchecked",
+    "expect_unchecked": "assert_unchecked",
+    "verify_unchecked": "assert_unchecked",
     "assert_url": "assert_url",
     "expect_url": "assert_url",
 }
+
+
+def _infer_manual_assert_action(context: Dict[str, Any]) -> str:
+    locator = str(context.get("locator") or context.get("selector") or "").strip().lower()
+    text = " ".join(
+        str(context.get(key) or "")
+        for key in ("value", "expected_value", "text", "label", "title")
+    ).lower()
+    if not locator or locator in {"-", "__page__"}:
+        return "assert_visible"
+    if any(token in locator for token in ("browser", "native", "popup", "dialog", "window", "saved pdf")):
+        return "manual_assert"
+
+    wants_hidden = any(token in text for token in ("hidden", "not visible", "非表示", "表示されない"))
+    wants_visible = any(token in text for token in ("visible", "shown", "displayed", "表示"))
+    if wants_hidden:
+        return "assert_hidden"
+    if wants_visible:
+        return "assert_visible"
+
+    wants_disabled = any(token in text for token in ("disabled", "disable", "非活性", "無効"))
+    wants_enabled = any(token in text for token in ("enabled", "enable", "活性", "有効"))
+    if wants_disabled and not wants_enabled:
+        return "assert_disabled"
+    if wants_enabled and not wants_disabled:
+        return "assert_enabled"
+
+    wants_unchecked = any(token in text for token in ("unchecked", "not checked", "チェックが外", "チェックを外"))
+    wants_checked = any(token in text for token in ("checked", "check", "チェック"))
+    if wants_unchecked:
+        return "assert_unchecked"
+    if wants_checked and not wants_unchecked:
+        return "assert_checked"
+
+    return "assert_attached"
 
 
 def infer_semantic_action(action_type: Optional[str], context: Optional[Dict[str, Any]] = None) -> str:
@@ -683,6 +1534,21 @@ def infer_semantic_action(action_type: Optional[str], context: Optional[Dict[str
         str(context.get(key) or "").lower()
         for key in ("raw", "label", "semantic_key", "expected_type", "expected_value", "onclick")
     )
+
+    for value in (
+        action_type,
+        context.get("action_type"),
+        context.get("action_hint"),
+        context.get("kind"),
+    ):
+        key = str(value or "").strip().lower()
+        if not key:
+            continue
+        if key in {"manual_assert", "manual_review"}:
+            return _infer_manual_assert_action(context)
+        alias = ACTION_ALIASES.get(key)
+        if alias:
+            return alias
 
     if "set_value" in raw or "setvalue" in raw or "hidden" in raw:
         return "set_value"
@@ -1118,6 +1984,41 @@ def _is_child_navigation_context(context: Optional[Dict[str, Any]]) -> bool:
     )
 
 
+def _is_pdf_child_navigation_context(context: Optional[Dict[str, Any]]) -> bool:
+    context = context or {}
+    if not _is_child_navigation_context(context):
+        return False
+    expected = context.get("expected")
+    evidence_values = [
+        context.get("action_type"),
+        context.get("action_hint"),
+        context.get("case_type"),
+        context.get("expected_type"),
+        context.get("expected_value"),
+        context.get("expected_url"),
+        context.get("expected_page"),
+        context.get("label"),
+        context.get("semantic_key"),
+        context.get("locator"),
+        context.get("onclick"),
+        context.get("href"),
+    ]
+    if isinstance(expected, dict):
+        evidence_values.extend(expected.values())
+    evidence = " ".join(str(value or "").lower() for value in evidence_values)
+    return any(
+        token in evidence
+        for token in (
+            "viewpdf",
+            "pdf preview",
+            "pdf child",
+            "paper-pdf",
+            "paper pdf",
+            ".pdf",
+        )
+    )
+
+
 def _expected_navigation_needles(context: Optional[Dict[str, Any]]) -> List[str]:
     context = context or {}
     expected = context.get("expected")
@@ -1187,6 +2088,9 @@ def _navigation_url_candidates(result: Dict[str, Any]) -> List[str]:
     if target_frame.get("url"):
         candidates.append(str(target_frame["url"]))
     for value in result.get("after_frame_urls") or []:
+        if value:
+            candidates.append(str(value))
+    for value in result.get("popup_frame_urls") or []:
         if value:
             candidates.append(str(value))
 
@@ -1281,6 +2185,36 @@ def _should_close_capture_page(capture_page: Page, action_page: Page, opener_pag
     return not keep_popup and capture_page is not action_page and capture_page is not opener_page
 
 
+def _state_capture_page_after_child_navigation(
+    capture_page: Page,
+    action_page: Page,
+    opener_page: Optional[Page],
+    context: Optional[Dict[str, Any]],
+) -> Tuple[Page, Optional[str]]:
+    capture_parent = _truthy_context_value(
+        (context or {}).get("capture_opener_after_child")
+    ) or _is_pdf_child_navigation_context(context)
+    if not capture_parent:
+        return capture_page, None
+    if capture_page is action_page:
+        return capture_page, None
+    if not _page_is_closed(action_page):
+        scope = (
+            "action_page_after_pdf_child_navigation"
+            if _is_pdf_child_navigation_context(context)
+            else "action_page_after_child_navigation"
+        )
+        return action_page, scope
+    if opener_page is not None and not _page_is_closed(opener_page):
+        scope = (
+            "opener_after_pdf_child_navigation"
+            if _is_pdf_child_navigation_context(context)
+            else "opener_after_child_navigation"
+        )
+        return opener_page, scope
+    return capture_page, None
+
+
 def _safe_frame_urls(page: Page) -> List[str]:
     try:
         if _page_is_closed(page):
@@ -1295,6 +2229,34 @@ def _safe_context_pages(page: Page) -> List[Page]:
         return list(page.context.pages)
     except Exception:
         return []
+
+
+def _pump_playwright_events(timeout_ms: int, *pages: Any) -> bool:
+    candidates: List[Any] = []
+    seen = set()
+
+    def add_candidate(candidate: Any) -> None:
+        if candidate is None or _page_is_closed(candidate):
+            return
+        key = id(candidate)
+        if key in seen:
+            return
+        seen.add(key)
+        candidates.append(candidate)
+
+    for root_page in pages:
+        for context_page in _safe_context_pages(root_page):
+            add_candidate(context_page)
+        add_candidate(root_page)
+
+    for candidate in candidates:
+        try:
+            candidate.wait_for_timeout(timeout_ms)
+            return True
+        except Exception:
+            continue
+    time.sleep(max(0, timeout_ms) / 1000.0)
+    return False
 
 
 def _first_new_context_page(page: Page, pages_before: List[Page]) -> Optional[Page]:
@@ -1341,7 +2303,10 @@ def execute_action(
     result["before_url"] = before_url
     result["before_frame_urls"] = before_frame_urls
     console_events: List[Dict[str, Any]] = []
+    download_filename_hints: List[str] = []
     event_handlers: List[Tuple[str, Any]] = []
+    page_event_handlers: List[Tuple[Any, str, Any]] = []
+    context_event_handlers: List[Tuple[Any, str, Any]] = []
     temporary_routes: List[Tuple[str, Any]] = []
     event_log_initialized = False
 
@@ -1401,6 +2366,10 @@ def execute_action(
         _record_event("REQ_FAILED", failure or request_url, level="requestfailed", url=request_url)
 
     def _on_response(response: Any):
+        if result.get("semantic_action") == "download":
+            filename_hint = _download_filename_hint_from_response(response)
+            if filename_hint:
+                download_filename_hints.append(filename_hint)
         try:
             status = int(response.status)
         except Exception:
@@ -1417,28 +2386,37 @@ def execute_action(
         page.on(event_name, handler)
         event_handlers.append((event_name, handler))
 
+    def _attach_page_event(target_page: Any, event_name: str, handler: Any):
+        if target_page is None or _page_is_closed(target_page):
+            return
+        target_page.on(event_name, handler)
+        page_event_handlers.append((target_page, event_name, handler))
+
+    def _attach_context_event(context: Any, event_name: str, handler: Any):
+        context.on(event_name, handler)
+        context_event_handlers.append((context, event_name, handler))
+
     try:
         # 注入 Runtime Debugger
         _attach_event("console", _on_console)
         _attach_event("pageerror", _on_pageerror)
         _attach_event("requestfailed", _on_requestfailed)
         _attach_event("response", _on_response)
-        if (
-            _should_accept_database_dialog(action_context)
-            or result.get("semantic_action") == "browser_dialog"
-            or _expects_browser_dialog(action_context)
-        ):
+        if _should_capture_browser_dialogs(action_context, result.get("semantic_action")):
             def _accept_dialog(dialog):
-                accept_status = _accept_dialog_safely(dialog)
+                dialog_action = _dialog_action_from_context(action_context)
+                prompt_text = str((action_context or {}).get("prompt_text") or "")
+                accept_status = _handle_dialog_safely(dialog, dialog_action, prompt_text=prompt_text)
                 dialog_state = {
                     "type": getattr(dialog, "type", ""),
                     "message": getattr(dialog, "message", ""),
+                    "handled_action": dialog_action,
                     "accept_status": accept_status,
                 }
                 result.setdefault("dialogs", []).append(dialog_state)
                 _record_event("DIALOG", f"{dialog_state['type']}: {dialog_state['message']} ({accept_status})", level="info")
 
-            page.once("dialog", _accept_dialog)
+            _attach_event("dialog", _accept_dialog)
 
         if _page_is_closed(page):
             raise ValueError("Page is closed before action")
@@ -1670,6 +2648,9 @@ def execute_action(
                         capture_page = popup
                         result["popup_opened"] = True
                         result["popup_url"] = popup.url
+                        result["popup_frame_urls"] = _safe_frame_urls(popup)
+                        if _is_pdf_child_navigation_context(action_context):
+                            result["popup_capture_mode"] = "parent_after_pdf_navigation"
                         if keep_popup:
                             result["popup_page"] = popup
                 else:
@@ -1682,6 +2663,18 @@ def execute_action(
                 page.wait_for_timeout(300)
                 if not result.get("dialogs"):
                     result.update({"status": "BLOCKED", "reason": "Expected browser dialog was not observed."})
+                else:
+                    expected_dialog_message = _expected_dialog_message(action_context, value)
+                    if expected_dialog_message and not any(
+                        expected_dialog_message in str(dialog.get("message") or "")
+                        for dialog in result.get("dialogs", [])
+                    ):
+                        result.update(
+                            {
+                                "status": "BLOCKED",
+                                "reason": f"Expected browser dialog message was not observed: {expected_dialog_message}",
+                            }
+                        )
             elif semantic_action == "print":
                 try:
                     capture_page.wait_for_timeout(500)
@@ -1703,6 +2696,12 @@ def execute_action(
             else:
                 frame.locator(selector).first.wait_for(state="visible", timeout=timeout)
                 result["assertion"] = "locator_visible"
+        elif semantic_action == "assert_hidden":
+            if not selector or selector in {"-", "__page__"}:
+                result.update({"status": "BLOCKED", "reason": "assert_hidden requires a locator"})
+            else:
+                frame.locator(selector).first.wait_for(state="hidden", timeout=timeout)
+                result["assertion"] = "locator_hidden"
         elif semantic_action == "assert_attached":
             if not selector or selector in {"-", "__page__"}:
                 frame.locator("body").first.wait_for(state="attached", timeout=timeout)
@@ -1764,6 +2763,34 @@ def execute_action(
                         "reason": f"Expected value was not found: {expected_value}",
                     }
                 )
+        elif semantic_action in {"assert_enabled", "assert_disabled", "assert_checked", "assert_unchecked"}:
+            if not selector or selector in {"-", "__page__"}:
+                result.update({"status": "BLOCKED", "reason": f"{semantic_action} requires a locator"})
+            else:
+                locator = frame.locator(selector)
+                locator.first.wait_for(state="attached", timeout=timeout)
+                states = locator.evaluate_all(
+                    """elements => elements.map(element => {
+                        const tag = (element.tagName || '').toLowerCase();
+                        const disabled = !!element.disabled || element.getAttribute('aria-disabled') === 'true';
+                        const checked = !!element.checked;
+                        const value = 'value' in element ? String(element.value || '') : '';
+                        const text = String(element.textContent || '').replace(/\\s+/g, ' ').trim();
+                        return { tag, disabled, checked, value, text };
+                    })"""
+                )
+                result["assertion"] = semantic_action
+                result["element_states"] = states
+                if not states:
+                    result.update({"status": "BLOCKED", "reason": f"No elements matched: {selector}"})
+                elif semantic_action == "assert_enabled" and not all(not state.get("disabled") for state in states):
+                    result.update({"status": "BLOCKED", "reason": f"Expected all matched elements to be enabled: {states}"})
+                elif semantic_action == "assert_disabled" and not all(state.get("disabled") for state in states):
+                    result.update({"status": "BLOCKED", "reason": f"Expected all matched elements to be disabled: {states}"})
+                elif semantic_action == "assert_checked" and not all(state.get("checked") for state in states):
+                    result.update({"status": "BLOCKED", "reason": f"Expected all matched elements to be checked: {states}"})
+                elif semantic_action == "assert_unchecked" and not all(not state.get("checked") for state in states):
+                    result.update({"status": "BLOCKED", "reason": f"Expected all matched elements to be unchecked: {states}"})
         elif semantic_action == "assert_url":
             expected_url = str(
                 value
@@ -1832,15 +2859,35 @@ def execute_action(
         elif semantic_action == "select":
             locator = frame.locator(selector).first
             locator.wait_for(state="visible", timeout=timeout)
-            selected_value = value or locator.evaluate(
-                """element => {
-                    const options = Array.from(element.options || []).filter(option => !option.disabled);
-                    return (options.find(option => option.value) || options[0] || {}).value || "";
-                }"""
-            )
-            locator.select_option(selected_value, timeout=timeout)
+            if value is None or str(value) == "":
+                selected_value = locator.evaluate(
+                    """element => {
+                        const options = Array.from(element.options || []).filter(option => !option.disabled);
+                        return (options.find(option => option.value) || options[0] || {}).value || "";
+                    }"""
+                )
+            else:
+                selected_value = value
+            try:
+                locator.select_option(str(selected_value), timeout=timeout)
+                result["select_match"] = "value"
+            except (PlaywrightTimeoutError, PlaywrightError) as value_exc:
+                try:
+                    locator.select_option(label=str(selected_value), timeout=timeout)
+                    result["select_match"] = "label"
+                except (PlaywrightTimeoutError, PlaywrightError):
+                    if str(selected_value).isdigit():
+                        locator.select_option(index=int(str(selected_value)), timeout=timeout)
+                        result["select_match"] = "index"
+                    else:
+                        raise value_exc
             locator.dispatch_event("change", timeout=timeout)
             result["selected_value"] = selected_value
+        elif semantic_action == "manual_assert":
+            result["assertion"] = "manual_boundary"
+            result["manual_assert_value"] = value or (action_context or {}).get("expected_value") or ""
+            result["status"] = "BLOCKED"
+            result["reason"] = "Manual assertion requires manual review."
         elif semantic_action == "upload":
             resolved_selector, upload_locator_state = _resolve_upload_locator(frame, selector)
             result["upload_locator_state"] = upload_locator_state
@@ -1869,39 +2916,307 @@ def execute_action(
         elif semantic_action == "download":
             action_dispatched = True
             click_closed_error: Optional[BaseException] = None
+            download_events: List[Any] = []
+            download_timeout = _download_timeout_ms(action_context)
+            download_stability_ms = _download_stability_ms(action_context)
+            download_uuid_fallback_ms = _download_uuid_fallback_ms(action_context)
+            download_watch_dirs = _download_watch_dirs(action_context)
+            primary_download_dir = download_watch_dirs[0] if download_watch_dirs else _configured_download_dir()
+            download_started_at = time.time()
+            download_snapshot = _download_dir_snapshot(download_watch_dirs)
+            stable_download_seen: Dict[str, Tuple[int, float]] = {}
+            download_listener_pages = set()
+            cdp_downloads: Dict[str, Dict[str, Any]] = {}
+            cdp_download_sessions: List[Any] = []
+
+            def _on_download(download: Any) -> None:
+                download_events.append(download)
+
+            def _attach_download_listener(target_page: Any) -> None:
+                if target_page is None or _page_is_closed(target_page):
+                    return
+                key = id(target_page)
+                if key in download_listener_pages:
+                    return
+                download_listener_pages.add(key)
+                _attach_page_event(target_page, "download", _on_download)
+
+            def _on_download_page(new_page: Any) -> None:
+                _attach_download_listener(new_page)
+                behavior, sessions = _attach_cdp_download_observer(
+                    new_page,
+                    primary_download_dir,
+                    on_will_begin=_on_cdp_download_will_begin,
+                    on_progress=_on_cdp_download_progress,
+                )
+                cdp_download_sessions.extend(sessions)
+                result.setdefault("download_behavior_page_events", []).append(behavior)
+
+            def _on_cdp_download_will_begin(params: Any) -> None:
+                if not isinstance(params, dict):
+                    return
+                guid = str(params.get("guid") or "").strip()
+                if not guid:
+                    return
+                suggested_filename = _original_download_filename(str(params.get("suggestedFilename") or ""))
+                cdp_downloads.setdefault(guid, {}).update(
+                    {
+                        "guid": guid,
+                        "url": str(params.get("url") or ""),
+                        "suggested_filename": suggested_filename,
+                        "state": "willBegin",
+                    }
+                )
+                if suggested_filename and suggested_filename != "download":
+                    download_filename_hints.append(suggested_filename)
+                result["cdp_downloads"] = list(cdp_downloads.values())
+
+            def _on_cdp_download_progress(params: Any) -> None:
+                if not isinstance(params, dict):
+                    return
+                guid = str(params.get("guid") or "").strip()
+                if not guid:
+                    return
+                cdp_downloads.setdefault(guid, {"guid": guid}).update(
+                    {
+                        "state": str(params.get("state") or ""),
+                        "received_bytes": params.get("receivedBytes"),
+                        "total_bytes": params.get("totalBytes"),
+                    }
+                )
+                if str(params.get("state") or "").lower() == "completed":
+                    cdp_downloads.setdefault(guid, {"guid": guid}).setdefault("completed_at", time.time())
+                result["cdp_downloads"] = list(cdp_downloads.values())
+
             try:
+                behavior, sessions = _attach_cdp_download_observer(
+                    page,
+                    primary_download_dir,
+                    on_will_begin=_on_cdp_download_will_begin,
+                    on_progress=_on_cdp_download_progress,
+                )
+                result["download_behavior"] = behavior
+                cdp_download_sessions.extend(sessions)
+                for candidate_page in [page, opener_page, *_safe_context_pages(page)]:
+                    _attach_download_listener(candidate_page)
+                _attach_context_event(page.context, "page", _on_download_page)
+                _attach_context_event(page.context, "download", _on_download)
                 locator = frame.locator(selector).first
                 locator.wait_for(state="attached", timeout=timeout)
-                with page.context.expect_event("download", timeout=45000) as download_info:
-                    try:
+                expect_download_timeout = _download_expect_timeout_ms(
+                    action_context,
+                    action_timeout_ms=timeout,
+                    download_timeout_ms=download_timeout,
+                )
+                result["download_expect_timeout_ms"] = expect_download_timeout
+                try:
+                    with page.expect_download(timeout=expect_download_timeout) as download_info:
                         locator.click(timeout=timeout)
-                    except (PlaywrightTimeoutError, PlaywrightError) as click_exc:
-                        if _is_target_closed_error(click_exc) or _page_is_closed(page):
-                            click_closed_error = click_exc
-                        else:
-                            raise
-                _record_download_result(result, download_info.value)
-                if click_closed_error or _page_is_closed(page):
-                    result["page_closed_after_action"] = True
-                    result["download_closed_page"] = True
-                    result["reason"] = "Download event captured before/while the download window closed."
+                    download_events.append(download_info.value)
+                    result["download_wait_strategy"] = "page.expect_download"
+                except PlaywrightTimeoutError as click_exc:
+                    result["download_wait_strategy"] = "event_or_filesystem_after_expect_timeout"
+                    result["download_expect_timeout"] = str(click_exc)
+                except (PlaywrightTimeoutError, PlaywrightError) as click_exc:
+                    if _is_target_closed_error(click_exc) or _page_is_closed(page):
+                        click_closed_error = click_exc
+                    else:
+                        raise
+
+                result["download_wait_timeout_ms"] = download_timeout
+                result["download_watch_dirs"] = [str(path) for path in download_watch_dirs]
+                result["download_stability_ms"] = download_stability_ms
+                result["download_uuid_fallback_ms"] = download_uuid_fallback_ms
+                deadline = time.time() + (download_timeout / 1000.0)
+                while time.time() < deadline:
+                    if download_events:
+                        _record_download_result(
+                            result,
+                            download_events[0],
+                            capture_dir=capture_dir,
+                            test_id=test_id,
+                            browser_name=browser_name,
+                            suggested_filename=download_filename_hints[-1] if download_filename_hints else None,
+                        )
+                        if click_closed_error or _page_is_closed(page):
+                            result["page_closed_after_action"] = True
+                            result["download_closed_page"] = True
+                            result["reason"] = "Download event captured before/while the download window closed."
+                        break
+                    cdp_download_file, matched_cdp_download = _completed_cdp_download_file_from_dirs(
+                        cdp_downloads,
+                        download_watch_dirs,
+                        download_snapshot,
+                        started_at=download_started_at,
+                    )
+                    if cdp_download_file and matched_cdp_download:
+                        suggested_filename = str(matched_cdp_download.get("suggested_filename") or "")
+                        _record_filesystem_download_result(
+                            result,
+                            cdp_download_file,
+                            capture_dir=capture_dir,
+                            test_id=test_id,
+                            browser_name=browser_name,
+                            suggested_filename=suggested_filename,
+                        )
+                        result["download_filename_hint_source"] = "cdp"
+                        result["download_cdp_guid"] = str(matched_cdp_download.get("guid") or "")
+                        result["download_cdp_file_path"] = str(cdp_download_file)
+                        result["download_received_bytes"] = matched_cdp_download.get("received_bytes")
+                        result["download_total_bytes"] = matched_cdp_download.get("total_bytes")
+                        if click_closed_error or _page_is_closed(page):
+                            result["page_closed_after_action"] = True
+                            result["download_closed_page"] = True
+                        result["reason"] = "CDP completed download file appeared in the configured download directory."
+                        break
+                    completed_cdp_guids = [
+                        str(item.get("guid") or "")
+                        for item in cdp_downloads.values()
+                        if str(item.get("state") or "").lower() == "completed"
+                        and str(item.get("suggested_filename") or "").strip()
+                    ]
+                    uuid_fallback_ready = (
+                        download_uuid_fallback_ms >= 0
+                        and (time.time() - download_started_at) * 1000 >= download_uuid_fallback_ms
+                    )
+                    filesystem_download = _stable_download_from_dirs(
+                        download_watch_dirs,
+                        download_snapshot,
+                        stable_download_seen,
+                        started_at=download_started_at,
+                        stability_ms=download_stability_ms,
+                        allow_temp_names=completed_cdp_guids,
+                        allow_browser_uuid_names=uuid_fallback_ready,
+                    )
+                    if filesystem_download:
+                        suggested_filename = download_filename_hints[-1] if download_filename_hints else ""
+                        filename_hint_source = "response" if suggested_filename else ""
+                        if not suggested_filename:
+                            matched_cdp = cdp_downloads.get(filesystem_download.name)
+                            if matched_cdp:
+                                suggested_filename = str(matched_cdp.get("suggested_filename") or "")
+                                filename_hint_source = "cdp"
+                        if _looks_like_browser_temp_download_name(filesystem_download.name) and not suggested_filename:
+                            for _ in range(4):
+                                _pump_playwright_events(250, page, opener_page)
+                                result["cdp_downloads"] = list(cdp_downloads.values())
+                                matched_cdp = cdp_downloads.get(filesystem_download.name)
+                                if matched_cdp:
+                                    suggested_filename = str(matched_cdp.get("suggested_filename") or "")
+                                    filename_hint_source = "cdp"
+                                if suggested_filename:
+                                    break
+                        _record_filesystem_download_result(
+                            result,
+                            filesystem_download,
+                            capture_dir=capture_dir,
+                            test_id=test_id,
+                            browser_name=browser_name,
+                            suggested_filename=suggested_filename,
+                        )
+                        if filename_hint_source:
+                            result["download_filename_hint_source"] = filename_hint_source
+                        if click_closed_error or _page_is_closed(page):
+                            result["page_closed_after_action"] = True
+                            result["download_closed_page"] = True
+                        result["reason"] = "Download file appeared in the configured download directory."
+                        break
+                    try:
+                        cdp_missing_grace_ms = max(1000, int(os.getenv("DOWNLOAD_CDP_FILE_GRACE_MS") or "5000"))
+                    except ValueError:
+                        cdp_missing_grace_ms = 5000
+                    missing_completed_cdp = [
+                        item
+                        for item in cdp_downloads.values()
+                        if str(item.get("state") or "").lower() == "completed"
+                        and str(item.get("suggested_filename") or "").strip()
+                        and time.time() - float(item.get("completed_at") or time.time()) >= cdp_missing_grace_ms / 1000.0
+                    ]
+                    if missing_completed_cdp:
+                        latest = missing_completed_cdp[-1]
+                        result.update(
+                            {
+                                "status": "BLOCKED",
+                                "download_event_missing": True,
+                                "download_cdp_completed_without_file": True,
+                                "download_suggested_filename": str(latest.get("suggested_filename") or ""),
+                                "download_filename": str(latest.get("suggested_filename") or ""),
+                                "download_received_bytes": latest.get("received_bytes"),
+                                "download_total_bytes": latest.get("total_bytes"),
+                                "reason": (
+                                    "CDP reported the download completed, but no file appeared in the configured "
+                                    f"download directory: {primary_download_dir}"
+                                ),
+                            }
+                        )
+                        break
+                    if result.get("dialogs"):
+                        messages = " | ".join(
+                            str(dialog.get("message") or dialog.get("type") or "")
+                            for dialog in result.get("dialogs", [])
+                            if str(dialog.get("message") or dialog.get("type") or "").strip()
+                        )
+                        result.update(
+                            {
+                                "status": "BLOCKED",
+                                "download_dialog_blocked": True,
+                                "download_event_missing": True,
+                                "reason": (
+                                    "Download action showed a browser dialog instead of a download"
+                                    + (f": {messages}" if messages else ".")
+                                ),
+                            }
+                        )
+                        break
+                    if click_closed_error or _page_is_closed(page):
+                        result["page_closed_after_action"] = True
+                        result["download_closed_page"] = True
+                    _pump_playwright_events(250, page, opener_page)
+                else:
+                    result.update(
+                        {
+                            "status": "BLOCKED",
+                            "download_event_missing": True,
+                            "reason": f"Download blocked or failed: timeout {download_timeout}ms waiting for download event",
+                        }
+                    )
             except (PlaywrightTimeoutError, PlaywrightError) as e:
                 if click_closed_error or _is_target_closed_error(e) or _page_is_closed(page):
                     result.update(
                         {
-                            "status": "PASS",
+                            "status": "BLOCKED",
                             "page_closed_after_action": True,
                             "download_closed_page": True,
                             "download_event_missing": True,
-                            "reason": (
-                                "Download action closed the page before Playwright exposed a download event; "
-                                "treated as a normal closed download flow."
-                            ),
+                            "reason": "Download action closed the page before Playwright exposed a download event.",
                             "post_wait_state": {"page_closed": True, "settle_error": str(e)},
+                        }
+                    )
+                elif result.get("dialogs"):
+                    messages = " | ".join(
+                        str(dialog.get("message") or dialog.get("type") or "")
+                        for dialog in result.get("dialogs", [])
+                        if str(dialog.get("message") or dialog.get("type") or "").strip()
+                    )
+                    result.update(
+                        {
+                            "status": "BLOCKED",
+                            "download_dialog_blocked": True,
+                            "download_event_missing": True,
+                            "reason": (
+                                "Download action showed a browser dialog instead of a download"
+                                + (f": {messages}" if messages else ".")
+                            ),
                         }
                     )
                 else:
                     result.update({"status": "BLOCKED", "reason": f"Download blocked or failed: {e}"})
+            finally:
+                for session in cdp_download_sessions:
+                    try:
+                        session.detach()
+                    except Exception:
+                        pass
         elif semantic_action == "save_pdf":
             action_dispatched = True
             pdf_dir = Path(capture_dir or ".") / "pdf"
@@ -1947,7 +3262,11 @@ def execute_action(
                     if int(result["pdf_size"]) <= 0:
                         result.update({"status": "BLOCKED", "reason": f"PDF file is empty: {pdf_path}"})
         elif semantic_action == "wait":
-            frame.locator(selector).first.wait_for(timeout=20000)
+            if not selector or selector in {"-", "__page__"}:
+                frame.locator("body").first.wait_for(state="visible", timeout=20000)
+                result["wait_target"] = "page_body"
+            else:
+                frame.locator(selector).first.wait_for(timeout=20000)
         else:
             result.update({"status": "BLOCKED", "reason": f"Unsupported semantic action: {semantic_action}"})
 
@@ -2006,7 +3325,17 @@ def execute_action(
         result["request_failed_count"] = sum(1 for event in console_events if str(event.get("type") or "").upper() == "REQ_FAILED")
         if capture_dir:
             name = _safe_name(test_id or f"{action_type}_{int(time.time() * 1000)}")
-            result["state"] = _capture_state(capture_page, Path(capture_dir), name)
+            _apply_navigation_expectation(result, action_context)
+            state_capture_page, state_capture_scope = _state_capture_page_after_child_navigation(
+                capture_page,
+                page,
+                opener_page,
+                action_context,
+            )
+            if state_capture_scope:
+                result["state_capture_scope"] = state_capture_scope
+                result["state_capture_original_url"] = after_url
+            result["state"] = _capture_state(state_capture_page, Path(capture_dir), name)
             _apply_navigation_expectation(result, action_context)
             if console_events or _needs_console_evidence(action_context, action_type):
                 result["console_evidence_screenshot"] = _render_console_evidence_image(
@@ -2022,6 +3351,16 @@ def execute_action(
         for event_name, handler in event_handlers:
             try:
                 page.remove_listener(event_name, handler)
+            except Exception:
+                pass
+        for target_page, event_name, handler in page_event_handlers:
+            try:
+                target_page.remove_listener(event_name, handler)
+            except Exception:
+                pass
+        for context, event_name, handler in context_event_handlers:
+            try:
+                context.remove_listener(event_name, handler)
             except Exception:
                 pass
         for pattern, handler in temporary_routes:

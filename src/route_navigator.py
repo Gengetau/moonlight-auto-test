@@ -6,7 +6,7 @@ from urllib.parse import urlsplit
 
 from playwright.sync_api import Error as PlaywrightError, Page
 
-from src.action_executor import _capture_state, execute_action
+from src.action_executor import _capture_state, _safe_opener_page, execute_action
 from src.page_aliases import page_matches
 from src.route_runtime_verifier import (
     _action_context_for_locator,
@@ -349,6 +349,35 @@ def _manual_replay_start_offset(page: Page, replay_steps: List[Dict[str, Any]]) 
     return 0
 
 
+def _wait_for_manual_replay_selector(page: Page, replay: Optional[Dict[str, Any]], timeout: int) -> Dict[str, Any]:
+    selector = str((replay or {}).get("selector") or "")
+    if not selector:
+        return {"status": "SKIPPED", "reason": "next replay step has no selector"}
+
+    deadline = time.time() + max(timeout, 1000) / 1000.0
+    attempts = 0
+    while time.time() < deadline:
+        attempts += 1
+        if _page_is_closed(page):
+            return {"status": "BLOCKED", "selector": selector, "attempts": attempts, "reason": "active page is closed"}
+        try:
+            page.wait_for_load_state("domcontentloaded", timeout=500)
+        except PlaywrightError:
+            pass
+        if _selector_exists_in_any_frame(page, selector):
+            return {"status": "PASS", "selector": selector, "attempts": attempts}
+        try:
+            page.wait_for_timeout(250)
+        except PlaywrightError:
+            break
+    return {
+        "status": "SKIPPED",
+        "selector": selector,
+        "attempts": attempts,
+        "reason": "next selector was not observed before timeout; fallback matching may still resolve it",
+    }
+
+
 def _recorded_target_paths(route: Dict[str, Any]) -> List[str]:
     values = [
         (route.get("state") or {}).get("url"),
@@ -366,30 +395,70 @@ def _recorded_target_paths(route: Dict[str, Any]) -> List[str]:
     return paths
 
 
+def _candidate_page_paths(candidate: Page) -> List[str]:
+    urls: List[str] = []
+    try:
+        if candidate.url:
+            urls.append(str(candidate.url))
+    except PlaywrightError:
+        pass
+    try:
+        urls.extend(str(frame.url or "") for frame in candidate.frames)
+    except PlaywrightError:
+        pass
+
+    paths: List[str] = []
+    for value in urls:
+        path = urlsplit(value).path.rstrip("/").lower()
+        if path and path not in paths:
+            paths.append(path)
+    return paths
+
+
+def _wait_between_target_scans(page: Page, candidates: List[Page]) -> None:
+    for candidate in [page] + list(candidates):
+        if _page_is_closed(candidate):
+            continue
+        try:
+            candidate.wait_for_timeout(250)
+            return
+        except PlaywrightError:
+            continue
+    time.sleep(0.25)
+
+
 def _takeover_recorded_target_page(page: Page, route: Dict[str, Any], timeout: int) -> Tuple[Page, Dict[str, Any]]:
     """Select an existing named popup reused by the final route action."""
     target_paths = _recorded_target_paths(route)
     if not target_paths:
         return page, {"status": "SKIPPED", "reason": "route map has no recorded target URL"}
 
-    candidates = []
-    for candidate in _pages_for_context(page) or [page]:
-        if _page_is_closed(candidate):
-            continue
-        try:
-            candidate_urls = [str(candidate.url or "")]
-            candidate_urls.extend(str(frame.url or "") for frame in candidate.frames)
-        except PlaywrightError:
-            continue
-        candidate_paths = [urlsplit(value).path.rstrip("/").lower() for value in candidate_urls]
-        if any(target_path == candidate_path for target_path in target_paths for candidate_path in candidate_paths):
-            candidates.append(candidate)
+    candidates: List[Page] = []
+    attempts = 0
+    deadline = time.time() + max(timeout, 1000) / 1000.0
+    scanned_paths: List[str] = []
+    while time.time() < deadline:
+        attempts += 1
+        for candidate in _pages_for_context(page) or [page]:
+            if _page_is_closed(candidate):
+                continue
+            candidate_paths = _candidate_page_paths(candidate)
+            for path in candidate_paths:
+                if path not in scanned_paths:
+                    scanned_paths.append(path)
+            if any(target_path == candidate_path for target_path in target_paths for candidate_path in candidate_paths):
+                candidates.append(candidate)
+        if candidates:
+            break
+        _wait_between_target_scans(page, _pages_for_context(page) or [])
 
     if not candidates:
         return page, {
             "status": "BLOCKED",
             "reason": "Route replay did not reach the recorded target page.",
             "target_paths": target_paths,
+            "attempts": attempts,
+            "scanned_paths": scanned_paths[:20],
         }
 
     selected = page if page in candidates else candidates[0]
@@ -402,6 +471,7 @@ def _takeover_recorded_target_page(page: Page, route: Dict[str, Any], timeout: i
         "status": "PASS",
         "strategy": "recorded_target_page_takeover",
         "target_paths": target_paths,
+        "attempts": attempts,
         "url": "" if _page_is_closed(selected) else str(selected.url or ""),
         "reused_named_popup": selected is not page,
     }
@@ -436,6 +506,7 @@ def _execute_manual_replay(
             test_id=test_id,
         )
         pages_before = _pages_for_context(page)
+        opener_before_action = _safe_opener_page(page)
         action_result = execute_action(
             page,
             action_type,
@@ -457,12 +528,44 @@ def _execute_manual_replay(
                 "recorded_href": replay.get("href") or "",
                 "onclick": replay.get("onclick") or "",
                 "href": replay.get("href") or "",
+                "dialog_expected": bool(replay.get("dialog_expected")),
+                "dialog_type": replay.get("dialog_type") or "",
+                "dialog_message": replay.get("dialog_message") or "",
+                "dialog_action": replay.get("dialog_action") or "",
                 "keep_popup": True,
             },
         )
         takeover_page = _takeover_page_after_action(page, pages_before, action_result, timeout)
+        recovered_opener = False
         if takeover_page is not None:
             page = takeover_page
+        elif (
+            action_result.get("capture_scope") == "opener_after_popup_close"
+            or action_result.get("page_closed_after_action")
+            or _page_is_closed(page)
+        ) and opener_before_action is not None:
+            page = opener_before_action
+            recovered_opener = True
+            try:
+                page.wait_for_load_state("domcontentloaded", timeout=min(timeout, 5000))
+            except PlaywrightError:
+                pass
+            try:
+                page.bring_to_front()
+            except PlaywrightError:
+                pass
+
+        next_selector_wait: Dict[str, Any] = {}
+        should_wait_for_next = bool(
+            recovered_opener
+            or takeover_page is not None
+            or action_result.get("page_closed_after_action")
+            or action_result.get("popup_opened")
+            or action_result.get("navigation_detected")
+            or action_result.get("frame_changed")
+        )
+        if action_result.get("status") == "PASS" and should_wait_for_next and replay_index < len(replay_steps):
+            next_selector_wait = _wait_for_manual_replay_selector(page, replay_steps[replay_index], timeout)
         result["steps"].append(
             {
                 "index": replay_index,
@@ -478,9 +581,22 @@ def _execute_manual_replay(
                 "popup_wait_strategy": action_result.get("popup_wait_strategy"),
                 "popup_wait_error": action_result.get("popup_wait_error"),
                 "popup_taken_over": takeover_page is not None,
+                "opener_recovered_after_popup_close": recovered_opener,
+                "dialogs": action_result.get("dialogs") or [],
+                "capture_scope": action_result.get("capture_scope"),
+                "next_selector_wait": next_selector_wait,
                 "active_page_url": page.url if not _page_is_closed(page) else None,
             }
         )
+        if next_selector_wait.get("status") == "BLOCKED":
+            result.update(
+                {
+                    "status": "BLOCKED",
+                    "reason": next_selector_wait.get("reason") or "Manual replay could not recover an active page",
+                    "state": _capture_state(page, capture_dir, f"{test_id}_manual_{replay_index:02d}_next_wait_failed"),
+                }
+            )
+            return page, result
         if action_result.get("status") != "PASS":
             result.update(
                 {

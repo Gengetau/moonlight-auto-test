@@ -1,4 +1,5 @@
 import re
+from pathlib import Path
 
 import pytest
 from playwright.sync_api import sync_playwright
@@ -24,6 +25,12 @@ CHROMIUM_ARGS = [
 ]
 
 FIREFOX_ARGS = []
+
+
+def _download_launch_kwargs():
+    download_dir = Path(Config.DOWNLOAD_DIR).expanduser()
+    download_dir.mkdir(parents=True, exist_ok=True)
+    return {"downloads_path": str(download_dir)}
 
 
 def pytest_addoption(parser):
@@ -240,17 +247,20 @@ def browser(browser_name, login_entry):
                 channel="msedge",
                 headless=False,
                 args=CHROMIUM_ARGS,
+                **_download_launch_kwargs(),
             )
         elif browser_name == "firefox":
             browser = p.firefox.launch(
                 headless=False,
                 args=FIREFOX_ARGS,
+                **_download_launch_kwargs(),
             )
         elif browser_name == "chrome_port":
-            browser = p.chromium.launch(
+            chrome_kwargs = {
                 **Config.chrome_launch_kwargs(),
-                headless=False,
-                args=[
+                **_download_launch_kwargs(),
+                "headless": False,
+                "args": [
                     "--start-maximized",
                     "--force-device-scale-factor=1",
                     "--high-dpi-support=1",
@@ -262,8 +272,9 @@ def browser(browser_name, login_entry):
                     "--no-sandbox",
                     "--disable-setuid-sandbox",
                     "--disable-dev-shm-usage",
-                ]
-            )
+                ],
+            }
+            browser = p.chromium.launch(**chrome_kwargs)
         else:
             raise ValueError(f"不支持的浏览器类型: {browser_name}")
 

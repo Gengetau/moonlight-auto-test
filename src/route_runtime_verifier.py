@@ -9,7 +9,7 @@ from urllib.parse import urlsplit
 from playwright.sync_api import Error as PlaywrightError
 from playwright.sync_api import Page, TimeoutError as PlaywrightTimeoutError
 
-from src.action_executor import _capture_state, execute_action
+from src.action_executor import _capture_state, _handle_dialog_safely, execute_action
 from src.page_aliases import page_aliases
 from src.runtime_page_profile import capture_runtime_page_profile
 
@@ -243,6 +243,7 @@ def _takeover_page_after_action(
 def _install_manual_recorder(page: Page, *, route_id: str, index: int) -> Dict[str, Any]:
     events: List[Dict[str, Any]] = []
     binding_name = f"__moonlightManualRecord_{_safe_id(route_id)}_{index}_{int(time.time() * 1000)}"
+    cleanup_handlers: List[Dict[str, Any]] = []
 
     def record(source, payload):
         if not isinstance(payload, dict):
@@ -256,6 +257,24 @@ def _install_manual_recorder(page: Page, *, route_id: str, index: int) -> Dict[s
             event["frame_url"] = source["frame"].url
         except Exception:
             pass
+        events.append(event)
+
+    def record_dialog(dialog):
+        event: Dict[str, Any] = {
+            "event_type": "dialog",
+            "dialog_type": str(getattr(dialog, "type", "") or ""),
+            "message": str(getattr(dialog, "message", "") or ""),
+            "default_value": str(getattr(dialog, "default_value", "") or ""),
+            "handled_action": "accept",
+            "timestamp": int(time.time() * 1000),
+        }
+        try:
+            dialog_page = getattr(dialog, "page", None)
+            if dialog_page is not None:
+                event["page_url"] = dialog_page.url
+        except Exception:
+            pass
+        event["accept_status"] = _handle_dialog_safely(dialog, "accept")
         events.append(event)
 
     script = """
@@ -368,7 +387,29 @@ def _install_manual_recorder(page: Page, *, route_id: str, index: int) -> Dict[s
                 frame.evaluate(script, binding_name)
             except PlaywrightError:
                 continue
-    return {"binding_name": binding_name, "events": events}
+    try:
+        page.context.on("dialog", record_dialog)
+        cleanup_handlers.append({"target": page.context, "event_name": "dialog", "handler": record_dialog})
+    except Exception:
+        try:
+            page.on("dialog", record_dialog)
+            cleanup_handlers.append({"target": page, "event_name": "dialog", "handler": record_dialog})
+        except Exception:
+            pass
+    return {"binding_name": binding_name, "events": events, "cleanup_handlers": cleanup_handlers}
+
+
+def _cleanup_manual_recorder(recorder: Dict[str, Any]) -> None:
+    for item in recorder.get("cleanup_handlers") or []:
+        target = item.get("target")
+        event_name = item.get("event_name")
+        handler = item.get("handler")
+        if target is None or not event_name or handler is None:
+            continue
+        try:
+            target.remove_listener(event_name, handler)
+        except Exception:
+            pass
 
 
 def _upload_filename(value: Any) -> str:
@@ -449,10 +490,24 @@ def _manual_replay_from_events(events: List[Dict[str, Any]], *, upload_file: Opt
             )
 
     for event in events:
+        event_type = str(event.get("event_type") or "").lower()
+        if event_type == "dialog":
+            flush()
+            if replay:
+                replay[-1].update(
+                    {
+                        "dialog_expected": True,
+                        "dialog_type": event.get("dialog_type") or "",
+                        "dialog_message": event.get("message") or "",
+                        "dialog_action": event.get("handled_action") or "accept",
+                        "dialog_accept_status": event.get("accept_status") or "",
+                    }
+                )
+            continue
+
         selector = str(event.get("selector") or "")
         if not selector:
             continue
-        event_type = str(event.get("event_type") or "").lower()
         tag = str(event.get("tag") or "").lower()
         input_type = str(event.get("type") or "").lower()
 
@@ -835,6 +890,7 @@ def _manual_checkpoint(
         print("  请选择 [Enter/r/m/s/q]:")
         raw = input("> ").strip().lower()
         if raw in {"", "r", "retry"}:
+            _cleanup_manual_recorder(recorder)
             return {
                 "status": "RETRY",
                 "manual": False,
@@ -843,8 +899,10 @@ def _manual_checkpoint(
                 "visible_controls": _visible_controls(page),
             }
         if raw == "q":
+            _cleanup_manual_recorder(recorder)
             raise InterruptedError("用户中止路径建图")
         if raw == "s":
+            _cleanup_manual_recorder(recorder)
             return {
                 "status": "UNREACHABLE_ROUTE",
                 "manual": True,
@@ -860,6 +918,7 @@ def _manual_checkpoint(
             after = _capture_state(page, capture_dir, f"{_safe_id(route_id)}_{index:02d}_manual_after")
             manual_events = list(recorder.get("events") or [])
             manual_replay = _manual_replay_from_events(manual_events, upload_file=upload_file)
+            _cleanup_manual_recorder(recorder)
             print(f"  已记录人工事件 {len(manual_events)} 个，可回放动作 {len(manual_replay)} 个。")
             return {
                 "status": "PASS",
@@ -1053,8 +1112,10 @@ def record_manual_route(
         print("  输入 s 标记不可达，输入 q 中止路径建图。")
         raw = input("> ").strip().lower()
         if raw == "q":
+            _cleanup_manual_recorder(recorder)
             raise InterruptedError("用户中止路径建图")
         if raw == "s":
+            _cleanup_manual_recorder(recorder)
             return {
                 "route_id": route_id,
                 "target_page": target_page,
@@ -1088,6 +1149,7 @@ def record_manual_route(
             after = _capture_state(page, capture_dir, f"{_safe_id(route_id)}_manual_route_final")
             manual_events = list(recorder.get("events") or [])
             manual_replay = _manual_replay_from_events(manual_events, upload_file=upload_file)
+            _cleanup_manual_recorder(recorder)
             print(f"  已记录人工事件 {len(manual_events)} 个，可回放动作 {len(manual_replay)} 个。")
             result: Dict[str, Any] = {
                 "route_id": route_id,

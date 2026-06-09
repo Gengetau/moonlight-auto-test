@@ -10,35 +10,6 @@ DEFAULT_CHECKLIST_PATH = "generated/valid/migration_checklist.xlsx"
 DEFAULT_ROUTE_MAP_PATH = "generated/valid/route"
 GUIDED_CHECKLIST_SCHEMA = "moonlight.guided_checklist.v1"
 GUIDED_CHECKLIST_DIR = Path("generated/valid/guided_checklists")
-GUIDED_CHECKLIST_TARGETS = [
-    {
-        "page_id": "JpGazetteForNumberSearch.do",
-        "actual_page_id": "GazetteMainFrame.jsp",
-        "template_id": "gazette_detail",
-        "label": "Gazette detail window",
-        "filename": "jpgazettefornumbersearch.guided_checklist.json",
-        "direct_url_allowed": False,
-        "description": "High-frequency gazette detail window opened from result/list flows.",
-    },
-    {
-        "page_id": "JpNonjavaScreeningForEasySearch.do?method=unRead",
-        "actual_page_id": "NonjavaScreeningMainFrame.jsp",
-        "template_id": "screening_workbench",
-        "label": "Unread screening workbench",
-        "filename": "jpnonjavascreeningforeasysearch_unread.guided_checklist.json",
-        "direct_url_allowed": False,
-        "description": "High-frequency non-Java screening workbench opened from business flows.",
-    },
-    {
-        "page_id": "WwPersonalNameDicDispForEasySearch.do",
-        "actual_page_id": "WwPersonAidMain.jsp",
-        "template_id": "person_name_dictionary_assist",
-        "label": "Ww person name dictionary assist",
-        "filename": "wwpersonaidmain.guided_checklist.json",
-        "direct_url_allowed": False,
-        "description": "Person-name dictionary assist popup opened from Ww easy/professional search name fields.",
-    },
-]
 DEFAULT_NEGATIVE_PROFILES = [
     {
         "profile": "negative_js_error",
@@ -94,28 +65,7 @@ def page_matches_target(row_page: Any, page_id: Any) -> bool:
     return target_page_name(row_page) == target_page_name(page_id) or page_matches(row_page, page_id)
 
 
-def guided_checklist_target_labels() -> List[str]:
-    return [
-        f"{target['page_id']}    {target['label']} / actual: {target['actual_page_id']} / {target['template_id']}"
-        for target in GUIDED_CHECKLIST_TARGETS
-    ]
-
-
-def guided_checklist_meta(page_id: Any) -> Optional[Dict[str, Any]]:
-    aliases = target_page_aliases(page_id)
-    raw = str(page_id or "").strip().lower()
-    for target in GUIDED_CHECKLIST_TARGETS:
-        target_aliases = target_page_aliases(target["page_id"])
-        if raw == target["page_id"].lower() or aliases & target_aliases:
-            return target
-    return None
-
-
 def guided_checklist_path_for(page_id: Any, base_dir: Any = GUIDED_CHECKLIST_DIR) -> Optional[Path]:
-    meta = guided_checklist_meta(page_id)
-    if meta:
-        return Path(base_dir) / str(meta["filename"])
-
     raw_page = Path(str(page_id or "").strip().split("?", 1)[0].replace("\\", "/")).name
     if not raw_page:
         return None
@@ -123,6 +73,28 @@ def guided_checklist_path_for(page_id: Any, base_dir: Any = GUIDED_CHECKLIST_DIR
     if not screen_id:
         return None
     return Path(base_dir) / f"{screen_id}_checklist.json"
+
+
+def effective_checklist_path_for_page(
+    page_id: Any,
+    current_path: Any = "",
+    *,
+    base_dir: Any = GUIDED_CHECKLIST_DIR,
+) -> str:
+    current = str(current_path or "").strip()
+    guided_path = guided_checklist_path_for(page_id, base_dir=base_dir)
+    if guided_path and guided_path.exists():
+        current_normalized = current.replace("\\", "/").lower()
+        guided_dir_normalized = Path(base_dir).as_posix().lower().rstrip("/") + "/"
+        suggested = str(guided_path)
+        if (
+            not current
+            or current == DEFAULT_CHECKLIST_PATH
+            or not Path(current).exists()
+            or (current_normalized.startswith(guided_dir_normalized) and current != suggested)
+        ):
+            return suggested
+    return current or DEFAULT_CHECKLIST_PATH
 
 
 def _starter_case(
@@ -164,7 +136,7 @@ def _starter_case(
 
 
 def starter_guided_checklist(page_id: Any) -> Dict[str, Any]:
-    meta = guided_checklist_meta(page_id) or {
+    meta = {
         "page_id": str(page_id or "TargetPage"),
         "template_id": "guided_page",
         "label": "Guided page",
@@ -821,6 +793,37 @@ def build_regression_command(config: Dict[str, Any], *, pytest_cmd: str) -> str:
     return cmd
 
 
+def expand_regression_queue_configs(
+    page_configs: Iterable[Dict[str, Any]],
+    browsers: Iterable[Any],
+) -> List[Dict[str, Any]]:
+    """Expand page cards into browser-ordered queue configs.
+
+    The browser loop is intentionally outside the page loop so a multi-browser
+    queue runs every page in browser A, then starts again from page 1 in browser B.
+    """
+    browser_names: List[str] = []
+    seen_browsers = set()
+    for browser in browsers:
+        browser_name = str(browser or "").strip()
+        if not browser_name or browser_name in seen_browsers:
+            continue
+        seen_browsers.add(browser_name)
+        browser_names.append(browser_name)
+    expanded: List[Dict[str, Any]] = []
+    for browser in browser_names:
+        for page_config in page_configs:
+            target_page = str(page_config.get("target_page") or "").strip()
+            if not target_page:
+                continue
+            config = dict(page_config)
+            config["browser"] = browser
+            config["html_path"] = html_report_path(browser, target_page)
+            config["regression_output_dir"] = regression_output_dir(browser)
+            expanded.append(config)
+    return expanded
+
+
 def run_regression_queue(configs: Iterable[Dict[str, Any]], run_page: Callable[[Dict[str, Any]], Dict[str, Any]]) -> List[Dict[str, Any]]:
     results: List[Dict[str, Any]] = []
     for config in configs:
@@ -836,11 +839,19 @@ def run_regression_queue(configs: Iterable[Dict[str, Any]], run_page: Callable[[
     return results
 
 
-def create_regression_queue_run(configs: Iterable[Dict[str, Any]]) -> Dict[str, Any]:
+def create_regression_queue_run(
+    configs: Iterable[Dict[str, Any]],
+    *,
+    max_parallel: int = 1,
+    run_id: Any = "",
+) -> Dict[str, Any]:
     queued = [dict(config) for config in configs]
+    parallel = max(1, int(max_parallel or 1))
     return {
         "status": "running" if queued else "complete",
         "next_index": 0,
+        "max_parallel": parallel,
+        "run_id": str(run_id or ""),
         "configs": queued,
         "results": [],
     }
@@ -852,6 +863,31 @@ def current_regression_queue_config(queue_run: Dict[str, Any]) -> Optional[Dict[
     if str(queue_run.get("status") or "") != "running" or next_index >= len(configs):
         return None
     return dict(configs[next_index])
+
+
+def claim_regression_queue_configs(
+    queue_run: Dict[str, Any],
+    capacity: int,
+) -> tuple[Dict[str, Any], List[Dict[str, Any]]]:
+    updated = dict(queue_run)
+    configs = list(updated.get("configs") or [])
+    next_index = int(updated.get("next_index", 0) or 0)
+    if str(updated.get("status") or "") != "running" or capacity <= 0:
+        return updated, []
+
+    claimed: List[Dict[str, Any]] = []
+    for _ in range(max(0, int(capacity or 0))):
+        if next_index >= len(configs):
+            break
+        config = dict(configs[next_index])
+        config["queue_index"] = next_index
+        claimed.append(config)
+        next_index += 1
+
+    updated["next_index"] = next_index
+    if not claimed and next_index >= len(configs) and len(updated.get("results") or []) >= len(configs):
+        updated["status"] = "complete"
+    return updated, claimed
 
 
 def pause_regression_queue_run(queue_run: Dict[str, Any], *, reason: str = "") -> Dict[str, Any]:
@@ -878,11 +914,36 @@ def record_regression_queue_result(queue_run: Dict[str, Any], result: Dict[str, 
     current = configs[next_index] if next_index < len(configs) else {}
     recorded = dict(result or {})
     recorded.setdefault("target_page", current.get("target_page"))
+    recorded.setdefault("browser", current.get("browser"))
+    recorded.setdefault("browser_label", current.get("browser_label"))
     results.append(recorded)
     next_index += 1
     updated["results"] = results
     updated["next_index"] = next_index
     updated["status"] = "complete" if next_index >= len(configs) else "running"
+    return updated
+
+
+def record_claimed_regression_queue_result(queue_run: Dict[str, Any], result: Dict[str, Any]) -> Dict[str, Any]:
+    updated = dict(queue_run)
+    configs = list(updated.get("configs") or [])
+    results = list(updated.get("results") or [])
+    recorded = dict(result or {})
+    queue_index = recorded.get("queue_index")
+    try:
+        queue_index_int = int(queue_index)
+    except (TypeError, ValueError):
+        queue_index_int = None
+    current = configs[queue_index_int] if queue_index_int is not None and 0 <= queue_index_int < len(configs) else {}
+    recorded.setdefault("target_page", current.get("target_page"))
+    recorded.setdefault("browser", current.get("browser"))
+    recorded.setdefault("browser_label", current.get("browser_label"))
+    if queue_index_int is not None:
+        recorded["queue_index"] = queue_index_int
+    results.append(recorded)
+    updated["results"] = results
+    if len(results) >= len(configs):
+        updated["status"] = "complete"
     return updated
 
 
@@ -919,22 +980,6 @@ def load_page_options(
     report_dir: Path = Path("output/regression"),
 ) -> List[Dict[str, Any]]:
     options: Dict[str, Dict[str, Any]] = {}
-
-    for target in GUIDED_CHECKLIST_TARGETS:
-        _add_option(
-            options,
-            target["page_id"],
-            action=target.get("template_id"),
-            risk="guided",
-            source="guided",
-        )
-        _add_option(
-            options,
-            target["actual_page_id"],
-            action=target.get("page_id"),
-            risk="guided",
-            source="guided_actual",
-        )
 
     if mapping_path.exists():
         try:

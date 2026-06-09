@@ -145,3 +145,44 @@ def test_manual_replay_from_events_turns_checkbox_change_into_check():
             "onclick": "",
         }
     ]
+
+
+def test_manual_replay_from_events_attaches_browser_dialog_to_previous_click():
+    replay = verifier._manual_replay_from_events(
+        [
+            {
+                "event_type": "click",
+                "selector": 'input[name="button"][type="button"]',
+                "tag": "input",
+                "type": "button",
+                "text": "実行",
+                "onclick": "evalFocus();",
+            },
+            {
+                "event_type": "dialog",
+                "dialog_type": "confirm",
+                "message": "真内評価情報にチェックを入れます。よろしいですか？",
+                "handled_action": "accept",
+                "accept_status": "accepted",
+            },
+        ]
+    )
+
+    assert replay == [
+        {
+            "action_type": "click",
+            "selector": 'input[name="button"][type="button"]',
+            "value": "",
+            "event_type": "click",
+            "text": "実行",
+            "tag": "input",
+            "type": "button",
+            "onclick": "evalFocus();",
+            "href": "",
+            "dialog_expected": True,
+            "dialog_type": "confirm",
+            "dialog_message": "真内評価情報にチェックを入れます。よろしいですか？",
+            "dialog_action": "accept",
+            "dialog_accept_status": "accepted",
+        }
+    ]

@@ -6,10 +6,12 @@ import pytest
 from src.gui_command_builder import (
     bounded_console_output,
     build_regression_command,
+    claim_regression_queue_configs,
     create_regression_queue_run,
     current_regression_queue_config,
+    effective_checklist_path_for_page,
+    expand_regression_queue_configs,
     guided_checklist_path_for,
-    starter_guided_checklist,
     html_report_path,
     load_negative_profile_options,
     load_upload_case_options,
@@ -17,10 +19,10 @@ from src.gui_command_builder import (
     negative_profile_labels,
     pause_regression_queue_run,
     regression_output_dir,
+    record_claimed_regression_queue_result,
     record_regression_queue_result,
     resume_regression_queue_run,
     run_regression_queue,
-    write_starter_guided_checklist,
     upload_case_option_labels,
 )
 
@@ -81,6 +83,37 @@ def test_run_regression_queue_continues_after_failed_page():
     assert [item["target_page"] for item in results] == calls
 
 
+def test_expand_regression_queue_configs_runs_all_pages_per_browser_in_order():
+    configs = expand_regression_queue_configs(
+        [
+            {"target_page": "First.jsp", "enabled": True},
+            {"target_page": "Second.jsp", "enabled": True},
+        ],
+        ["edge", "chrome_port"],
+    )
+
+    assert [(item["browser"], item["target_page"]) for item in configs] == [
+        ("edge", "First.jsp"),
+        ("edge", "Second.jsp"),
+        ("chrome_port", "First.jsp"),
+        ("chrome_port", "Second.jsp"),
+    ]
+    assert configs[0]["html_path"] == html_report_path("edge", "First.jsp")
+    assert configs[2]["regression_output_dir"] == regression_output_dir("chrome_port")
+
+
+def test_expand_regression_queue_configs_deduplicates_browsers():
+    configs = expand_regression_queue_configs(
+        [{"target_page": "First.jsp"}],
+        ["edge", "edge", "firefox"],
+    )
+
+    assert [(item["browser"], item["target_page"]) for item in configs] == [
+        ("edge", "First.jsp"),
+        ("firefox", "First.jsp"),
+    ]
+
+
 def test_persistent_regression_queue_run_advances_all_cards_after_failures():
     queue_run = create_regression_queue_run(
         {"target_page": f"Page{index}.jsp"}
@@ -106,6 +139,64 @@ def test_persistent_regression_queue_run_advances_all_cards_after_failures():
         "Page8.jsp",
     ]
     assert [item["return_code"] for item in queue_run["results"]] == [0, 0, 0, 1, 0, 0, 0, 0]
+
+
+def test_persistent_regression_queue_result_records_browser_context():
+    queue_run = create_regression_queue_run(
+        [{"target_page": "First.jsp", "browser": "edge", "browser_label": "Microsoft Edge"}]
+    )
+
+    queue_run = record_regression_queue_result(queue_run, {"return_code": 0})
+
+    assert queue_run["results"][0]["target_page"] == "First.jsp"
+    assert queue_run["results"][0]["browser"] == "edge"
+    assert queue_run["results"][0]["browser_label"] == "Microsoft Edge"
+
+
+def test_claim_regression_queue_configs_reserves_parallel_jobs_without_serial_increment():
+    queue_run = create_regression_queue_run(
+        [{"target_page": "First.jsp"}, {"target_page": "Second.jsp"}, {"target_page": "Third.jsp"}],
+        max_parallel=2,
+        run_id="run-1",
+    )
+
+    queue_run, claimed = claim_regression_queue_configs(queue_run, 2)
+
+    assert queue_run["run_id"] == "run-1"
+    assert queue_run["max_parallel"] == 2
+    assert queue_run["next_index"] == 2
+    assert [(item["queue_index"], item["target_page"]) for item in claimed] == [
+        (0, "First.jsp"),
+        (1, "Second.jsp"),
+    ]
+
+
+def test_record_claimed_regression_queue_result_keeps_parallel_claim_cursor():
+    queue_run = create_regression_queue_run(
+        [
+            {"target_page": "First.jsp", "browser": "edge"},
+            {"target_page": "Second.jsp", "browser": "chrome_port"},
+        ],
+        max_parallel=2,
+    )
+    queue_run, claimed = claim_regression_queue_configs(queue_run, 2)
+
+    queue_run = record_claimed_regression_queue_result(
+        queue_run,
+        {"queue_index": claimed[1]["queue_index"], "return_code": 0},
+    )
+    assert queue_run["status"] == "running"
+    assert queue_run["next_index"] == 2
+    assert queue_run["results"][0]["target_page"] == "Second.jsp"
+    assert queue_run["results"][0]["browser"] == "chrome_port"
+
+    queue_run = record_claimed_regression_queue_result(
+        queue_run,
+        {"queue_index": claimed[0]["queue_index"], "return_code": 1},
+    )
+    assert queue_run["status"] == "complete"
+    assert queue_run["next_index"] == 2
+    assert [item["target_page"] for item in queue_run["results"]] == ["Second.jsp", "First.jsp"]
 
 
 def test_paused_regression_queue_does_not_expose_next_card_until_resumed():
@@ -176,46 +267,51 @@ def test_load_page_options_merges_mapping_routes_and_recent_reports(tmp_path):
     assert by_page["ProjectListUploadDisp.jsp"]["risk"] == "High"
     assert by_page["ProjectListUploadErr.jsp"]["route_map_path"] == str(route_map)
     assert "recent" in by_page["UopcUploadListDispJP.jsp"]["sources"]
-    assert "JpGazetteForNumberSearch.do" in by_page
-    assert "GazetteMainFrame.jsp" in by_page
-    assert "JpNonjavaScreeningForEasySearch.do?method=unRead" in by_page
-    assert "NonjavaScreeningMainFrame.jsp" in by_page
-    assert "WwPersonalNameDicDispForEasySearch.do" in by_page
-    assert "WwPersonAidMain.jsp" in by_page
 
 
-def test_guided_checklist_starter_path_and_payload(tmp_path):
+def test_guided_checklist_path_uses_generic_screen_id_filename(tmp_path):
     path = guided_checklist_path_for(
         "NonjavaScreeningMainFrame.jsp",
         base_dir=tmp_path,
     )
-    assert path == tmp_path / "jpnonjavascreeningforeasysearch_unread.guided_checklist.json"
+    assert path == tmp_path / "NonjavaScreeningMainFrame_checklist.json"
 
     person_path = guided_checklist_path_for("WwPersonAidMain.jsp", base_dir=tmp_path)
-    assert person_path == tmp_path / "wwpersonaidmain.guided_checklist.json"
+    assert person_path == tmp_path / "WwPersonAidMain_checklist.json"
+
+    do_path = guided_checklist_path_for("JpGazetteForNumberSearch.do?method=print", base_dir=tmp_path)
+    assert do_path == tmp_path / "JpGazetteForNumberSearch_checklist.json"
 
     generic_path = guided_checklist_path_for("WwSearchAid.jsp", base_dir=tmp_path)
     assert generic_path == tmp_path / "WwSearchAid_checklist.json"
 
-    payload = starter_guided_checklist("GazetteMainFrame.jsp")
-    assert payload["schema"] == "moonlight.guided_checklist.v1"
-    assert payload["template_id"] == "gazette_detail"
-    assert len(payload["cases"]) >= 25
-    assert payload["cases"][0]["steps"][0]["action_type"] == "assert_visible"
-    assert any(case["automation_mode"] == "semi-auto" for case in payload["cases"])
-    assert any(case["automation_mode"] == "auto-negative" for case in payload["cases"])
-    assert any(case.get("case_type") == "negative_http_500" for case in payload["cases"])
-    assert any(case["case_id"] == "gazette_latest_information_panel_visible" for case in payload["cases"])
 
-    output = write_starter_guided_checklist(tmp_path / "starter.json", "JpGazetteForNumberSearch.do")
-    written = json.loads(output.read_text(encoding="utf-8"))
-    assert written["page_id"] == "JpGazetteForNumberSearch.do"
+def test_effective_checklist_path_prefers_existing_page_guided_json(tmp_path):
+    guided = tmp_path / "WwSearchAid_checklist.json"
+    guided.write_text("{}", encoding="utf-8")
 
-    person_payload = starter_guided_checklist("WwPersonalNameDicDispForEasySearch.do")
-    assert person_payload["template_id"] == "person_name_dictionary_assist"
-    assert any(case["case_id"] == "person_aid_middle_match_search_results" for case in person_payload["cases"])
-    assert any(case["automation_mode"] == "manual" for case in person_payload["cases"])
-    assert any(case.get("case_type") == "negative_http_500" for case in person_payload["cases"])
+    assert effective_checklist_path_for_page("WwSearchAid.jsp", "", base_dir=tmp_path) == str(guided)
+    assert (
+        effective_checklist_path_for_page(
+            "WwSearchAid.jsp",
+            "generated/valid/migration_checklist.xlsx",
+            base_dir=tmp_path,
+        )
+        == str(guided)
+    )
+    assert effective_checklist_path_for_page("Missing.jsp", "", base_dir=tmp_path) == "generated/valid/migration_checklist.xlsx"
+
+
+def test_effective_checklist_path_preserves_custom_existing_file(tmp_path):
+    guided = tmp_path / "WwSearchAid_checklist.json"
+    guided.write_text("{}", encoding="utf-8")
+    custom = tmp_path / "custom_cases.json"
+    custom.write_text("{}", encoding="utf-8")
+    stale_guided = tmp_path / "OtherPage_checklist.json"
+    stale_guided.write_text("{}", encoding="utf-8")
+
+    assert effective_checklist_path_for_page("WwSearchAid.jsp", custom, base_dir=tmp_path) == str(custom)
+    assert effective_checklist_path_for_page("WwSearchAid.jsp", stale_guided, base_dir=tmp_path) == str(guided)
 
 
 def test_load_upload_case_options_filters_page_upload_cases(tmp_path):

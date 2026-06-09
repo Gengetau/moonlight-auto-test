@@ -11,6 +11,7 @@ import re
 import streamlit.components.v1 as components
 import queue
 import threading
+import uuid
 from pathlib import Path
 from datetime import datetime
 import sys
@@ -26,14 +27,15 @@ from src.config_parser import Config
 from src.gui_command_builder import (
     DEFAULT_CHECKLIST_PATH,
     DEFAULT_ROUTE_MAP_PATH,
-    GUIDED_CHECKLIST_TARGETS,
     bounded_console_output,
     build_regression_command,
     browser_key,
+    claim_regression_queue_configs,
     create_regression_queue_run,
     current_regression_queue_config,
+    effective_checklist_path_for_page,
+    expand_regression_queue_configs,
     guided_checklist_path_for,
-    guided_checklist_target_labels,
     html_report_path,
     load_negative_profile_options,
     load_upload_case_options,
@@ -41,12 +43,13 @@ from src.gui_command_builder import (
     negative_profile_labels,
     page_option_labels,
     pause_regression_queue_run,
+    record_claimed_regression_queue_result,
     record_regression_queue_result,
     regression_output_dir,
     resume_regression_queue_run,
+    safe_page_key,
     upload_case_option_labels,
     upload_profile_config_path,
-    write_starter_guided_checklist,
 )
 
 
@@ -247,7 +250,10 @@ def collect_reg_card_state(index):
         "enabled": bool(st.session_state.get(f"reg_page_enabled_{index}", True)),
         "target_page": str(target_page or ""),
         "login_entry": st.session_state.get(f"reg_page_login_{index}", LOGIN_ENTRY_NAMES[0]),
-        "checklist_path": st.session_state.get(f"reg_page_checklist_{index}", DEFAULT_CHECKLIST_PATH),
+        "checklist_path": effective_checklist_path_for_page(
+            target_page,
+            st.session_state.get(f"reg_page_checklist_{index}", DEFAULT_CHECKLIST_PATH),
+        ),
         "route_map_path": st.session_state.get(f"reg_page_route_{index}", DEFAULT_ROUTE_MAP_PATH),
         "force_route_map": bool(st.session_state.get(f"reg_page_force_route_{index}", True)),
         "manual": bool(st.session_state.get(f"reg_page_manual_{index}", False)),
@@ -262,8 +268,11 @@ def collect_reg_card_state(index):
 
 def collect_reg_queue_state():
     count = int(st.session_state.get("reg_page_card_count", 1) or 1)
+    browser_labels = current_reg_queue_browser_labels()
     return {
-        "browser_label": st.session_state.get("reg_queue_browser", list(BROWSER_OPTIONS.keys())[0]),
+        "browser_label": browser_labels[0],
+        "browser_labels": browser_labels,
+        "max_parallel": max(1, int(st.session_state.get("reg_queue_max_parallel", 1) or 1)),
         "card_count": count,
         "cards": [collect_reg_card_state(index) for index in range(1, count + 1)],
     }
@@ -280,7 +289,10 @@ def apply_reg_card_state(index, card):
     _set_state(f"reg_page_target_value_{index}", target_page)
     _set_state(f"reg_page_target_{index}", _page_option_label_for(target_page))
     _set_state(f"reg_page_login_{index}", card.get("login_entry") or LOGIN_ENTRY_NAMES[0])
-    _set_state(f"reg_page_checklist_{index}", card.get("checklist_path") or DEFAULT_CHECKLIST_PATH)
+    _set_state(
+        f"reg_page_checklist_{index}",
+        effective_checklist_path_for_page(target_page, card.get("checklist_path")),
+    )
     _set_state(f"reg_page_route_{index}", card.get("route_map_path") or DEFAULT_ROUTE_MAP_PATH)
     _set_state(f"reg_page_force_route_{index}", bool(card.get("force_route_map", True)))
     _set_state(f"reg_page_manual_{index}", bool(card.get("manual", False)))
@@ -302,8 +314,16 @@ def apply_reg_queue_state(record):
     current_count = int(st.session_state.get("reg_page_card_count", 1) or 1)
     for index in range(1, max(current_count, next_count) + 1):
         clear_reg_page_card_state(index)
-    browser_label = queue.get("browser_label") if queue.get("browser_label") in BROWSER_OPTIONS else list(BROWSER_OPTIONS.keys())[0]
-    _set_state("reg_queue_browser", browser_label)
+    browser_labels = normalize_browser_labels(
+        queue.get("browser_labels") or [queue.get("browser_label")]
+    )
+    st.session_state["reg_queue_browser_count"] = len(browser_labels)
+    for index in range(1, len(BROWSER_OPTIONS) + 1):
+        st.session_state.pop(f"reg_queue_browser_slot_{index}", None)
+    for index, browser_label in enumerate(browser_labels, start=1):
+        st.session_state[f"reg_queue_browser_slot_{index}"] = browser_label
+    _set_state("reg_queue_browser", browser_labels[0])
+    _set_state("reg_queue_max_parallel", max(1, int(queue.get("max_parallel", 1) or 1)))
     st.session_state["reg_page_card_count"] = next_count
     st.session_state["reg_focus_card_index"] = 1
     for index, card in enumerate(cards or [{}], start=1):
@@ -341,8 +361,13 @@ def reg_queue_record_labels(records):
     for record in records:
         queue = record.get("queue") or {}
         cards = queue.get("cards") or []
+        browsers = normalize_browser_labels(queue.get("browser_labels") or [queue.get("browser_label")])
+        parallel = max(1, int(queue.get("max_parallel", 1) or 1))
         name = record.get("name") or record.get("id") or "record"
-        labels.append(f"{record.get('id')}    {name} / {len(cards)} page(s) / {record.get('saved_at', '-')}")
+        labels.append(
+            f"{record.get('id')}    {name} / {' → '.join(browsers)} / "
+            f"{len(cards)} page(s) / parallel={parallel} / {record.get('saved_at', '-')}"
+        )
     return labels
 
 
@@ -352,6 +377,30 @@ BROWSER_OPTIONS = {
     "Microsoft Edge": "edge",
     "Firefox": "firefox",
 }
+
+
+def normalize_browser_labels(labels):
+    normalized = []
+    for label in labels or []:
+        text = str(label or "").strip()
+        if text in BROWSER_OPTIONS and text not in normalized:
+            normalized.append(text)
+    if not normalized:
+        legacy_label = st.session_state.get("reg_queue_browser")
+        if legacy_label in BROWSER_OPTIONS:
+            normalized.append(legacy_label)
+    return normalized or [list(BROWSER_OPTIONS.keys())[0]]
+
+
+def current_reg_queue_browser_labels():
+    count = int(st.session_state.get("reg_queue_browser_count", 1) or 1)
+    labels = [
+        st.session_state.get(f"reg_queue_browser_slot_{index}")
+        for index in range(1, count + 1)
+    ]
+    return normalize_browser_labels(labels)
+
+
 PYTHON_CMD = quote(venv_executable("python"))
 PYTEST_CMD = quote(venv_executable("pytest"))
 REPORT_PATHS = (
@@ -360,6 +409,53 @@ REPORT_PATHS = (
     Path("output/gui_report.html"),
 )
 IMG_SRC_RE = re.compile(r'(<img\b[^>]*\bsrc=)(["\'])(.*?)(\2)', re.IGNORECASE)
+REPORT_PREVIEW_ANCHOR_SCRIPT_MARKER = "moonlight-report-preview-anchor-scroll"
+REPORT_PREVIEW_ANCHOR_SCRIPT = f"""
+<script id="{REPORT_PREVIEW_ANCHOR_SCRIPT_MARKER}">
+(function () {{
+  if (window.__moonlightReportPreviewAnchorScroll) {{
+    return;
+  }}
+  window.__moonlightReportPreviewAnchorScroll = true;
+
+  document.addEventListener("click", function (event) {{
+    var clickTarget = event.target && event.target.nodeType === 1
+      ? event.target
+      : event.target && event.target.parentElement;
+    var link = clickTarget && clickTarget.closest ? clickTarget.closest("a[href]") : null;
+    if (!link) {{
+      return;
+    }}
+
+    var href = link.getAttribute("href") || "";
+    if (href.charAt(0) !== "#") {{
+      return;
+    }}
+
+    event.preventDefault();
+    event.stopPropagation();
+
+    if (href.length <= 1) {{
+      return;
+    }}
+
+    var targetId = href.slice(1);
+    try {{
+      targetId = decodeURIComponent(targetId);
+    }} catch (error) {{
+      // Keep the raw hash when it is not URI-encoded.
+    }}
+
+    var target = document.getElementById(targetId);
+    if (!target) {{
+      return;
+    }}
+
+    target.scrollIntoView({{ block: "start", behavior: "smooth" }});
+  }}, true);
+}})();
+</script>
+"""
 PAGE_OPTIONS = load_page_options()
 PAGE_OPTION_LABELS = page_option_labels(PAGE_OPTIONS)
 
@@ -430,7 +526,21 @@ def portable_report_html(report_path):
 
         return f"{prefix}{quote_char}{html.escape(data_uri, quote=True)}{quote_char}"
 
-    return IMG_SRC_RE.sub(replace_src, source)
+    portable_html = IMG_SRC_RE.sub(replace_src, source)
+    return _inject_report_preview_anchor_script(portable_html)
+
+
+def _inject_report_preview_anchor_script(source):
+    if REPORT_PREVIEW_ANCHOR_SCRIPT_MARKER in source:
+        return source
+    body_close = re.search(r"</body\s*>", source, re.IGNORECASE)
+    if not body_close:
+        return source + REPORT_PREVIEW_ANCHOR_SCRIPT
+    return (
+        source[: body_close.start()]
+        + REPORT_PREVIEW_ANCHOR_SCRIPT
+        + source[body_close.start() :]
+    )
 
 
 def portable_report_bytes(report_path):
@@ -824,95 +934,84 @@ with tabs[0]:
         render_report_links(current_report, key_prefix="latest")
 
     st.markdown("### Page Cards")
-    queue_browser_label = st.selectbox(
-        "Browser for all page cards",
-        list(BROWSER_OPTIONS.keys()),
-        index=0,
-        key="reg_queue_browser",
+    st.markdown("#### Browser Run Order")
+    if "reg_queue_browser_count" not in st.session_state:
+        st.session_state["reg_queue_browser_count"] = 1
+    if "reg_queue_browser_slot_1" not in st.session_state:
+        st.session_state["reg_queue_browser_slot_1"] = st.session_state.get(
+            "reg_queue_browser",
+            list(BROWSER_OPTIONS.keys())[0],
+        )
+    browser_ctrl_col1, browser_ctrl_col2, browser_ctrl_col3 = st.columns([1, 1, 4])
+    with browser_ctrl_col1:
+        if st.button(
+            "＋ Add Browser",
+            key="reg_add_browser_slot",
+            disabled=int(st.session_state.get("reg_queue_browser_count", 1) or 1) >= len(BROWSER_OPTIONS),
+        ):
+            st.session_state["reg_queue_browser_count"] = min(
+                len(BROWSER_OPTIONS),
+                int(st.session_state.get("reg_queue_browser_count", 1) or 1) + 1,
+            )
+            st.rerun()
+    with browser_ctrl_col2:
+        if st.button(
+            "－ Remove Browser",
+            key="reg_remove_browser_slot",
+            disabled=int(st.session_state.get("reg_queue_browser_count", 1) or 1) <= 1,
+        ):
+            next_count = max(1, int(st.session_state.get("reg_queue_browser_count", 1) or 1) - 1)
+            st.session_state.pop(f"reg_queue_browser_slot_{next_count + 1}", None)
+            st.session_state["reg_queue_browser_count"] = next_count
+            st.rerun()
+
+    selected_browser_labels = []
+    used_browser_labels = set()
+    browser_count = int(st.session_state.get("reg_queue_browser_count", 1) or 1)
+    browser_cols = st.columns(max(1, browser_count))
+    for browser_index in range(1, browser_count + 1):
+        key = f"reg_queue_browser_slot_{browser_index}"
+        available_labels = [label for label in BROWSER_OPTIONS if label not in used_browser_labels]
+        current_label = st.session_state.get(key)
+        if (
+            current_label in BROWSER_OPTIONS
+            and current_label not in used_browser_labels
+            and current_label not in available_labels
+        ):
+            available_labels.insert(0, current_label)
+        if not available_labels:
+            continue
+        if current_label not in available_labels:
+            current_label = available_labels[0]
+        with browser_cols[browser_index - 1]:
+            browser_label = st.selectbox(
+                f"Browser {browser_index}",
+                available_labels,
+                index=available_labels.index(current_label),
+                key=key,
+            )
+        selected_browser_labels.append(browser_label)
+        used_browser_labels.add(browser_label)
+    queue_browser_labels = normalize_browser_labels(selected_browser_labels)
+    queue_browsers = [BROWSER_OPTIONS[label] for label in queue_browser_labels]
+    with browser_ctrl_col3:
+        st.caption("Run order: " + " → ".join(queue_browser_labels))
+    max_parallel = int(
+        st.number_input(
+            "Max Parallel",
+            min_value=1,
+            max_value=6,
+            value=max(1, int(st.session_state.get("reg_queue_max_parallel", 1) or 1)),
+            step=1,
+            key="reg_queue_max_parallel",
+            help="1 keeps the existing serial behavior. Values above 1 run independent page jobs in parallel.",
+        )
     )
-    queue_browser = BROWSER_OPTIONS[queue_browser_label]
 
     if "reg_page_card_count" not in st.session_state:
         st.session_state["reg_page_card_count"] = 1
     if "reg_focus_card_index" not in st.session_state:
         st.session_state["reg_focus_card_index"] = 1
-
-    st.markdown("#### Guided Checklist JSON")
-    guided_labels = guided_checklist_target_labels()
-    guided_col1, guided_col2 = st.columns([2, 3])
-    with guided_col1:
-        guided_target_label = st.selectbox(
-            "Guided target",
-            guided_labels,
-            index=0,
-            key="guided_checklist_target",
-        )
-        guided_target_page = selected_page_from_label(guided_target_label)
-        guided_default_path = guided_checklist_path_for(guided_target_page)
-        guided_path_key = f"guided_checklist_path_{route_file_stem(guided_target_page)}"
-        guided_path = st.text_input(
-            "Guided JSON Path",
-            value=str(guided_default_path or ""),
-            key=guided_path_key,
-        )
-        overwrite_guided = st.checkbox("Overwrite existing starter JSON", value=False, key="guided_checklist_overwrite")
-    with guided_col2:
-        if st.session_state.get("guided_checklist_status"):
-            st.success(st.session_state.pop("guided_checklist_status"))
-        target_meta = next(
-            (
-                item
-                for item in GUIDED_CHECKLIST_TARGETS
-                if item.get("page_id") == guided_target_page
-            ),
-            {},
-        )
-        st.caption(
-            " / ".join(
-                item
-                for item in [
-                    target_meta.get("label"),
-                    f"actual JSP: {target_meta.get('actual_page_id')}" if target_meta.get("actual_page_id") else "",
-                    f"template: {target_meta.get('template_id')}" if target_meta.get("template_id") else "",
-                    "direct URL: no" if target_meta.get("direct_url_allowed") is False else "",
-                ]
-                if item
-            )
-        )
-        st.caption(
-            "Use this when you manually drive the browser to the target page, then run a guided JSON checklist instead of the old Excel generator."
-        )
-        g_btn1, g_btn2 = st.columns(2)
-        with g_btn1:
-            if st.button("Create Starter JSON", key="guided_create_starter_json"):
-                if not guided_target_page or not guided_path.strip():
-                    st.error("Guided target and path are required.")
-                else:
-                    try:
-                        output = write_starter_guided_checklist(
-                            guided_path,
-                            guided_target_page,
-                            overwrite=overwrite_guided,
-                        )
-                        st.session_state["guided_checklist_status"] = f"Created: {output}"
-                        st.rerun()
-                    except FileExistsError:
-                        st.warning("Starter JSON already exists. Enable overwrite if you want to replace it.")
-        with g_btn2:
-            if st.button("Use On Page Card 1", key="guided_apply_card_1"):
-                if not guided_target_page or not guided_path.strip():
-                    st.error("Guided target and path are required.")
-                else:
-                    st.session_state["reg_page_card_count"] = max(
-                        1,
-                        int(st.session_state.get("reg_page_card_count", 1) or 1),
-                    )
-                    st.session_state["reg_focus_card_index"] = 1
-                    st.session_state["reg_page_target_value_1"] = guided_target_page
-                    st.session_state["reg_page_target_1"] = _page_option_label_for(guided_target_page)
-                    st.session_state["reg_page_checklist_1"] = guided_path
-                    st.session_state["guided_checklist_status"] = f"Applied guided JSON to card 1: {guided_target_page}"
-                    st.rerun()
 
     st.markdown("#### Queue Records")
     if st.session_state.get("reg_queue_record_status"):
@@ -951,9 +1050,11 @@ with tabs[0]:
     if selected_record_id in record_by_id:
         selected_record = record_by_id[selected_record_id]
         q = selected_record.get("queue") or {}
+        record_browser_labels = normalize_browser_labels(q.get("browser_labels") or [q.get("browser_label")])
+        record_parallel = max(1, int(q.get("max_parallel", 1) or 1))
         st.caption(
-            f"Selected: {selected_record.get('name')} / browser={q.get('browser_label', '-')} / "
-            f"cards={len(q.get('cards') or [])} / saved_at={selected_record.get('saved_at', '-')}"
+            f"Selected: {selected_record.get('name')} / browsers={' → '.join(record_browser_labels)} / "
+            f"cards={len(q.get('cards') or [])} / parallel={record_parallel} / saved_at={selected_record.get('saved_at', '-')}"
         )
         st.caption("记录会保存所有卡片配置和上传 case 选择；上传文件本体需要在运行前重新选择。")
         if st.button("Delete Selected Record", key="reg_queue_delete"):
@@ -1029,6 +1130,12 @@ with tabs[0]:
                 checklist_key = f"reg_page_checklist_{index}"
                 suggested_guided_path = guided_checklist_path_for(target_page)
                 if suggested_guided_path:
+                    effective_checklist_path = effective_checklist_path_for_page(
+                        target_page,
+                        st.session_state.get(checklist_key, DEFAULT_CHECKLIST_PATH),
+                    )
+                    if effective_checklist_path != st.session_state.get(checklist_key):
+                        st.session_state[checklist_key] = effective_checklist_path
                     if st.button("Use Guided JSON", key=f"reg_page_use_guided_{index}"):
                         st.session_state[checklist_key] = str(suggested_guided_path)
                         st.rerun()
@@ -1130,12 +1237,12 @@ with tabs[0]:
                     }
                 )
 
-            browser = queue_browser
+            primary_browser = queue_browsers[0]
             page_config = {
                 "index": index,
                 "enabled": enabled,
                 "target_page": target_page,
-                "browser": browser,
+                "browser": primary_browser,
                 "login_entry": login_entry,
                 "checklist_path": checklist_path,
                 "route_map_path": route_map_path,
@@ -1147,16 +1254,21 @@ with tabs[0]:
                 "include_negative": include_negative,
                 "negative_profile": negative_profile,
                 "upload_profiles_raw": upload_profiles,
-                "html_path": html_report_path(browser, target_page),
-                "regression_output_dir": regression_output_dir(browser),
+                "html_path": html_report_path(primary_browser, target_page),
+                "regression_output_dir": regression_output_dir(primary_browser),
             }
             preview_config = dict(page_config)
-            if any(profile.get("uploaded_file") for profile in upload_profiles):
-                preview_config["upload_profile_config"] = upload_profile_config_path(browser, target_page)
             if target_page:
                 try:
-                    preview_cmd = build_regression_command(preview_config, pytest_cmd=PYTEST_CMD)
-                    st.code(preview_cmd)
+                    preview_commands = []
+                    for browser_config in expand_regression_queue_configs([preview_config], queue_browsers):
+                        if any(profile.get("uploaded_file") for profile in upload_profiles):
+                            browser_config["upload_profile_config"] = upload_profile_config_path(
+                                browser_config["browser"],
+                                target_page,
+                            )
+                        preview_commands.append(build_regression_command(browser_config, pytest_cmd=PYTEST_CMD))
+                    st.code("\n".join(preview_commands))
                 except ValueError as exc:
                     st.warning(str(exc))
             else:
@@ -1165,10 +1277,17 @@ with tabs[0]:
 
     enabled_configs = [item for item in page_configs if item.get("enabled") and item.get("target_page")]
     if enabled_configs:
-        st.caption(f"Ready: {len(enabled_configs)} page(s)")
+        st.caption(
+            f"Ready: {len(enabled_configs)} page(s) × {len(queue_browsers)} browser(s) = "
+            f"{len(enabled_configs) * len(queue_browsers)} queued run(s), max parallel={max_parallel}"
+        )
 
     def prepare_queue_runtime_config(page_config):
         runtime_config = dict(page_config)
+        runtime_config["checklist_path"] = effective_checklist_path_for_page(
+            runtime_config.get("target_page"),
+            runtime_config.get("checklist_path"),
+        )
         upload_profiles = []
         for profile in page_config.get("upload_profiles_raw") or []:
             uploaded_file = profile.get("uploaded_file")
@@ -1195,12 +1314,195 @@ with tabs[0]:
         report_path = Path(runtime_config["html_path"])
         return {
             "target_page": runtime_config["target_page"],
+            "browser": runtime_config.get("browser"),
+            "browser_label": runtime_config.get("browser_label"),
             "return_code": code,
             "report_path": str(report_path) if report_path.exists() else None,
         }
 
+    def _queue_processes():
+        return st.session_state.setdefault("reg_queue_processes", {})
+
+    def _drain_queue_process_output(job):
+        output_queue = job.get("queue")
+        if output_queue is None:
+            return
+        while True:
+            try:
+                chunk = output_queue.get_nowait()
+            except queue.Empty:
+                break
+            if chunk is None:
+                job["closed"] = True
+                continue
+            job["output"] = (str(job.get("output") or "") + chunk)[-80000:]
+
+    def _parallel_download_dir(queue_run, runtime_config, worker_slot):
+        run_id = str(queue_run.get("run_id") or "run")
+        base_dir = Path(os.environ.get("DOWNLOAD_DIR") or Config.DOWNLOAD_DIR).expanduser()
+        page_dir = safe_page_key(runtime_config.get("target_page") or "page")
+        download_dir = (
+            base_dir
+            / f"regression_{run_id}"
+            / f"worker_{int(worker_slot):02d}"
+            / page_dir
+        )
+        download_dir.mkdir(parents=True, exist_ok=True)
+        return download_dir
+
+    def _parallel_user_data_dir(queue_run, worker_slot):
+        run_id = str(queue_run.get("run_id") or "run")
+        user_data_dir = Path(Config.USER_DATA_DIR).expanduser() / f"regression_{run_id}" / f"worker_{int(worker_slot):02d}"
+        user_data_dir.mkdir(parents=True, exist_ok=True)
+        return user_data_dir
+
+    def _available_worker_slot(processes, parallel_limit):
+        used_slots = {
+            int(job.get("worker_slot"))
+            for job in processes.values()
+            if str(job.get("worker_slot") or "").isdigit()
+        }
+        for slot in range(1, max(1, int(parallel_limit or 1)) + 1):
+            if slot not in used_slots:
+                return slot
+        return None
+
+    def _start_parallel_queue_process(queue_run, runtime_config, worker_slot):
+        full_cmd = build_regression_command(runtime_config, pytest_cmd=PYTEST_CMD)
+        env = os.environ.copy()
+        env["PYTHONUNBUFFERED"] = "1"
+        env["PYTHONIOENCODING"] = "utf-8"
+        download_dir = _parallel_download_dir(queue_run, runtime_config, worker_slot)
+        user_data_dir = _parallel_user_data_dir(queue_run, worker_slot)
+        env["DOWNLOAD_DIR"] = str(download_dir)
+        env["USER_DATA_DIR"] = str(user_data_dir)
+
+        output_queue = queue.Queue()
+        process = subprocess.Popen(
+            full_cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            shell=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            bufsize=1,
+            env=env,
+        )
+        thread = threading.Thread(target=_reader_thread, args=(process, output_queue), daemon=True)
+        thread.start()
+        queue_index = int(runtime_config.get("queue_index", 0) or 0)
+        job_id = f"{queue_run.get('run_id') or 'queue'}_{queue_index:04d}_{worker_slot}"
+        return job_id, {
+            "job_id": job_id,
+            "cmd": full_cmd,
+            "config": dict(runtime_config),
+            "queue_index": queue_index,
+            "worker_slot": worker_slot,
+            "process": process,
+            "queue": output_queue,
+            "thread": thread,
+            "output": "",
+            "closed": False,
+            "download_dir": str(download_dir),
+            "user_data_dir": str(user_data_dir),
+            "started_at": time.time(),
+        }
+
+    def _result_from_parallel_job(job, return_code):
+        runtime_config = dict(job.get("config") or {})
+        report_path = Path(runtime_config.get("html_path") or "")
+        return {
+            "target_page": runtime_config.get("target_page"),
+            "browser": runtime_config.get("browser"),
+            "browser_label": runtime_config.get("browser_label"),
+            "queue_index": job.get("queue_index"),
+            "worker_slot": job.get("worker_slot"),
+            "return_code": return_code,
+            "report_path": str(report_path) if report_path.exists() else None,
+            "download_dir": job.get("download_dir"),
+            "output_tail": bounded_console_output(job.get("output"), max_chars=12000),
+        }
+
+    def stop_parallel_queue_processes():
+        processes = _queue_processes()
+        for job in list(processes.values()):
+            process = job.get("process")
+            if process and process.poll() is None:
+                try:
+                    process.terminate()
+                except Exception:
+                    pass
+        st.session_state["reg_queue_processes"] = {}
+
+    def process_parallel_queue(queue_run):
+        processes = _queue_processes()
+        completed_results = []
+        for job_id, job in list(processes.items()):
+            _drain_queue_process_output(job)
+            process = job.get("process")
+            if process is None:
+                continue
+            return_code = process.poll()
+            if return_code is None:
+                continue
+            _drain_queue_process_output(job)
+            completed_results.append(_result_from_parallel_job(job, return_code))
+            processes.pop(job_id, None)
+
+        for result in completed_results:
+            queue_run = record_claimed_regression_queue_result(queue_run, result)
+
+        if queue_run.get("status") == "running":
+            parallel_limit = max(1, int(queue_run.get("max_parallel", 1) or 1))
+            capacity = max(0, parallel_limit - len(processes))
+            queue_run, claimed_configs = claim_regression_queue_configs(queue_run, capacity)
+            for claimed_config in claimed_configs:
+                worker_slot = _available_worker_slot(processes, parallel_limit)
+                if worker_slot is None:
+                    break
+                try:
+                    job_id, job = _start_parallel_queue_process(queue_run, claimed_config, worker_slot)
+                    processes[job_id] = job
+                except Exception as exc:
+                    queue_run = record_claimed_regression_queue_result(
+                        queue_run,
+                        {
+                            "target_page": claimed_config.get("target_page"),
+                            "browser": claimed_config.get("browser"),
+                            "browser_label": claimed_config.get("browser_label"),
+                            "queue_index": claimed_config.get("queue_index"),
+                            "worker_slot": worker_slot,
+                            "return_code": None,
+                            "error": str(exc),
+                        },
+                    )
+
+        st.session_state["reg_queue_processes"] = processes
+        st.session_state["reg_queue_runtime"] = queue_run
+        return queue_run
+
+    def render_parallel_queue_jobs():
+        processes = _queue_processes()
+        if not processes:
+            return
+        st.info(f"Running {len(processes)} parallel page job(s).")
+        for job in sorted(processes.values(), key=lambda item: int(item.get("queue_index", 0) or 0)):
+            config = job.get("config") or {}
+            title = (
+                f"worker {job.get('worker_slot')} / "
+                f"{config.get('browser_label') or config.get('browser')} / "
+                f"{config.get('target_page')}"
+            )
+            with st.expander(title, expanded=False):
+                st.caption(f"Download dir: {job.get('download_dir')}")
+                st.code(bounded_console_output(job.get("output"), max_chars=12000))
+
     def render_queue_results(queue_run):
-        queue_results = list(queue_run.get("results") or [])
+        queue_results = sorted(
+            list(queue_run.get("results") or []),
+            key=lambda item: int(item.get("queue_index", len(queue_run.get("configs") or [])) or 0),
+        )
         completed_reports = [Path(item["report_path"]) for item in queue_results if item.get("report_path")]
         failed_pages = [item for item in queue_results if item.get("return_code") != 0]
         if completed_reports:
@@ -1215,7 +1517,8 @@ with tabs[0]:
         elif failed_pages:
             for item in failed_pages:
                 detail = f"exit={item['return_code']}" if item.get("return_code") is not None else item.get("error") or "unknown error"
-                st.error(f"Regression failed for {item.get('target_page')} ({detail}). Queue continued.")
+                browser_detail = item.get("browser_label") or item.get("browser") or "-"
+                st.error(f"Regression failed for {item.get('target_page')} / {browser_detail} ({detail}). Queue continued.")
             st.warning(f"Regression Queue Complete with {len(failed_pages)} failed page(s).")
         else:
             st.success("Regression Queue Complete.")
@@ -1224,17 +1527,24 @@ with tabs[0]:
         if not enabled_configs:
             st.error("Please add at least one enabled target page.")
             st.stop()
+        expanded_configs = expand_regression_queue_configs(enabled_configs, queue_browsers)
+        browser_label_by_name = {value: label for label, value in BROWSER_OPTIONS.items()}
+        for config in expanded_configs:
+            config["browser_label"] = browser_label_by_name.get(config.get("browser"), config.get("browser"))
         st.session_state["reg_queue_runtime"] = create_regression_queue_run(
-            prepare_queue_runtime_config(page_config)
-            for page_config in enabled_configs
+            (prepare_queue_runtime_config(page_config) for page_config in expanded_configs),
+            max_parallel=max_parallel,
+            run_id=datetime.now().strftime("%Y%m%d%H%M%S") + "_" + uuid.uuid4().hex[:8],
         )
+        st.session_state["reg_queue_processes"] = {}
         st.rerun()
 
     queue_run = st.session_state.get("reg_queue_runtime")
     if queue_run:
         queue_control_col1, queue_control_col2, queue_control_col3 = st.columns([1, 1, 4])
         with queue_control_col1:
-            if st.button("Stop Queue", key="reg_queue_stop", disabled=queue_run.get("status") != "running"):
+            if st.button("Stop Queue", key="reg_queue_stop", disabled=queue_run.get("status") not in {"running", "paused"}):
+                stop_parallel_queue_processes()
                 queue_run["status"] = "stopped"
                 st.session_state["reg_queue_runtime"] = queue_run
                 st.rerun()
@@ -1244,20 +1554,38 @@ with tabs[0]:
                 st.rerun()
         with queue_control_col3:
             render_queue_results(queue_run)
+            render_parallel_queue_jobs()
 
         queue_run = st.session_state.get("reg_queue_runtime", queue_run)
-        runtime_config = current_regression_queue_config(queue_run)
-        if runtime_config:
-            try:
-                queue_result = run_queue_page(runtime_config)
-            except Exception as exc:
-                queue_result = {
-                    "target_page": runtime_config.get("target_page"),
-                    "return_code": None,
-                    "error": str(exc),
-                }
-            st.session_state["reg_queue_runtime"] = record_regression_queue_result(queue_run, queue_result)
-            st.rerun()
+        queue_max_parallel = max(1, int(queue_run.get("max_parallel", 1) or 1))
+        if queue_max_parallel > 1 and queue_run.get("status") in {"running", "paused"}:
+            before_result_count = len(queue_run.get("results") or [])
+            before_status = queue_run.get("status")
+            queue_run = process_parallel_queue(queue_run)
+            after_result_count = len(queue_run.get("results") or [])
+            if after_result_count != before_result_count or queue_run.get("status") != before_status:
+                st.rerun()
+            if queue_run.get("status") in {"running", "paused"} and _queue_processes():
+                time.sleep(1)
+                st.rerun()
+            if queue_run.get("status") == "running" and current_regression_queue_config(queue_run):
+                time.sleep(1)
+                st.rerun()
+        elif queue_max_parallel <= 1:
+            runtime_config = current_regression_queue_config(queue_run)
+            if runtime_config:
+                try:
+                    queue_result = run_queue_page(runtime_config)
+                except Exception as exc:
+                    queue_result = {
+                        "target_page": runtime_config.get("target_page"),
+                        "return_code": None,
+                        "error": str(exc),
+                    }
+                st.session_state["reg_queue_runtime"] = record_regression_queue_result(queue_run, queue_result)
+                st.rerun()
+        elif queue_run.get("status") == "stopped":
+            stop_parallel_queue_processes()
 
 # --- TAB: Route Mapping ---
 with tabs[1]:
