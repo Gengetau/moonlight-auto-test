@@ -13,7 +13,7 @@ from urllib.parse import parse_qsl, unquote, urlencode, urlparse, urlunparse
 from PIL import Image, ImageDraw, ImageFont, ImageGrab
 
 from src.assert_engine import compare_visual_screenshot
-from src.browser_window import capture_window_metrics
+from src.browser_window import capture_window_metrics, restore_popup_window_state
 from src.config_parser import Config
 from src.page_aliases import page_aliases
 
@@ -1059,6 +1059,27 @@ def _inject_negative_visual_evidence(
     return evidence or [{"injected": False, "reason": "no frames"}]
 
 
+def _clear_negative_visual_evidence(page: Page) -> None:
+    if _page_is_closed(page):
+        return
+    script = """
+    () => {
+      const panel = document.getElementById('moonlight-negative-visual-evidence');
+      if (panel) panel.remove();
+      if (document.body) {
+        document.body.removeAttribute('data-moonlight-negative-state');
+        document.body.style.outline = '';
+        document.body.style.outlineOffset = '';
+      }
+    }
+    """
+    for frame in page.frames:
+        try:
+            frame.evaluate(script)
+        except PlaywrightError:
+            pass
+
+
 def _page_is_closed(page: Page) -> bool:
     try:
         return page.is_closed()
@@ -1547,7 +1568,7 @@ def infer_semantic_action(action_type: Optional[str], context: Optional[Dict[str
         if key in {"manual_assert", "manual_review"}:
             return _infer_manual_assert_action(context)
         alias = ACTION_ALIASES.get(key)
-        if alias:
+        if alias and alias not in {"click", "navigate"}:
             return alias
 
     if "set_value" in raw or "setvalue" in raw or "hidden" in raw:
@@ -1604,13 +1625,15 @@ def _wait_for_semantic_ready(page: Page, timeout: int = 10000) -> Dict[str, Any]
     wait_state: Dict[str, Any] = {
         "networkidle": False,
         "domcontentloaded": False,
-        "settle_timeout_ms": 2000,
+        "settle_timeout_ms": 0,
         "body_visible": False,
         "business_elements": 0,
+        "semantic_stable": False,
     }
     if _page_is_closed(page):
         wait_state["page_closed"] = True
         return wait_state
+    wait_state["popup_window_restore"] = restore_popup_window_state(page)
     # 针对旧系统，优先使用 domcontentloaded
     try:
         page.wait_for_load_state("domcontentloaded", timeout=timeout)
@@ -1619,22 +1642,13 @@ def _wait_for_semantic_ready(page: Page, timeout: int = 10000) -> Dict[str, Any]
         wait_state["domcontentloaded_error"] = str(exc)
 
     try:
-        page.wait_for_load_state("networkidle", timeout=min(timeout, 5000))
+        page.wait_for_load_state("networkidle", timeout=min(timeout, 1500))
         wait_state["networkidle"] = True
     except (PlaywrightTimeoutError, PlaywrightError):
         # networkidle 对于旧系统经常超时，不作为硬性阻塞
         pass
 
-    # 强制 settle 时间，给旧系统 JS 渲染留白
-    try:
-        page.wait_for_timeout(2000)
-    except PlaywrightError as exc:
-        if _is_target_closed_error(exc) or _page_is_closed(page):
-            wait_state["page_closed"] = True
-            wait_state["settle_error"] = str(exc)
-            return wait_state
-        raise
-
+    # Use stable business content instead of a fixed sleep before screenshots.
     target, diagnostics = _find_business_frame(page, timeout=min(timeout, 3000))
     wait_state["target_frame"] = _frame_identity(target)
     wait_state["frame_candidates"] = diagnostics[:8]
@@ -1653,6 +1667,115 @@ def _wait_for_semantic_ready(page: Page, timeout: int = 10000) -> Dict[str, Any]
         wait_state["business_elements"] = target.locator("form, table, input, select, textarea, button, a").count()
     except PlaywrightError as exc:
         wait_state["business_elements_error"] = str(exc)
+
+    stable_samples = 0
+    previous_signature: Optional[str] = None
+    deadline = time.monotonic() + max(1.0, timeout / 1000)
+    while time.monotonic() < deadline and not _page_is_closed(page):
+        try:
+            semantic_state = target.evaluate(
+                """() => {
+                    const visible = (element) => {
+                        if (!(element instanceof Element)) return false;
+                        const style = getComputedStyle(element);
+                        if (style.display === "none" || style.visibility === "hidden" || Number(style.opacity) === 0) {
+                            return false;
+                        }
+                        const rect = element.getBoundingClientRect();
+                        return rect.width > 8 && rect.height > 8;
+                    };
+                    const loadingSelectors = [
+                        '[aria-busy="true"]',
+                        '.blockUI',
+                        '[class*="spinner" i]',
+                        '[class*="loading" i]',
+                        '[class*="loader" i]',
+                        '[id*="spinner" i]',
+                        '[id*="loading" i]',
+                        '[id*="loader" i]'
+                    ];
+                    const loading = Array.from(document.querySelectorAll(loadingSelectors.join(",")))
+                        .filter(visible)
+                        .slice(0, 20)
+                        .map((element) => element.id || element.className || element.tagName);
+                    const bodyText = (document.body?.innerText || "").replace(/\\s+/g, " ").trim();
+                    const businessElements = document.querySelectorAll(
+                        "form, table, input, select, textarea, button, a"
+                    ).length;
+                    const loadCounter = document.querySelector("#LoadCounter");
+                    const screeningPage = Boolean(loadCounter && document.querySelector("#btBunkenIchiran"));
+                    const selectedLoadedDocument = Boolean(
+                        document.querySelector(
+                            ".bunkenClicked.loaded, tr.loaded.bunkenselect, .loaded.bunkenselect"
+                        )
+                    );
+                    const contentTabCount = document.querySelectorAll('a[href^="#koumoku"]').length;
+                    const loadCounterValue = loadCounter ? String(loadCounter.value || "").trim() : "";
+                    const screeningReady = !screeningPage || (
+                        (loadCounterValue === "" || loadCounterValue === "0") &&
+                        selectedLoadedDocument &&
+                        contentTabCount >= 3 &&
+                        bodyText.length >= 500
+                    );
+                    const visiblePendingImages = Array.from(document.images)
+                        .filter((image) => visible(image) && !image.complete).length;
+                    return {
+                        ready: loading.length === 0 && screeningReady && (
+                            !screeningPage || visiblePendingImages === 0
+                        ),
+                        loading,
+                        screeningPage,
+                        screeningReady,
+                        loadCounterValue,
+                        selectedLoadedDocument,
+                        contentTabCount,
+                        visiblePendingImages,
+                        textLength: bodyText.length,
+                        businessElements,
+                        signature: [
+                            bodyText.length,
+                            businessElements,
+                            loading.length,
+                            loadCounterValue,
+                            selectedLoadedDocument,
+                            contentTabCount,
+                            visiblePendingImages
+                        ].join("|")
+                    };
+                }"""
+            )
+        except PlaywrightError as exc:
+            if _is_target_closed_error(exc) or _page_is_closed(page):
+                wait_state["page_closed"] = True
+                wait_state["semantic_error"] = str(exc)
+                return wait_state
+            wait_state["semantic_error"] = str(exc)
+            break
+
+        wait_state["semantic_state"] = semantic_state
+        signature = str(semantic_state.get("signature") or "")
+        if semantic_state.get("ready") and signature == previous_signature:
+            stable_samples += 1
+        elif semantic_state.get("ready"):
+            stable_samples = 1
+        else:
+            stable_samples = 0
+        previous_signature = signature
+        if stable_samples >= 2:
+            wait_state["semantic_stable"] = True
+            break
+        try:
+            page.wait_for_timeout(400)
+            wait_state["settle_timeout_ms"] += 400
+        except PlaywrightError as exc:
+            if _is_target_closed_error(exc) or _page_is_closed(page):
+                wait_state["page_closed"] = True
+                wait_state["settle_error"] = str(exc)
+                return wait_state
+            raise
+
+    if not wait_state["semantic_stable"]:
+        wait_state["semantic_timeout"] = True
 
     return wait_state
 
@@ -1953,6 +2076,14 @@ def _truthy_context_value(value: Any) -> bool:
     return str(value or "").strip().lower() in {"true", "1", "yes", "y", "on"}
 
 
+def _falsey_context_value(value: Any) -> bool:
+    if value is False:
+        return True
+    if value is None:
+        return False
+    return str(value).strip().lower() in {"false", "0", "no", "n", "off"}
+
+
 def _is_child_navigation_context(context: Optional[Dict[str, Any]]) -> bool:
     context = context or {}
     evidence = " ".join(
@@ -2185,6 +2316,22 @@ def _should_close_capture_page(capture_page: Page, action_page: Page, opener_pag
     return not keep_popup and capture_page is not action_page and capture_page is not opener_page
 
 
+def _should_close_opened_popup_page(
+    popup_page: Optional[Page],
+    action_page: Page,
+    opener_page: Optional[Page],
+    *,
+    keep_popup: bool,
+    close_after: Any = None,
+) -> bool:
+    """Close the popup explicitly opened by this action after evidence capture."""
+    if popup_page is None or keep_popup or _falsey_context_value(close_after):
+        return False
+    if popup_page is action_page or popup_page is opener_page:
+        return False
+    return not _page_is_closed(popup_page)
+
+
 def _state_capture_page_after_child_navigation(
     capture_page: Page,
     action_page: Page,
@@ -2222,6 +2369,19 @@ def _safe_frame_urls(page: Page) -> List[str]:
         return [str(frame.url or "") for frame in page.frames]
     except Exception:
         return []
+
+
+def _normalize_transition_url(url: Any) -> str:
+    value = str(url or "")
+    return value[:-1] if value.endswith("#") else value
+
+
+def _frame_urls_changed(before_urls: List[str], after_urls: List[str]) -> bool:
+    return [
+        _normalize_transition_url(url) for url in before_urls
+    ] != [
+        _normalize_transition_url(url) for url in after_urls
+    ]
 
 
 def _safe_context_pages(page: Page) -> List[Page]:
@@ -2304,10 +2464,13 @@ def execute_action(
     result["before_frame_urls"] = before_frame_urls
     console_events: List[Dict[str, Any]] = []
     download_filename_hints: List[str] = []
+    popup_page_to_close: Optional[Page] = None
     event_handlers: List[Tuple[str, Any]] = []
     page_event_handlers: List[Tuple[Any, str, Any]] = []
     context_event_handlers: List[Tuple[Any, str, Any]] = []
     temporary_routes: List[Tuple[str, Any]] = []
+    cleanup_frame: Optional[Frame] = None
+    cleanup_script = ""
     event_log_initialized = False
 
     def _record_event(event_type: str, details: Any, *, level: str = "info", url: str = "", status: Optional[int] = None):
@@ -2601,6 +2764,13 @@ def execute_action(
             # 增加元素可见性检查
             locator = frame.locator(selector).first
             action_dispatched = True
+            setup_script = str((action_context or {}).get("setup_script") or "").strip()
+            cleanup_script = str((action_context or {}).get("cleanup_script") or "").strip()
+            if setup_script:
+                frame.evaluate(setup_script)
+                result["setup_script_executed"] = True
+            if cleanup_script:
+                cleanup_frame = frame
 
             def _manual_click_fallback() -> None:
                 locator.wait_for(state="attached", timeout=timeout)
@@ -2641,16 +2811,25 @@ def execute_action(
                         popup = _first_new_context_page(page, popup_pages_before)
 
                     if popup is not None and not _page_is_closed(popup):
-                        try:
-                            popup.wait_for_load_state("domcontentloaded", timeout=min(timeout, 10000))
-                        except PlaywrightError as exc:
-                            result["popup_load_error"] = str(exc)
-                        capture_page = popup
+                        pdf_child_popup = _is_pdf_child_navigation_context(action_context)
+                        if pdf_child_popup:
+                            try:
+                                popup.wait_for_timeout(500)
+                            except PlaywrightError as exc:
+                                result["popup_load_error"] = str(exc)
+                            capture_page = page
+                        else:
+                            try:
+                                popup.wait_for_load_state("domcontentloaded", timeout=min(timeout, 10000))
+                            except PlaywrightError as exc:
+                                result["popup_load_error"] = str(exc)
+                            capture_page = popup
+                        popup_page_to_close = popup
                         result["popup_opened"] = True
                         result["popup_url"] = popup.url
                         result["popup_frame_urls"] = _safe_frame_urls(popup)
-                        if _is_pdf_child_navigation_context(action_context):
-                            result["popup_capture_mode"] = "parent_after_pdf_navigation"
+                        if pdf_child_popup:
+                            result["popup_capture_mode"] = "parent_after_pdf_child_navigation"
                         if keep_popup:
                             result["popup_page"] = popup
                 else:
@@ -3271,7 +3450,8 @@ def execute_action(
             result.update({"status": "BLOCKED", "reason": f"Unsupported semantic action: {semantic_action}"})
 
         if result["status"] == "PASS":
-            result["post_wait_state"] = _wait_for_semantic_ready(page, timeout=min(timeout, 8000))
+            ready_page = capture_page if not _page_is_closed(capture_page) else page
+            result["post_wait_state"] = _wait_for_semantic_ready(ready_page, timeout=min(timeout, 15000))
             if result["post_wait_state"].get("page_closed"):
                 result["page_closed_after_action"] = True
     except (PlaywrightTimeoutError, PlaywrightError, ValueError) as exc:
@@ -3287,6 +3467,12 @@ def execute_action(
         else:
             result.update({"status": "BLOCKED", "reason": str(exc)})
     finally:
+        if cleanup_frame is not None and cleanup_script:
+            try:
+                cleanup_frame.evaluate(cleanup_script)
+                result["cleanup_script_executed"] = True
+            except PlaywrightError as exc:
+                result["cleanup_script_error"] = str(exc)
         action_page_closed = bool(result.get("page_closed_after_action")) or _page_is_closed(capture_page)
         if action_page_closed and capture_page is page and opener_page is not None:
             capture_page = opener_page
@@ -3296,8 +3482,8 @@ def execute_action(
         after_frame_urls = _safe_frame_urls(capture_page)
         page_closed_after = action_page_closed or _page_is_closed(capture_page)
         popup_detected = bool(result.get("popup_opened"))
-        navigation_detected = before_url != after_url
-        frame_changed = before_frame_urls != after_frame_urls
+        navigation_detected = _normalize_transition_url(before_url) != _normalize_transition_url(after_url)
+        frame_changed = _frame_urls_changed(before_frame_urls, after_frame_urls)
         result.update(
             {
                 "after_url": after_url,
@@ -3343,11 +3529,29 @@ def execute_action(
                     Path(capture_dir),
                     name,
                 )
-            if _should_close_capture_page(capture_page, page, opener_page, keep_popup):
+            close_target = popup_page_to_close or capture_page
+            should_close_popup = _should_close_opened_popup_page(
+                popup_page_to_close,
+                page,
+                opener_page,
+                keep_popup=keep_popup,
+                close_after=(action_context or {}).get("close_after"),
+            )
+            should_close_capture = (
+                popup_page_to_close is None
+                and _should_close_capture_page(capture_page, page, opener_page, keep_popup)
+            )
+            result["popup_close_attempted"] = bool(should_close_popup or should_close_capture)
+            if should_close_popup or should_close_capture:
                 try:
-                    capture_page.close()
-                except PlaywrightError:
-                    pass
+                    close_target.close()
+                    result["popup_close_status"] = "PASS"
+                    result["popup_closed_after_capture"] = True
+                except PlaywrightError as exc:
+                    result["popup_close_status"] = "BLOCKED"
+                    result["popup_close_error"] = str(exc)
+        if result.get("semantic_action") in NEGATIVE_ACTIONS:
+            _clear_negative_visual_evidence(page)
         for event_name, handler in event_handlers:
             try:
                 page.remove_listener(event_name, handler)
@@ -3378,7 +3582,10 @@ def _capture_state(page: Page, output_dir: Path, name: str) -> Dict[str, Any]:
 
     output_dir.mkdir(parents=True, exist_ok=True)
     screenshot = output_dir / f"{name}.png"
-    state: Dict[str, Any] = {"screenshot": str(screenshot)}
+    state: Dict[str, Any] = {
+        "screenshot": str(screenshot),
+        "popup_window_restore": restore_popup_window_state(page),
+    }
     try:
         target_frame, diagnostics = _find_business_frame(page, timeout=3000)
     except PlaywrightError as exc:

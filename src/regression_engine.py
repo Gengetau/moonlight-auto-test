@@ -14,7 +14,7 @@ from urllib.parse import parse_qsl, urlencode, urlsplit, urljoin
 
 from playwright.sync_api import Page, Error as PlaywrightError, TimeoutError as PlaywrightTimeoutError
 
-from src.action_executor import _capture_state, execute_action, infer_semantic_action
+from src.action_executor import _capture_state, _wait_for_semantic_ready, execute_action, infer_semantic_action
 from src.assert_engine import compare_visual_screenshot
 from src.browser_print import install_print_suppression
 from src.config_parser import Config
@@ -1547,6 +1547,7 @@ class RegressionEngine:
                 "keep_popup": item.get("keep_popup"),
                 "close_after": item.get("close_after"),
                 "capture_opener_after_child": item.get("capture_opener_after_child"),
+                "database_operation": item.get("database_operation") or item.get("db_operation"),
                 "risk_level": risk_level,
                 "destructive": destructive_value,
                 "source": "guided_json_checklist",
@@ -2008,6 +2009,15 @@ class RegressionEngine:
         page_id = mapping.get("page_id") or "unknown"
         results: List[Dict[str, Any]] = []
 
+        initial_ready_timeout = min(max(self.timeout, 15000), 30000)
+        try:
+            legacy_ready = _wait_for_semantic_ready(legacy_page, timeout=initial_ready_timeout)
+        except Exception as exc:
+            legacy_ready = {"semantic_wait_error": str(exc)}
+        try:
+            new_ready = _wait_for_semantic_ready(new_page, timeout=initial_ready_timeout)
+        except Exception as exc:
+            new_ready = {"semantic_wait_error": str(exc)}
         legacy_state = _capture_state(legacy_page, page_dir, "00_legacy_initial")
         new_state = _capture_state(new_page, page_dir, "00_new_initial")
         self._write_full_test_log(
@@ -2019,6 +2029,8 @@ class RegressionEngine:
                 "new_nav": new_nav,
                 "legacy_state": self._state_debug_summary(legacy_state),
                 "new_state": self._state_debug_summary(new_state),
+                "legacy_ready": legacy_ready,
+                "new_ready": new_ready,
                 "legacy_page": self._page_debug_summary(legacy_page),
                 "new_page": self._page_debug_summary(new_page),
             },
@@ -2289,7 +2301,7 @@ class RegressionEngine:
                 )
             )
 
-            target_reopen_candidate = self._requires_target_reopen_after_action(
+            target_reopen_hint = self._requires_target_reopen_after_action(
                 action_case,
                 action_type,
                 semantic_action,
@@ -2303,8 +2315,24 @@ class RegressionEngine:
                 legacy_action,
                 new_action,
             )
-            if target_reopen_state.get("requires_reopen"):
-                target_reopen_candidate = True
+            target_reopen_candidate = self._should_reopen_target_for_following_action(
+                target_reopen_hint,
+                target_reopen_state,
+            )
+            if target_reopen_hint and not target_reopen_candidate:
+                self._write_full_test_log(
+                    page_dir,
+                    page_id,
+                    "target_reopen_hint_suppressed",
+                    {
+                        "action_index": action_index,
+                        "action_name": action_name,
+                        "action_type": action_type,
+                        "semantic_action": semantic_action,
+                        "target_reopen_state": target_reopen_state,
+                        "reason": "Action text suggested a recovery boundary, but current pages still match the target page.",
+                    },
+                )
             has_following_action = action_index < len(target_actions)
             should_reopen_target = target_reopen_candidate and has_following_action
             reopen_result: Optional[Dict[str, Any]] = None
@@ -2560,6 +2588,24 @@ class RegressionEngine:
 
     @staticmethod
     def _database_operation_kind(action_case: Dict[str, Any], action_type: Any, semantic_action: Any) -> Optional[str]:
+        explicit_operation = str(
+            action_case.get("database_operation")
+            or action_case.get("db_operation")
+            or ""
+        ).strip().lower()
+        explicit_aliases = {
+            "create": "create",
+            "insert": "create",
+            "update": "update",
+            "modify": "update",
+            "delete": "delete",
+            "remove": "delete",
+        }
+        if explicit_operation:
+            return explicit_aliases.get(explicit_operation)
+        if str(action_case.get("source") or "").strip().lower() == "guided_json_checklist":
+            return None
+
         normalized_type = str(action_type or "").strip().lower()
         normalized_case_type = str(action_case.get("case_type") or "").strip().lower()
         if normalized_type in CHILD_NAVIGATION_CASE_TYPES or normalized_case_type in CHILD_NAVIGATION_CASE_TYPES:
@@ -2799,6 +2845,16 @@ class RegressionEngine:
         }
 
     @staticmethod
+    def _should_reopen_target_for_following_action(
+        target_reopen_hint: bool,
+        target_reopen_state: Dict[str, Any],
+    ) -> bool:
+        # Textual hints such as "cancel" or "back" are useful diagnostics, but
+        # they must not trigger recovery unless the active pages actually left
+        # the target mapping.
+        return bool(target_reopen_state.get("requires_reopen"))
+
+    @staticmethod
     def _requires_target_reopen_after_action(
         action_case: Dict[str, Any],
         action_type: Any,
@@ -2809,7 +2865,12 @@ class RegressionEngine:
         if legacy_action.get("page_closed_after_action") or new_action.get("page_closed_after_action"):
             return True
         if RegressionEngine._is_negative_case(action_case.get("case_type"), action_case.get("action_type") or action_type):
-            return True
+            return bool(
+                legacy_action.get("navigation_detected")
+                or new_action.get("navigation_detected")
+                or legacy_action.get("frame_changed")
+                or new_action.get("frame_changed")
+            )
 
         passive_actions = {
             "assert_visible",
@@ -4302,7 +4363,10 @@ class RegressionEngine:
         pages = sorted({self._target_page_name(item.get("page_id")) for item in results if item.get("page_id")})
         checklist_rows: List[Dict[str, Any]] = []
         for page in pages:
-            checklist_rows.extend(self._checklist_case_rows.get(page) or [])
+            for source_row in self._checklist_case_rows.get(page) or []:
+                row = dict(source_row)
+                row.setdefault("page_id", page)
+                checklist_rows.append(row)
 
         if checklist_rows:
             result_index = self._coverage_result_index(results)

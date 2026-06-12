@@ -16,9 +16,11 @@ from src.action_executor import (
     _download_expect_timeout_ms,
     _download_save_path,
     _download_watch_dirs,
+    _frame_urls_changed,
     _handle_dialog_safely,
     _is_pdf_child_navigation_context,
     _negative_visual_evidence_payload,
+    _normalize_transition_url,
     _opens_popup_hint,
     _pump_playwright_events,
     _record_download_result,
@@ -28,6 +30,7 @@ from src.action_executor import (
     _safe_download_filename,
     _safe_opener_page,
     _should_close_capture_page,
+    _should_close_opened_popup_page,
     _should_capture_browser_dialogs,
     _state_capture_page_after_child_navigation,
     _stable_download_from_dirs,
@@ -54,6 +57,14 @@ def test_compare_visual_screenshot_writes_diff(tmp_path):
     assert result["status"] == "DIFF"
     assert result["diff_percent"] == 25.0
     assert diff.exists()
+
+
+def test_empty_url_fragment_does_not_count_as_navigation():
+    base_url = "http://example.test/patlics/GazetteMenuFrame.do?method=initialDisplay"
+
+    assert _normalize_transition_url(base_url) == _normalize_transition_url(f"{base_url}#")
+    assert not _frame_urls_changed([base_url, "about:blank"], [f"{base_url}#", "about:blank"])
+    assert _frame_urls_changed([base_url], [f"{base_url}#details"])
 
 
 def test_select_pages_orders_high_then_medium(tmp_path):
@@ -1229,6 +1240,50 @@ def test_opener_capture_page_is_not_closed_after_popup_reflection():
     assert _should_close_capture_page(opened_child, popup, opener, keep_popup=True) is False
 
 
+def test_opened_pdf_popup_closes_even_when_state_capture_uses_parent():
+    class Page:
+        def __init__(self, *, closed=False):
+            self._closed = closed
+
+        def is_closed(self):
+            return self._closed
+
+    action_page = Page()
+    opener_page = Page()
+    pdf_popup = Page()
+
+    selected, scope = _state_capture_page_after_child_navigation(
+        pdf_popup,
+        action_page,
+        opener_page,
+        {"capture_opener_after_child": True},
+    )
+
+    assert selected is action_page
+    assert scope == "action_page_after_child_navigation"
+    assert _should_close_opened_popup_page(
+        pdf_popup,
+        action_page,
+        opener_page,
+        keep_popup=False,
+        close_after=True,
+    )
+    assert not _should_close_opened_popup_page(
+        pdf_popup,
+        action_page,
+        opener_page,
+        keep_popup=True,
+        close_after=True,
+    )
+    assert not _should_close_opened_popup_page(
+        pdf_popup,
+        action_page,
+        opener_page,
+        keep_popup=False,
+        close_after=False,
+    )
+
+
 def test_child_navigation_state_capture_prefers_action_page_when_requested():
     class Page:
         def __init__(self, *, closed=False):
@@ -1691,6 +1746,7 @@ def test_guided_json_checklist_loader_builds_scenario(tmp_path):
                 "cases": [
                     {
                         "case_id": "biblio-initial",
+                        "database_operation": "update",
                         "title": "書誌一覧初期表示確認",
                         "risk_level": "safe",
                         "automation_mode": "auto",
@@ -1713,6 +1769,7 @@ def test_guided_json_checklist_loader_builds_scenario(tmp_path):
     assert engine._last_checklist_debug["format"] == "guided_json"
     assert engine._last_checklist_debug["status"] == "loaded"
     assert cases[0]["case_id"] == "biblio-initial"
+    assert cases[0]["database_operation"] == "update"
     assert cases[0]["pre_steps"] == [{"action_type": "assert_visible", "locator": "table"}]
     assert cases[0]["main_step"]["action_type"] == "assert_text"
     assert cases[0]["main_step"]["value"] == "検索結果一覧"
@@ -2491,6 +2548,22 @@ def test_database_operation_kind_ignores_child_navigation_entry_word():
     ) is None
 
 
+def test_database_operation_kind_requires_explicit_guided_json_intent():
+    guided_case = {
+        "source": "guided_json_checklist",
+        "case_type": "browser_dialog",
+        "label": "Registration entry rejects an empty selection",
+        "main_step": {"cleanup_script": "() => { delete window.testState; }"},
+    }
+
+    assert RegressionEngine._database_operation_kind(guided_case, "browser_dialog", "browser_dialog") is None
+    assert RegressionEngine._database_operation_kind(
+        {**guided_case, "database_operation": "create"},
+        "click",
+        "click",
+    ) == "create"
+
+
 @pytest.mark.parametrize(
     "action_type",
     ["assert_attached", "assert_checked", "assert_text", "assert_url", "assert_value", "assert_visible"],
@@ -2532,12 +2605,19 @@ def test_leaving_actions_require_target_reopen():
         {"status": "PASS", "page_closed_after_action": True},
         {"status": "PASS"},
     )
-    assert RegressionEngine._requires_target_reopen_after_action(
+    assert not RegressionEngine._requires_target_reopen_after_action(
         {"case_type": "negative_file_upload", "label": "invalid upload"},
         "negative_file_upload",
         "upload",
         {"status": "PASS"},
         {"status": "PASS"},
+    )
+    assert RegressionEngine._requires_target_reopen_after_action(
+        {"case_type": "negative_http_500", "label": "simulated server error"},
+        "negative_http_500",
+        "negative_http_500",
+        {"status": "PASS", "navigation_detected": True},
+        {"status": "PASS", "navigation_detected": True},
     )
     assert not RegressionEngine._requires_target_reopen_after_action(
         {"case_type": "delete_action", "label": "削除"},
@@ -2545,6 +2625,23 @@ def test_leaving_actions_require_target_reopen():
         "click",
         {"status": "PASS"},
         {"status": "PASS"},
+    )
+
+
+def test_target_reopen_hint_is_suppressed_when_page_still_matches_target():
+    assert not RegressionEngine._should_reopen_target_for_following_action(
+        True,
+        {
+            "requires_reopen": False,
+            "reason": "action did not navigate away from the current page",
+        },
+    )
+    assert RegressionEngine._should_reopen_target_for_following_action(
+        False,
+        {
+            "requires_reopen": True,
+            "reason": "current page no longer matches target page",
+        },
     )
 
 
