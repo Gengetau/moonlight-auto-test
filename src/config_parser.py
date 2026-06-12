@@ -3,8 +3,9 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-# 加载 .env 文件
+
 load_dotenv()
+
 
 class Config:
     CHROME_PORTABLE_PATH = os.getenv("CHROME_PORTABLE_PATH", "")
@@ -60,19 +61,19 @@ class Config:
         if len(entries) == 1 or not interactive:
             return cls.apply_login_entry(entries[0])
 
-        print("\n[LOGIN ENTRY] 请选择登录入口:")
+        print("\n[LOGIN ENTRY] Select a login entry:")
         for index, entry in enumerate(entries, start=1):
             print(f"  [{index}] {entry['name']}")
             print(f"      Legacy: {entry['legacy_url']}")
             print(f"      New:    {entry['new_url']}")
 
         while True:
-            print(f"选择入口 [1-{len(entries)}]，直接回车默认 1:")
+            print(f"Select entry [1-{len(entries)}], or press Enter for 1:")
             raw = input("> ").strip()
             selected = cls._find_login_entry(entries, raw or "1")
             if selected is not None:
                 return cls.apply_login_entry(selected)
-            print("输入无效，请输入序号或入口名称。")
+            print("Invalid input. Enter an entry number or entry name.")
 
     @classmethod
     def _find_login_entry(cls, entries, selector: str):

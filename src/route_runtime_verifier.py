@@ -877,36 +877,36 @@ def _manual_checkpoint(
     recorder = _install_manual_recorder(page, route_id=route_id, index=index)
     while True:
         print()
-        print("[路径建图] 自动路径验证被阻塞")
-        print(f"  路径ID: {route_id}")
-        print(f"  步骤:   {index}")
+        print("[ROUTE MAP] Automatic route verification is blocked")
+        print(f"  Route ID: {route_id}")
+        print(f"  Step:     {index}")
         print(f"  Action: {action}")
-        print(f"  原因:   {reason}")
-        print("  请查看浏览器当前页面后选择：")
-        print("    [Enter/r] 重新尝试自动识别/执行当前 action")
-        print("    [m] 我已手工完成当前 action，继续验证下一步")
-        print("    [s] 这条路径不可达")
-        print("    [q] 中止路径建图")
-        print("  请选择 [Enter/r/m/s/q]:")
+        print(f"  Reason:   {reason}")
+        print("  Inspect the current browser page, then choose:")
+        print("    [Enter/r] Retry automatic recognition or execution for the current action")
+        print("    [m] I completed the current action manually; continue to the next step")
+        print("    [s] This route is unreachable")
+        print("    [q] Abort route mapping")
+        print("  Choose [Enter/r/m/s/q]:")
         raw = input("> ").strip().lower()
         if raw in {"", "r", "retry"}:
             _cleanup_manual_recorder(recorder)
             return {
                 "status": "RETRY",
                 "manual": False,
-                "reason": "用户要求重新尝试自动识别",
+                "reason": "User requested automatic recognition retry",
                 "state_before": before,
                 "visible_controls": _visible_controls(page),
             }
         if raw == "q":
             _cleanup_manual_recorder(recorder)
-            raise InterruptedError("用户中止路径建图")
+            raise InterruptedError("User aborted route mapping")
         if raw == "s":
             _cleanup_manual_recorder(recorder)
             return {
                 "status": "UNREACHABLE_ROUTE",
                 "manual": True,
-                "reason": f"用户判定该路径不可达，阻塞 action: {action}",
+                "reason": f"User marked this route unreachable at blocked action: {action}",
                 "state_before": before,
                 "visible_controls": _visible_controls(page),
             }
@@ -919,18 +919,18 @@ def _manual_checkpoint(
             manual_events = list(recorder.get("events") or [])
             manual_replay = _manual_replay_from_events(manual_events, upload_file=upload_file)
             _cleanup_manual_recorder(recorder)
-            print(f"  已记录人工事件 {len(manual_events)} 个，可回放动作 {len(manual_replay)} 个。")
+            print(f"  Recorded {len(manual_events)} manual event(s), {len(manual_replay)} replayable action(s).")
             return {
                 "status": "PASS",
                 "manual": True,
-                "reason": "人工确认当前 action 已手工完成",
+                "reason": "User confirmed the current action was completed manually",
                 "state_before": before,
                 "state": after,
                 "visible_controls": _visible_controls(page),
                 "manual_events": manual_events,
                 "manual_replay": manual_replay,
             }
-        print("  输入无效，请选择 Enter/r、m、s 或 q。")
+        print("  Invalid input. Choose Enter/r, m, s, or q.")
 
 
 def _manual_step_fields(manual_result: Dict[str, Any], *, replay_mode: str) -> Dict[str, Any]:
@@ -993,8 +993,8 @@ def _interactive_manual_route_takeover(page: Page, route: Optional[Dict[str, Any
             pass
 
         pages = _pages_for_context(page) or [page]
-        print("[路径建图] 页面接管/刷新")
-        print(f"  已探测到 {len(pages)} 个 Playwright 页面对象：")
+        print("[ROUTE MAP] Page takeover / refresh")
+        print(f"  Detected {len(pages)} Playwright page object(s):")
         matched_index = -1
         for index, item_page in enumerate(pages):
             urls = _page_url_candidates(item_page)
@@ -1007,17 +1007,17 @@ def _interactive_manual_route_takeover(page: Page, route: Optional[Dict[str, Any
                 matched_index = index
 
         if matched_index >= 0:
-            print(f"  已自动匹配目标页面，接管 [{matched_index}]。")
+            print(f"  Automatically matched the target page; taking over [{matched_index}].")
             selected = pages[matched_index]
         else:
-            print("  未能自动匹配目标页面。")
-            raw_choice = input("  请输入要接管/刷新的页面序号；直接 Enter 重新扫描；q 中止: ").strip().lower()
+            print("  Could not automatically match the target page.")
+            raw_choice = input("  Enter the page index to take over/refresh; press Enter to rescan; q to abort: ").strip().lower()
             if raw_choice == "q":
-                raise InterruptedError("用户中止路径建图")
+                raise InterruptedError("User aborted route mapping")
             if not raw_choice:
                 continue
             if not raw_choice.isdigit() or not (0 <= int(raw_choice) < len(pages)):
-                print("  输入无效，请输入列表中的页面序号。")
+                print("  Invalid input. Enter a page index from the list.")
                 continue
             selected = pages[int(raw_choice)]
 
@@ -1026,7 +1026,7 @@ def _interactive_manual_route_takeover(page: Page, route: Optional[Dict[str, Any
             selected.wait_for_load_state("domcontentloaded", timeout=min(timeout, 5000))
             return selected
         except (PlaywrightTimeoutError, PlaywrightError) as exc:
-            print(f"  接管失败: {exc}，请重试。")
+            print(f"  Takeover failed: {exc}; retry.")
 
 
 def _refresh_manual_route_page(
@@ -1102,18 +1102,18 @@ def record_manual_route(
 
     while True:
         print()
-        print("[路径建图] 全程人工路径录制")
-        print(f"  路径ID: {route_id}")
-        print(f"  目标页: {target_page or target_page_name}")
-        print("  请在浏览器中从当前入口开始，完整操作到目标页面。")
-        print("  可以完成登录、菜单展开、搜索条件输入、文件上传、弹窗选择等所有必要步骤。")
-        print("  如果弹窗页面空白、停止或未加载完成，按 Enter/r 进入页面接管列表，选择后刷新；可多按几次。")
-        print("  到达目标页面并确认状态正确后，输入 m 保存录制。")
-        print("  输入 s 标记不可达，输入 q 中止路径建图。")
+        print("[ROUTE MAP] Full manual route recording")
+        print(f"  Route ID: {route_id}")
+        print(f"  Target page: {target_page or target_page_name}")
+        print("  Starting from the current entry page, operate the browser all the way to the target page.")
+        print("  Complete login, menu expansion, search input, file upload, popup selection, and any other required steps.")
+        print("  If a popup is blank, stuck, or not fully loaded, press Enter/r to open the takeover list, select it, and refresh. Repeat if needed.")
+        print("  After reaching the target page and confirming the state, enter m to save the recording.")
+        print("  Enter s to mark unreachable, or q to abort route mapping.")
         raw = input("> ").strip().lower()
         if raw == "q":
             _cleanup_manual_recorder(recorder)
-            raise InterruptedError("用户中止路径建图")
+            raise InterruptedError("User aborted route mapping")
         if raw == "s":
             _cleanup_manual_recorder(recorder)
             return {
@@ -1123,7 +1123,7 @@ def record_manual_route(
                 "source_route": route,
                 "steps": [],
                 "status": "UNREACHABLE_ROUTE",
-                "reason": "用户判定全程人工路径不可达",
+                "reason": "User marked the full manual route unreachable",
                 "state_before": before,
                 "visible_controls": _visible_controls(page),
             }
@@ -1132,7 +1132,7 @@ def record_manual_route(
             page = refresh_result.pop("page")
             manual_refreshes.append(refresh_result)
             print(
-                "  已刷新/重新接管当前页面: "
+                "  Refreshed or retook the current page: "
                 f"status={refresh_result.get('status')} "
                 f"popup={refresh_result.get('popup_taken_over')} "
                 f"url={refresh_result.get('url')}"
@@ -1150,7 +1150,7 @@ def record_manual_route(
             manual_events = list(recorder.get("events") or [])
             manual_replay = _manual_replay_from_events(manual_events, upload_file=upload_file)
             _cleanup_manual_recorder(recorder)
-            print(f"  已记录人工事件 {len(manual_events)} 个，可回放动作 {len(manual_replay)} 个。")
+            print(f"  Recorded {len(manual_events)} manual event(s), {len(manual_replay)} replayable action(s).")
             result: Dict[str, Any] = {
                 "route_id": route_id,
                 "target_page": target_page,
@@ -1166,7 +1166,7 @@ def record_manual_route(
                         "manual_replay_mode": "full_route",
                         "manual_events": manual_events,
                         "manual_replay": manual_replay,
-                        "reason": "全程人工路径录制",
+                        "reason": "Full manual route recording",
                         "popup_taken_over": takeover_page is not None,
                         "active_page_url": page.url if not _page_is_closed(page) else None,
                         "manual_refreshes": manual_refreshes,
@@ -1192,7 +1192,7 @@ def record_manual_route(
             }
             result["page_state_id"] = _page_state_id(result)
             return result
-        print("  输入无效，请选择 Enter/r、m、s 或 q。")
+        print("  Invalid input. Choose Enter/r, m, s, or q.")
 
 
 def find_runtime_action_locator(page: Page, action: str, timeout: int = 1500) -> Optional[str]:
@@ -1282,8 +1282,9 @@ def verify_candidate_route(
     The caller is responsible for resetting the browser back to the entry state
     before calling this for the next route.
 
-    manual_data=True 时，自动验证失败会进入人工判断点；适用于需要
-    业务检索条件、文件上传或数据选择后才出现下一步入口的路径。
+    When manual_data=True, automatic verification failures enter a manual
+    checkpoint. This supports routes where the next entry appears only after
+    business search conditions, file upload, or data selection.
     """
     capture_dir.mkdir(parents=True, exist_ok=True)
     route_id = route.get("route_id") or _route_signature(route)
@@ -1313,7 +1314,7 @@ def verify_candidate_route(
                         "locator": None,
                         "status": "PASS",
                         "reached": True,
-                        "reason": "action 已在当前页面或 frame 中加载",
+                        "reason": "Action is already loaded in the current page or frame",
                         "url": reached_url,
                     }
                 )
@@ -1321,7 +1322,7 @@ def verify_candidate_route(
 
             locator = find_runtime_action_locator(page, action)
             if not locator:
-                reason = f"当前页面没有找到可触发该 action 的可见控件: {action}"
+                reason = f"No visible control was found for action: {action}"
                 if not manual_data:
                     result["status"] = "UNREACHABLE_ROUTE"
                     result["blocked_at"] = index
@@ -1374,9 +1375,9 @@ def verify_candidate_route(
                                 break
 
                             reason = (
-                                f"人工确认当前 action: {action} 后，页面仍没有出现下一步 action 的可见控件: {next_action}。"
-                                "如果只是补了输入条件，请按 Enter/r 让工具重新识别；"
-                                "只有已经手工点击并进入下一步页面时才选择 m。"
+                                f"After manual confirmation of action {action}, no visible control appeared for next action {next_action}. "
+                                "If you only completed missing input conditions, press Enter/r so the tool can retry recognition. "
+                                "Choose m only after manually clicking through to the next page."
                             )
                             manual_next_pages_before = _pages_for_context(page)
                             manual_next_result = _manual_checkpoint(
@@ -1457,8 +1458,8 @@ def verify_candidate_route(
                             break
 
                         reason = (
-                            f"已点击当前 action: {action}，但页面没有出现下一步 action 的可见控件: {next_action}。"
-                            "当前页面可能仍停留在上一页、登录失败、数据不足，或静态路径不可用。"
+                            f"Clicked current action {action}, but no visible control appeared for next action {next_action}. "
+                            "The page may still be on the previous step, login may have failed, data may be insufficient, or the static route may be invalid."
                         )
                         if not manual_data:
                             result["status"] = "UNREACHABLE_ROUTE"
@@ -1500,7 +1501,7 @@ def verify_candidate_route(
                         return result
                 break
 
-            reason = action_result.get("reason") or f"Action 未完成: {action}"
+            reason = action_result.get("reason") or f"Action was not completed: {action}"
             if manual_data:
                 manual_pages_before = _pages_for_context(page)
                 manual_result = _manual_checkpoint(

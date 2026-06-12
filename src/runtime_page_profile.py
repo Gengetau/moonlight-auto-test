@@ -73,18 +73,18 @@ def _capture_frame_controls(frame, frame_index: int) -> Dict[str, Any]:
         const style = window.getComputedStyle(el);
         if (style.visibility === 'hidden' || style.display === 'none' || style.opacity === '0') return false;
         const rect = el.getBoundingClientRect();
-        return rect.width > 2 && rect.height > 2; // 过滤掉极小的装饰性元素
+        return rect.width > 2 && rect.height > 2; // Ignore tiny decorative elements.
       };
       const hasVisibleControl = el => Array.from(el.querySelectorAll('a,button,input,select,textarea,[onclick],[formaction]'))
         .some(child => isVisible(child));
       const includeElement = el => {
         const tag = el.tagName.toLowerCase();
         if (!isVisible(el)) {
-          // 仅保留包含可见控件的容器标签
+          // Keep invisible containers only when they contain visible controls.
           return (tag === 'form' || tag === 'table') && hasVisibleControl(el);
         }
         
-        // 过滤无意义的超链接
+        // Ignore non-actionable links.
         if (tag === 'a') {
           const href = el.getAttribute('href') || '';
           const onclick = el.getAttribute('onclick') || '';
@@ -92,10 +92,10 @@ def _capture_frame_controls(frame, frame_index: int) -> Dict[str, Any]:
           if (!el.innerText.trim() && !el.getAttribute('title') && !el.querySelector('img')) return false;
         }
 
-        // 过滤隐藏域
+        // Ignore hidden fields.
         if (tag === 'input' && el.getAttribute('type') === 'hidden') return false;
 
-        // 过滤无意义的容器
+        // Ignore non-actionable containers.
         if (tag === 'table' || tag === 'form') return hasVisibleControl(el);
 
         return true;

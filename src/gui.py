@@ -559,11 +559,11 @@ def render_report_links(report_path, *, key_prefix):
         return
     report_bytes = portable_report_bytes(report_path)
     display_name = report_display_name(report_path)
-    if st.button(f"预览 {display_name}", key=f"{key_prefix}_preview_{report_path.as_posix()}"):
+    if st.button(f"Preview {display_name}", key=f"{key_prefix}_preview_{report_path.as_posix()}"):
         pause_running_regression_queue_for_report_action("report_preview")
         st.session_state["selected_report_path"] = str(report_path)
     st.download_button(
-        "下载自包含报告",
+        "Download portable report",
         data=report_bytes,
         file_name=f"{Path(display_name).stem}_portable.html",
         mime="text/html",
@@ -577,9 +577,9 @@ def render_report_links(report_path, *, key_prefix):
 def render_recent_page_reports(limit=10):
     reports = recent_page_report_paths(limit)
     st.divider()
-    st.markdown("### 最近 10 个页面报告")
+    st.markdown("### Latest 10 Page Reports")
     if not reports:
-        st.caption("暂无页面报告。")
+        st.caption("No page reports yet.")
         return
 
     for index, report_path in enumerate(reports, start=1):
@@ -605,7 +605,7 @@ def render_selected_report_viewer():
     report_html = portable_report_html(report_path)
     components.html(report_html, height=900, scrolling=True)
     st.download_button(
-        "下载当前自包含报告",
+        "Download current portable report",
         data=report_html.encode("utf-8"),
         file_name=f"{Path(report_display_name(report_path)).stem}_portable.html",
         mime="text/html",
@@ -694,7 +694,7 @@ def run_command_in_powershell(cmd):
     env["PYTHONUNBUFFERED"] = "1"
     env["PYTHONIOENCODING"] = "utf-8"
     st.code(cmd)
-    st.info("请回到启动 Streamlit 的 PowerShell 窗口完成人工交互。Web UI 会等待命令结束。")
+    st.info("Complete manual interaction in the PowerShell window that started Streamlit. The web UI will wait for the command to finish.")
     process = subprocess.Popen(
         cmd,
         shell=True,
@@ -809,16 +809,16 @@ def render_interactive_console(session_key, *, output_path=None):
     process = session.get("process")
     return_code = process.poll() if process else None
     if return_code is None:
-        st.info("路径验证进程运行中。请在这里输入，不需要回到 PowerShell。")
+        st.info("Route verification is running. You can enter commands here without returning to PowerShell.")
     elif return_code == 0:
-        st.success(f"路径验证进程已结束：exit={return_code}")
+        st.success(f"Route verification finished: exit={return_code}")
     else:
-        st.error(f"路径验证进程失败：exit={return_code}")
+        st.error(f"Route verification failed: exit={return_code}")
 
     st.caption(f"Command: {session.get('cmd')}")
     st.caption(
-        "页面接管列表说明：日志里的 [0]、[1] 是当前浏览器里可接管的页面或弹窗；"
-        "输入序号会切到该页并刷新。frame 行只是页面内部 frame URL，不需要单独选择。"
+        "Page takeover list: [0], [1], and similar entries in the log are browser pages or popups that can be taken over. "
+        "Enter an index to switch to that page and refresh it. Frame rows are internal frame URLs and do not need separate selection."
     )
     st.code(session.get("output") or "(no output yet)")
 
@@ -849,7 +849,7 @@ def render_interactive_console(session_key, *, output_path=None):
         custom_input = st.text_input(
             "Custom input",
             value="",
-            placeholder="页面序号、m、s、q，留空表示 Enter",
+            placeholder="Page index, m, s, q, or leave empty for Enter",
             key=f"{session_key}_custom_input",
             disabled=return_code is not None,
         )
@@ -1024,7 +1024,7 @@ with tabs[0]:
         record_name = st.text_input(
             "Record name",
             value="",
-            placeholder="例：admin upload + error cases",
+            placeholder="Example: admin upload + error cases",
             key="reg_queue_record_name",
         )
     with rec_col2:
@@ -1056,7 +1056,7 @@ with tabs[0]:
             f"Selected: {selected_record.get('name')} / browsers={' → '.join(record_browser_labels)} / "
             f"cards={len(q.get('cards') or [])} / parallel={record_parallel} / saved_at={selected_record.get('saved_at', '-')}"
         )
-        st.caption("记录会保存所有卡片配置和上传 case 选择；上传文件本体需要在运行前重新选择。")
+        st.caption("Records save all card settings and upload case selections; upload files must be selected again before execution.")
         if st.button("Delete Selected Record", key="reg_queue_delete"):
             save_reg_queue_records([record for record in records if str(record.get("id")) != selected_record_id])
             st.session_state["reg_queue_record_status"] = f"Deleted: {selected_record.get('name')}"
@@ -1088,7 +1088,7 @@ with tabs[0]:
         )
         if stable_target and not selected_page_from_label(st.session_state.get(target_select_key, "")):
             st.session_state[target_select_key] = _page_option_label_for(stable_target)
-        current_page_label = str(stable_target or "").strip() or "未选择 JSP"
+        current_page_label = str(stable_target or "").strip() or "No JSP selected"
         with st.expander(f"{index}. {current_page_label}", expanded=index == int(st.session_state.get("reg_focus_card_index", 1))):
             enabled = st.checkbox("Enabled", value=True, key=f"reg_page_enabled_{index}")
             target_selection = st.selectbox(
@@ -1117,7 +1117,7 @@ with tabs[0]:
                     )
                 )
             elif target_page:
-                st.warning("当前 page_mapping/route/recent reports 中没有找到该 JSP；仍允许手工执行。")
+                st.warning("This JSP was not found in page_mapping, route data, or recent reports; manual execution is still allowed.")
 
             col_a, col_b, col_c = st.columns(3)
             with col_a:
@@ -1167,7 +1167,7 @@ with tabs[0]:
                 )
                 negative_profile = ",".join(selected_page_from_label(label) for label in selected_negative_labels)
                 if include_negative and not negative_profile:
-                    st.warning("请选择至少一个 Negative profile。")
+                    st.warning("Select at least one negative profile.")
                 elif include_negative:
                     selected_descriptions = [
                         (next((item for item in negative_options if item.get("profile") == selected_page_from_label(label)), {}) or {}).get("description", "")

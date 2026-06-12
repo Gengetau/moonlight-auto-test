@@ -5,18 +5,15 @@ from typing import Any, Dict
 from PIL import Image, ImageChops
 from playwright.sync_api import Page
 
+
 def assert_expectation(page: Page, expected_text: str = None, expected_url: str = None):
-    """
-    封装断言逻辑，比对文本与 URL。
-    """
+    """Assert expected page text and URL patterns."""
     if expected_text:
-        # 简单比对内容是否在页面中，可扩展为精确选择器比对
         content = page.content()
         assert expected_text in content, f"Expected text '{expected_text}' not found in page."
-    
+
     if expected_url:
         current_url = page.url
-        # 使用正则部分匹配，忽略后缀差异
         pattern = re.escape(expected_url).replace(r"\.do", r"(\.do)?")
         assert re.search(pattern, current_url), f"URL mismatch. Expected: {expected_url}, Actual: {current_url}"
 
@@ -78,7 +75,6 @@ def compare_visual_screenshot(
         total_pixels = width * height
         diff_percent = (changed_pixels / total_pixels * 100) if total_pixels else 0.0
 
-        # Red overlay makes differences obvious in the HTML report.
         highlight = Image.new("RGBA", (width, height), (255, 0, 0, 150))
         base = normalized_new.copy()
         base.paste(highlight, (0, 0), alpha)

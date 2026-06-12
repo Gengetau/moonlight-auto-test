@@ -296,8 +296,8 @@ def compare_page(page: str, legacy_pages: List[Page], new_pages: List[Page]) -> 
     legacy_elements = flatten_elements(legacy_pages)
     new_elements = flatten_elements(new_pages)
     
-    # [月眸增强] 提取所有潜在的可交互元素，不仅限于 locator_changes
-    # 这将显著增加回归测试的项目数量，涵盖所有识别到的按钮、链接和输入框
+    # Extract all potentially interactive legacy elements, not only locator changes.
+    # This broadens regression coverage across detected buttons, links, and inputs.
     full_action_steps = []
     for element in legacy_elements:
         step = executable_action_step(element)
@@ -323,7 +323,7 @@ def compare_page(page: str, legacy_pages: List[Page], new_pages: List[Page]) -> 
 
         sample_locator = normalized_locator(sample)
 
-        # 二次兜底：如果 New 侧存在相同 normalized locator，则不认为缺失
+        # Fallback: if New has the same normalized locator, do not mark it missing.
         if sample_locator and sample_locator in new_locators:
             continue
 
@@ -424,35 +424,35 @@ def write_json(data: Dict[str, Any], path: str) -> None:
 def render_markdown(mapping: Dict[str, Any], limit: int = 30) -> str:
     summary = mapping["summary"]
     lines = [
-        "# Legacy/New JSP 降维比对摘要",
+        "# Legacy/New JSP Mapping Summary",
         "",
-        "## 总览",
+        "## Overview",
         "",
-        f"- Legacy 页面数：{summary['legacy_pages']}",
-        f"- New 页面数：{summary['new_pages']}",
-        f"- 同名页面匹配数：{summary['matched_pages']}",
-        f"- Legacy 独有页面数：{summary['legacy_only_pages']}",
-        f"- New 独有页面数：{summary['new_only_pages']}",
-        f"- 高风险页面数：{summary['high_risk_pages']}",
-        f"- 中风险页面数：{summary['medium_risk_pages']}",
-        f"- 公共导航路径数：{len(mapping['common_navigation_paths'])}",
-        f"- Action 映射数：{len(mapping['action_to_pages'])}",
+        f"- Legacy page count: {summary['legacy_pages']}",
+        f"- New page count: {summary['new_pages']}",
+        f"- Matched page count: {summary['matched_pages']}",
+        f"- Legacy-only page count: {summary['legacy_only_pages']}",
+        f"- New-only page count: {summary['new_only_pages']}",
+        f"- High-risk page count: {summary['high_risk_pages']}",
+        f"- Medium-risk page count: {summary['medium_risk_pages']}",
+        f"- Common navigation path count: {len(mapping['common_navigation_paths'])}",
+        f"- Action mapping count: {len(mapping['action_to_pages'])}",
         "",
-        "## 一致性比对执行流规划",
+        "## Regression Execution Plan",
         "",
-        "1. 读取 `page_mapping.json`，按 `risk` 优先级选择页面；先执行 High，再执行 Medium/Low。",
-        "2. Legacy 环境打开目标页面，使用 Legacy 定位器执行动作，记录 URL、DOM 快照、网络请求、弹窗、下载文件和截图。",
-        "3. New 环境打开同一 `page_id`，通过映射后的定位器复现同一 Action；定位器变化时优先使用 New locator，缺失时标记为阻断。",
-        "4. 对比两端结果：截图差异、URL/action、关键文本、表格数据、下载文件名/大小/hash、服务端错误页。",
-        "5. 输出每个 Action 的 `PASS / DIFF / BLOCKED`，并把缺失元素和定位器变更回写到风险摘要。",
+        "1. Read `page_mapping.json` and select pages by `risk`; run High before Medium/Low.",
+        "2. Open the target page in Legacy, execute actions with Legacy locators, and record URL, DOM snapshots, network requests, dialogs, downloads, and screenshots.",
+        "3. Open the same `page_id` in New and replay the same action with mapped locators; prefer New locators when changed and mark missing locators as blocked.",
+        "4. Compare screenshots, URL/action behavior, key text, table data, downloaded filename/size/hash, and server error pages.",
+        "5. Emit `PASS / DIFF / BLOCKED` per action and feed missing elements and locator changes back into the risk summary.",
         "",
-        "## 公共导航路径 Top 30",
+        "## Common Navigation Paths Top 30",
         "",
     ]
     for target in mapping["common_navigation_paths"][:30]:
         lines.append(f"- `{target}`")
 
-    lines.extend(["", "## 高风险页面 Top 30", "", "| 页面 | Legacy元素 | New元素 | 缺失 | 定位器变更 | 公共导航 |", "|---|---:|---:|---:|---:|---|"])
+    lines.extend(["", "## High-Risk Pages Top 30", "", "| Page | Legacy Elements | New Elements | Missing | Locator Changes | Common Navigation |", "|---|---:|---:|---:|---:|---|"])
     for page in mapping["high_risk_pages"][:limit]:
         lines.append(
             "| {page_id} | {legacy_element_count} | {new_element_count} | {missing} | {changed} | {nav} |".format(
@@ -465,20 +465,20 @@ def render_markdown(mapping: Dict[str, Any], limit: int = 30) -> str:
             )
         )
 
-    lines.extend(["", "## 代表性缺失/定位器变更", ""])
+    lines.extend(["", "## Representative Missing Elements and Locator Changes", ""])
     for page in mapping["high_risk_pages"][:10]:
         lines.append(f"### {page['page_id']}")
         for item in page["missing_legacy_elements"][:5]:
             lines.append(
-                f"- 缺失：{item['kind']} `{item['label']}` locator={item.get('locator') or '-'} action={item.get('action') or '-'}"
+                f"- Missing: {item['kind']} `{item['label']}` locator={item.get('locator') or '-'} action={item.get('action') or '-'}"
             )
         for item in page["locator_changes"][:5]:
             lines.append(
-                f"- 定位器变更：{item['kind']} `{item['label']}` {item['legacy_locator']} -> {item['new_locator']}"
+                f"- Locator changed: {item['kind']} `{item['label']}` {item['legacy_locator']} -> {item['new_locator']}"
             )
         lines.append("")
 
-    lines.extend(["## Action -> 页面 Top 50", "", "| Action | 页面数 | 示例页面 |", "|---|---:|---|"])
+    lines.extend(["## Action -> Pages Top 50", "", "| Action | Page Count | Example Pages |", "|---|---:|---|"])
     for action, pages in list(mapping["action_to_pages"].items())[:50]:
         lines.append(f"| `{action}` | {len(pages)} | {', '.join(pages[:5])} |")
 

@@ -107,7 +107,7 @@ def test_field_elements_generate_automation_ready_cases_and_form_evidence():
     assert any(case.kind == "field" for case in cases)
     assert any(case.automation_mode == "auto" for case in cases)
     form_cases = [case for case in cases if case.kind == "form"]
-    assert all("字段完整性校验" in case.evidence for case in form_cases)
+    assert all("Field completeness check" in case.evidence for case in form_cases)
     assert all("form:input `keyword`" in case.evidence for case in form_cases)
 
 
@@ -192,9 +192,9 @@ def test_universal_checklist_lines_include_xls_categories():
     lines = universal_checklist_markdown_lines()
     text = "\n".join(lines)
 
-    assert "1-1 画面レイアウト" in text
-    assert "7 ファイルアップロード" in text
-    assert "13 マルチブラウザ動作確認" in text
+    assert "1-1 Screen layout" in text
+    assert "7 File upload" in text
+    assert "13 Multi-browser compatibility" in text
 
 
 def test_page_specific_excel_contains_profile_and_skipped_sheets(tmp_path):

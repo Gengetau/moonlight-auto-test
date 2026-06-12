@@ -84,14 +84,20 @@ def effective_checklist_path_for_page(
     current = str(current_path or "").strip()
     guided_path = guided_checklist_path_for(page_id, base_dir=base_dir)
     if guided_path and guided_path.exists():
+        current_path_obj = Path(current) if current else None
         current_normalized = current.replace("\\", "/").lower()
         guided_dir_normalized = Path(base_dir).as_posix().lower().rstrip("/") + "/"
+        is_stale_guided_checklist = (
+            current_path_obj is not None
+            and current_path_obj.name.lower().endswith("_checklist.json")
+            and current_normalized.startswith(guided_dir_normalized)
+        )
         suggested = str(guided_path)
         if (
             not current
             or current == DEFAULT_CHECKLIST_PATH
             or not Path(current).exists()
-            or (current_normalized.startswith(guided_dir_normalized) and current != suggested)
+            or (is_stale_guided_checklist and current != suggested)
         ):
             return suggested
     return current or DEFAULT_CHECKLIST_PATH

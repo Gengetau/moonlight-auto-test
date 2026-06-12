@@ -86,7 +86,7 @@ def _launch_browser(playwright, browser_name: str):
             "args": CHROMIUM_ARGS,
         }
         return playwright.chromium.launch(**chrome_kwargs)
-    raise ValueError(f"不支持的浏览器类型: {browser_name}")
+    raise ValueError(f"Unsupported browser backend: {browser_name}")
 
 
 def _page_is_closed(page: Page) -> bool:
@@ -184,12 +184,12 @@ def _looks_like_login_entry(page: Page) -> bool:
 
 def _wait_for_manual_entry_ready(page: Page) -> None:
     print()
-    print("[路径建图] 首页自动登录已关闭")
-    print("  请在浏览器中完成登录、入口选择或必要输入。")
-    print("  页面准备好后按 Enter 继续；输入 q 中止路径建图。")
+    print("[ROUTE MAP] Automatic login is disabled for the entry page.")
+    print("  Complete login, entry selection, or required input in the browser.")
+    print("  Press Enter when the page is ready; enter q to abort route mapping.")
     raw = input("> ").strip().lower()
     if raw == "q":
-        raise InterruptedError("用户中止路径建图")
+        raise InterruptedError("User aborted route mapping")
     try:
         page.wait_for_load_state("domcontentloaded", timeout=5000)
     except Exception:
@@ -257,7 +257,7 @@ def _open_or_login(page: Page, entry_url: str, timeout: int, *, auto_login: bool
         page.click("input[type='button']", timeout=5000)
         page.wait_for_load_state("networkidle", timeout=timeout)
     except Exception:
-        # 部分入口已登录，或者登录表单结构不同；这里不阻断建图。
+        # Some entries are already authenticated or use a different login form.
         pass
 
 
@@ -306,12 +306,12 @@ def run_route_map(args: argparse.Namespace) -> Path:
     selected_route_count = len(routes)
     manual_route_reason = ""
     if args.manual_route:
-        manual_route_reason = "用户指定 --manual-route"
+        manual_route_reason = "User requested --manual-route"
         if not args.target:
             raise ValueError("--manual-route requires --target")
         routes = [_manual_route_candidate(args.target, reason=manual_route_reason)]
     elif not routes and args.manual_data and args.target:
-        manual_route_reason = "候选路径数为 0，自动进入全程人工录制"
+        manual_route_reason = "No candidate routes were found; starting full manual recording"
         routes = [_manual_route_candidate(args.target, reason=manual_route_reason)]
     login_entry = Config.select_login_entry(args.login_entry, interactive=True)
     entry_url = login_entry[f"{args.side}_url"]
@@ -320,12 +320,12 @@ def run_route_map(args: argparse.Namespace) -> Path:
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.capture_dir.mkdir(parents=True, exist_ok=True)
 
-    print(f"[路径建图] 环境={args.side} 入口={login_entry['name']} URL={entry_url}")
-    print(f"[路径建图] 候选路径数={selected_route_count} 输出={args.output}")
+    print(f"[ROUTE MAP] side={args.side} entry={login_entry['name']} URL={entry_url}")
+    print(f"[ROUTE MAP] candidate_count={selected_route_count} output={args.output}")
     if manual_route_reason:
-        print(f"[路径建图] {manual_route_reason}")
+        print(f"[ROUTE MAP] {manual_route_reason}")
     if args.upload_file:
-        print(f"[路径建图] 上传文件={args.upload_file}")
+        print(f"[ROUTE MAP] upload_file={args.upload_file}")
 
     with sync_playwright() as playwright:
         browser = _launch_browser(playwright, args.browser)
@@ -334,7 +334,7 @@ def run_route_map(args: argparse.Namespace) -> Path:
             for index, route in enumerate(routes, start=args.start_index):
                 route_id = route.get("route_id") or f"route_{index}"
                 print()
-                print(f"[路径建图] {index}/{args.start_index + len(routes) - 1} 开始 {route_id} -> {route.get('target_page')}")
+                print(f"[ROUTE MAP] {index}/{args.start_index + len(routes) - 1} start {route_id} -> {route.get('target_page')}")
 
                 try:
                     page = _prepare_page(browser, page, entry_url, args.timeout, auto_login=args.auto_login)
@@ -375,17 +375,17 @@ def run_route_map(args: argparse.Namespace) -> Path:
                 try:
                     profile_path = _persist_runtime_profile(result, args, login_entry["name"])
                     if profile_path:
-                        print(f"[路径建图] Runtime profile 输出={profile_path}")
+                        print(f"[ROUTE MAP] runtime_profile={profile_path}")
                 except Exception as exc:
                     result["runtime_profile_error"] = str(exc)
                 results.append(result)
                 write_usable_route_map(results, args.output)
 
                 print(
-                    f"[路径建图] 结束 {route_id}: "
+                    f"[ROUTE MAP] end {route_id}: "
                     f"{result.get('status')} "
-                    f"人工步骤数={result.get('manual_steps', 0)} "
-                    f"原因={result.get('reason') or '-'}"
+                    f"manual_steps={result.get('manual_steps', 0)} "
+                    f"reason={result.get('reason') or '-'}"
                 )
         finally:
             _close_browser_safely(browser)
@@ -395,29 +395,29 @@ def run_route_map(args: argparse.Namespace) -> Path:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="从一个登录入口验证候选路径，并生成可用路径 map。")
+    parser = argparse.ArgumentParser(description="Validate candidate routes from one login entry and generate a usable route map.")
     parser.add_argument("--candidates", type=Path, default=Path("generated/valid/route_candidates.json"))
     parser.add_argument("--output", type=Path, default=Path("generated/valid/usable_route_map.json"))
     parser.add_argument("--capture-dir", type=Path, default=Path("output/route_map"))
     parser.add_argument("--runtime-profile-dir", type=Path, default=Path("generated/valid/runtime_profile"))
-    parser.add_argument("--side", choices=["legacy", "new"], default="legacy", help="一次只运行一个环境。")
-    parser.add_argument("--login-entry", default=None, help="登录入口名称或序号；未指定且存在多个入口时会交互选择。")
+    parser.add_argument("--side", choices=["legacy", "new"], default="legacy", help="Run one environment at a time.")
+    parser.add_argument("--login-entry", default=None, help="Login entry name or index; prompts when multiple entries exist.")
     parser.add_argument("--browser", choices=["edge", "firefox", "chrome_port"], default="chrome_port")
-    parser.add_argument("--target", default=None, help="可选：只验证指定目标页面。")
+    parser.add_argument("--target", default=None, help="Optional target page to validate.")
     parser.add_argument("--limit", type=int, default=None)
     parser.add_argument("--start-index", type=int, default=1)
     parser.add_argument("--timeout", type=int, default=15000)
-    parser.add_argument("--auto-login", action="store_true", help="打开入口后自动填写账号密码并点击登录；默认关闭。")
-    parser.add_argument("--manual-data", action="store_true", help="允许在输入、检索、选择、上传等场景由人工判断或接管。")
-    parser.add_argument("--manual-route", action="store_true", help="不依赖静态候选路径，从入口开始全程人工录制一条可回放路径。")
-    parser.add_argument("--upload-file", type=Path, default=None, help="可选：人工录制或路径回放中遇到文件上传时使用的真实本地文件。")
+    parser.add_argument("--auto-login", action="store_true", help="Fill credentials and click login after opening the entry page; disabled by default.")
+    parser.add_argument("--manual-data", action="store_true", help="Allow manual judgment or takeover for input, search, selection, and upload flows.")
+    parser.add_argument("--manual-route", action="store_true", help="Record a replayable route manually from the entry page without static candidates.")
+    parser.add_argument("--upload-file", type=Path, default=None, help="Optional local file used when manual recording or route replay reaches an upload control.")
     return parser
 
 
 def main() -> None:
     _configure_stdio()
     output = run_route_map(build_parser().parse_args())
-    print(f"[路径建图] 已写入 {output}")
+    print(f"[ROUTE MAP] wrote {output}")
 
 
 if __name__ == "__main__":

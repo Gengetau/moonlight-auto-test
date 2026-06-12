@@ -539,7 +539,7 @@ def _is_navigation_link(item: Dict[str, Any]) -> bool:
     if href.lower().startswith("javascript:") and "window.open" not in blob:
         return False
     
-    # 忽略无文字、无标题且无图片的空链接
+    # Ignore empty links without text, title, or image content.
     label = _label(item).strip()
     if not label and not _first_attr(item, "title") and "img" not in tag:
         return False
@@ -824,11 +824,11 @@ class PageProfileBuilder:
         tag = _as_text(control.get("tag")).lower()
         input_type = _as_text(control.get("type")).lower()
         
-        # 严格过滤不可见元素（除了 form/table）
+        # Strictly filter invisible elements except form/table containers.
         if control.get("visible") is False and tag not in {"form", "table"}:
             return None
             
-        # 过滤极小元素 (可能是装饰物)
+        # Ignore tiny elements that are likely decorative.
         rect = control.get("rect")
         if isinstance(rect, dict):
             if rect.get("w", 0) <= 2 or rect.get("h", 0) <= 2:
@@ -839,7 +839,7 @@ class PageProfileBuilder:
         elif tag == "table":
             kind = "table"
         elif tag == "a":
-            # 过滤无效链接
+            # Ignore invalid links.
             href = _as_text(control.get("href")).strip()
             onclick = _as_text(control.get("onclick")).strip()
             if not onclick and (not href or href == "#" or href.startswith("javascript:void")):
@@ -854,7 +854,7 @@ class PageProfileBuilder:
         elif tag == "input" and input_type == "file":
             kind = "file"
         elif tag == "input" and input_type == "hidden":
-            return None # 运行时扫描不关心隐藏域，它们由 pre_steps 处理
+            return None # Runtime scanning ignores hidden fields; pre_steps handles them.
         elif tag == "input" and input_type in {"button", "submit", "reset", "image"}:
             kind = "button"
         elif tag == "input":
@@ -862,7 +862,7 @@ class PageProfileBuilder:
         elif control.get("onclick"):
             kind = "button"
         else:
-            return None # 忽略无意义标签
+            return None # Ignore non-semantic tags.
 
         raw_attrs = control.get("attributes")
         attrs = dict(raw_attrs) if isinstance(raw_attrs, dict) else {}
@@ -1640,7 +1640,7 @@ class PageCasePlanner:
             "page_id": page_id,
             "title": title,
             "objective": objective,
-            "precondition": "対象画面へ route map または手動接管で到達済みであること。",
+            "precondition": "The target page has already been reached through a route map or manual takeover.",
             "steps": steps,
             "expected": expected,
             "severity": "High" if template_id not in {"result_table_verify"} else "Medium",

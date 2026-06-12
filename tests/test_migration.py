@@ -28,10 +28,11 @@ def test_migration_regression(
     negative_profile,
 ):
     """
-    Legacy/New 全量或风险优先回归入口。
+    Legacy/New regression entry point.
 
-    默认执行全量页面；传入 --risk-only 时只执行 High/Medium 风险页面。
-    传入 --target-page 或 --target-pages 时按指定 JSP 队列逐页执行，且无视风险等级。
+    By default, all selected pages are eligible. With --risk-only, only High and
+    Medium risk pages are selected. With --target-page or --target-pages, the
+    specified JSP queue is executed and risk filtering is ignored.
     """
     if not request.config.getoption("--run-migration"):
         pytest.skip("requires --run-migration with real browser/login environment")
@@ -86,9 +87,8 @@ def test_migration_regression(
         )
 
     report_text = ", ".join(report_paths)
-    # TODO:
-    # GUI 队列执行时，暂时不让单页 DIFF/BLOCKED 中断整个 pytest。
-    # 后续建议改成 --soft-assert 参数控制。
+    # TODO: GUI queue execution currently reports per-page DIFF/BLOCKED results
+    # without failing the entire pytest run. Consider a --soft-assert flag later.
     # assert combined_summary.get("BLOCKED", 0) == 0, f"Blocked regression steps. Reports: {report_text}"
     # assert combined_summary.get("DIFF", 0) == 0, f"Regression diffs found. Reports: {report_text}"
     # assert final_status == "PASS"

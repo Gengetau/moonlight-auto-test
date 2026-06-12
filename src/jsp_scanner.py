@@ -75,7 +75,7 @@ def classify_tag(tag: str, attributes: Dict[str, Any]) -> Optional[str]:
         return "form"
     if normalized == "html:file":
         return "file"
-    # 针对 Spring 标签或原生 input，检查 type=file
+    # Spring form inputs and native inputs can both represent upload controls.
     if (normalized == "input" or normalized == "form:input") and str(attributes.get("type", "")).lower() == "file":
         return "file"
     if normalized in {"a", "html:link"}:

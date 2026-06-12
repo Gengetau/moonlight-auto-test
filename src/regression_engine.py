@@ -338,15 +338,15 @@ class RegressionEngine:
         target_page: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
         """
-        根据风险等级或 target_page 选择需要执行回归测试的页面。
+        Select pages for regression by risk level or target_page.
 
-        优先级：
-        1. 指定 target_page 时，仅返回对应页面
-        2. 否则按 risk_level 过滤并排序
+        Priority:
+        1. When target_page is specified, return only the matching page.
+        2. Otherwise filter and sort by risk_level.
         """
 
         # ------------------------------------------------------------------
-        # 指定单页面执行
+        # Single-page execution.
         # ------------------------------------------------------------------
         if target_page:
             normalized_target = self._target_page_name(target_page)
@@ -384,7 +384,7 @@ class RegressionEngine:
             return pages[:1]
 
         # ------------------------------------------------------------------
-        # 风险等级过滤
+        # Risk-level filtering.
         # ------------------------------------------------------------------
         levels = list(
             risk_levels
@@ -407,7 +407,7 @@ class RegressionEngine:
         ]
 
         # ------------------------------------------------------------------
-        # 按风险等级 + page_id 排序
+        # Sort by risk level, then page_id.
         # ------------------------------------------------------------------
         pages.sort(
             key=lambda page: (
@@ -417,7 +417,7 @@ class RegressionEngine:
         )
 
         # ------------------------------------------------------------------
-        # limit 截断
+        # Apply optional limit.
         # ------------------------------------------------------------------
         return pages[:limit] if limit else pages
 
@@ -534,26 +534,26 @@ class RegressionEngine:
         # MANUAL MODE
         # ============================================================
         if manual:
-            print("\n[MANUAL MODE] 请手动操作浏览器并导航至目标页面:")
-            print(f" - 期待的目标画面: {page_id}")
-            print(f" - Legacy 入口: {legacy_url}")
-            print(f" - New 入口:    {new_url}")
+            print("\n[MANUAL MODE] Operate the browser manually and navigate to the target page:")
+            print(f" - Expected target page: {page_id}")
+            print(f" - Legacy entry: {legacy_url}")
+            print(f" - New entry:    {new_url}")
 
             def _interactive_takeover(
                 page: Page,
                 label: str,
             ) -> Page:
                 print(
-                    f"\n >>> [{label}] 准备就绪后，在此处按回车 [ENTER] 进行接管..."
+                    f"\n >>> [{label}] Press Enter here when the page is ready for takeover..."
                 )
 
                 print(
-                    "     (注: 如果浏览器点击无响应，请按回车激活同步锁)"
+                    "     (If browser clicks do not respond, press Enter to activate the sync lock.)"
                 )
 
                 while True:
                     # ------------------------------------------------
-                    # 让 Playwright 持续处理 protocol 消息
+                    # Keep Playwright protocol messages flowing.
                     # ------------------------------------------------
                     try:
                         page.wait_for_timeout(200)
@@ -562,7 +562,7 @@ class RegressionEngine:
 
                     input_signal = input(
                         f" [{label} READY?] "
-                        f"按回车扫描页面 (或输入 'q' 放弃): "
+                        f"Press Enter to scan pages, or enter 'q' to cancel: "
                     ).strip().lower()
 
                     if input_signal == "q":
@@ -573,15 +573,15 @@ class RegressionEngine:
                     all_pages = page.context.pages
 
                     print(
-                        f" [{label}] 探测到 {len(all_pages)} 个页面对象:"
+                        f" [{label}] Detected {len(all_pages)} page object(s):"
                     )
 
                     match_idx = -1
 
                     # ------------------------------------------------
-                    # 页面匹配优先级
-                    # 1. 包含 JSP 名
-                    # 2. 包含对应 Struts Action
+                    # Match priority:
+                    # 1. URL contains the JSP name.
+                    # 2. URL contains the corresponding Struts action.
                     # ------------------------------------------------
                     target_action = str(
                         mapping.get("entry_url")
@@ -612,30 +612,30 @@ class RegressionEngine:
                             match_idx = idx
 
                     # ------------------------------------------------
-                    # 自动发现匹配页面
+                    # Auto-detected matching page.
                     # ------------------------------------------------
                     if match_idx != -1:
                         print(
-                            f" [SUCCESS] 发现潜在匹配页面: "
+                            f" [SUCCESS] Potential matching page found: "
                             f"[{match_idx}]"
                         )
 
                         choice_idx = match_idx
 
                     # ------------------------------------------------
-                    # 未匹配时允许人工指定
+                    # Allow manual selection when auto-match fails.
                     # ------------------------------------------------
                     else:
                         print(
-                            f" [WARN] 未发现包含 "
-                            f"'{page_id}' 或 Action "
-                            f"'{target_action}' 的页面。"
+                            f" [WARN] No page contains "
+                            f"'{page_id}' or action "
+                            f"'{target_action}'."
                         )
 
                         raw_choice = input(
-                            f" >>> 请输入页面索引 "
+                            f" >>> Enter page index "
                             f"[0-{len(all_pages)-1}] "
-                            f"手动指定，或直接回车重试: "
+                            f"to select manually, or press Enter to retry: "
                         ).strip()
 
                         if (
@@ -647,7 +647,7 @@ class RegressionEngine:
                             continue
 
                     # ------------------------------------------------
-                    # 接管目标页面
+                    # Take over the selected target page.
                     # ------------------------------------------------
                     target = all_pages[choice_idx]
 
@@ -663,11 +663,11 @@ class RegressionEngine:
 
                     except Exception as exc:
                         print(
-                            f" [ERROR] 挂载失败 ({exc})，请重试。"
+                            f" [ERROR] Takeover failed ({exc}); retry."
                         )
 
             # ========================================================
-            # Legacy/New 手动接管
+            # Legacy/New manual takeover.
             # ========================================================
             legacy_page = _interactive_takeover(
                 legacy_page,
@@ -680,7 +680,7 @@ class RegressionEngine:
             )
 
             print(
-                f" [INFO] 已重定向接管目标: "
+                f" [INFO] Takeover targets redirected: "
                 f"Legacy({legacy_page.url}) | "
                 f"New({new_page.url})"
             )
@@ -698,7 +698,7 @@ class RegressionEngine:
             }
 
             # ========================================================
-            # 手动模式直接执行已接管页面
+            # Manual mode runs directly against the taken-over pages.
             # ========================================================
             return self._run_captured_page_pair(
                 legacy_page,
@@ -825,7 +825,7 @@ class RegressionEngine:
                         capture_dir=page_dir,
                         side="legacy",
                     )
-                    # 确保在后续查找元素前页面状态稳定且切换到正确 Page/Frame
+                    # Keep the page stable before later element lookup.
                     if legacy_nav.get("status") == "PASS":
                         try:
                             legacy_page.wait_for_load_state("networkidle", timeout=5000)
@@ -842,7 +842,7 @@ class RegressionEngine:
                         capture_dir=page_dir,
                         side="new",
                     )
-                    # 确保在后续查找元素前页面状态稳定且切换到正确 Page/Frame
+                    # Keep the page stable before later element lookup.
                     if new_nav.get("status") == "PASS":
                         try:
                             new_page.wait_for_load_state("networkidle", timeout=5000)
@@ -1034,15 +1034,15 @@ class RegressionEngine:
                     return header_map[key]
             return None
 
-        page_col = col("page_id", "page", "页面", "画面", "ページ", "対象画面")
-        mode_col = col("automation_mode", "自动化模式", "自動化モード", "自動化", "automation")
-        case_type_col = col("case_type", "ケース種別", "用例类型", "case")
-        action_type_col = col("action_type", "アクション", "动作类型", "操作类型")
-        locator_col = col("locator", "selector", "定位器", "セレクタ")
+        page_col = col("page_id", "page", "screen", "画面", "ページ", "対象画面")
+        mode_col = col("automation_mode", "自動化モード", "自動化", "automation")
+        case_type_col = col("case_type", "ケース種別", "case")
+        action_type_col = col("action_type", "action", "アクション")
+        locator_col = col("locator", "selector", "セレクタ")
         legacy_locator_col = col("legacy_locator", "legacy selector", "移行前locator")
         new_locator_col = col("new_locator", "new selector", "移行後locator")
-        submit_locator_col = col("submit_locator", "submit selector", "提交locator")
-        test_data_col = col("test_data", "value", "测试数据", "テストデータ")
+        submit_locator_col = col("submit_locator", "submit selector")
+        test_data_col = col("test_data", "value", "テストデータ")
         operation_col = col("operation", "操作", "操作内容")
         pre_steps_col = col("pre_steps", "pre steps")
         main_step_col = col("main_step", "main step")
@@ -1050,9 +1050,9 @@ class RegressionEngine:
         expected_value_col = col("expected_value", "期待値")
         destructive_col = col("destructive", "破壊的", "destructive?")
         generated_by_col = col("generated_by")
-        enabled_col = col("enabled", "enable", "有效", "有効")
+        enabled_col = col("enabled", "enable", "有効")
         case_id_col = col("case_id", "id", "no", "項目no")
-        title_col = col("title", "test_title", "test_viewpoint", "テスト観点", "测试项目", "用例")
+        title_col = col("title", "test_title", "test_viewpoint", "テスト観点")
 
         debug["sheet"] = sheet.title
         debug["columns"] = {
@@ -1078,8 +1078,8 @@ class RegressionEngine:
         cases: List[Dict[str, Any]] = []
         stats: Counter[str] = Counter()
         samples: List[Dict[str, str]] = []
-        allowed_modes = {"auto", "automated", "true", "yes", "y", "1", "自動", "自动"}
-        semi_auto_modes = {"semi-auto", "semiauto", "semi auto", "半自动", "半自動"}
+        allowed_modes = {"auto", "automated", "true", "yes", "y", "1", "自動"}
+        semi_auto_modes = {"semi-auto", "semiauto", "semi auto", "半自動"}
 
         def add_sample(kind: str, **values: str) -> None:
             if len(samples) < 5:
@@ -1565,7 +1565,7 @@ class RegressionEngine:
 
     @staticmethod
     def _truthy(value: Any) -> bool:
-        return str(value or "").strip().lower() in {"true", "1", "yes", "y", "on", "破壊", "対象", "是"}
+        return str(value or "").strip().lower() in {"true", "1", "yes", "y", "on", "破壊", "対象"}
 
     @staticmethod
     def _is_negative_case(case_type: Any, action_type: Any) -> bool:
@@ -3983,7 +3983,7 @@ class RegressionEngine:
     {self._render_summary_details(results, counts)}
   </header>
   <main>{self._render_coverage_matrix(results)}{rows or '<p>No results.</p>'}</main>
-  <a class="back-to-top" href="#top">回到顶部</a>
+  <a class="back-to-top" href="#top">Back to top</a>
 </body>
 </html>
 """,

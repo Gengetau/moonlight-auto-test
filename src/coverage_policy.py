@@ -3,31 +3,31 @@ from typing import Any, Dict, Iterable, List, Set
 
 
 CHECKLIST_SECTIONS = [
-    {"id": "screen_layout", "title": "1-1 画面レイアウト", "mode": "AUTO", "expected": "Legacy/New screenshots are captured and compared."},
-    {"id": "initial_display", "title": "1-2 画面初期表示", "mode": "AUTO", "expected": "Initial URL, DOM text, and visual state are compared."},
-    {"id": "input_display", "title": "2-1 入力項目表示/初期値", "mode": "AUTO", "expected": "Visible controls, initial values, and generated field snapshots are compared automatically."},
-    {"id": "input_operation", "title": "2-2 入力項目操作", "mode": "AUTO", "expected": "Fill, clear, select, hidden value, upload, and generated operation data are executed automatically when locators exist."},
-    {"id": "error_message", "title": "2-3 エラー制御", "mode": "AUTO", "expected": "Required, empty, length, numeric, invalid-character, XSS, and SQL-like generated data are executed and compared when locators exist."},
-    {"id": "search_event", "title": "3 検索/イベント/ボタン押下", "mode": "AUTO", "expected": "Buttons, links, submit controls, and action results are compared."},
-    {"id": "browser_operation", "title": "4 イレギュラー操作", "mode": "AUTO", "expected": "Closed pages, popups, recovery/back behavior, and close-window buttons are recorded automatically when controls exist."},
-    {"id": "screen_transition", "title": "5 画面遷移", "mode": "AUTO", "expected": "Navigation and post-action URLs/screenshots are compared."},
-    {"id": "file_download", "title": "6 ファイル出力", "mode": "AUTO", "expected": "Download actions save files and compare resulting UI state."},
-    {"id": "file_upload", "title": "7 ファイルアップロード", "mode": "AUTO", "expected": "File inputs receive sample files and post-upload state is compared."},
-    {"id": "special_key", "title": "8 特殊キー", "mode": "AUTO", "expected": "Enter and generated key-press cases are executed automatically when a target control or page-level key action exists."},
-    {"id": "print_output", "title": "9 帳票印刷", "mode": "MANUAL", "expected": "HTML/PDF/TXT/CSV layout and printed output require artifact inspection."},
-    {"id": "mail_send", "title": "10 メール送信", "mode": "MANUAL", "expected": "Sender, recipient, subject, body, and attachment confirmation needs mail-server evidence."},
-    {"id": "external_integration", "title": "11 外部連携方式", "mode": "MANUAL", "expected": "External system responses and generated interface files need environment evidence."},
-    {"id": "permission", "title": "12 権限の確認", "mode": "MANUAL", "expected": "Requires role-specific login entries and expected access matrix."},
-    {"id": "multi_browser", "title": "13 マルチブラウザ動作確認", "mode": "AUTO", "expected": "Covered when the same regression is run per browser/login entry."},
+    {"id": "screen_layout", "title": "1-1 Screen layout", "mode": "AUTO", "expected": "Legacy/New screenshots are captured and compared."},
+    {"id": "initial_display", "title": "1-2 Initial display", "mode": "AUTO", "expected": "Initial URL, DOM text, and visual state are compared."},
+    {"id": "input_display", "title": "2-1 Input display and defaults", "mode": "AUTO", "expected": "Visible controls, initial values, and generated field snapshots are compared automatically."},
+    {"id": "input_operation", "title": "2-2 Input operations", "mode": "AUTO", "expected": "Fill, clear, select, hidden value, upload, and generated operation data are executed automatically when locators exist."},
+    {"id": "error_message", "title": "2-3 Error handling", "mode": "AUTO", "expected": "Required, empty, length, numeric, invalid-character, XSS, and SQL-like generated data are executed and compared when locators exist."},
+    {"id": "search_event", "title": "3 Search, event, and button actions", "mode": "AUTO", "expected": "Buttons, links, submit controls, and action results are compared."},
+    {"id": "browser_operation", "title": "4 Browser edge operations", "mode": "AUTO", "expected": "Closed pages, popups, recovery/back behavior, and close-window buttons are recorded automatically when controls exist."},
+    {"id": "screen_transition", "title": "5 Screen transitions", "mode": "AUTO", "expected": "Navigation and post-action URLs/screenshots are compared."},
+    {"id": "file_download", "title": "6 File download", "mode": "AUTO", "expected": "Download actions save files and compare resulting UI state."},
+    {"id": "file_upload", "title": "7 File upload", "mode": "AUTO", "expected": "File inputs receive sample files and post-upload state is compared."},
+    {"id": "special_key", "title": "8 Special keys", "mode": "AUTO", "expected": "Enter and generated key-press cases are executed automatically when a target control or page-level key action exists."},
+    {"id": "print_output", "title": "9 Print and document output", "mode": "MANUAL", "expected": "HTML/PDF/TXT/CSV layout and printed output require artifact inspection."},
+    {"id": "mail_send", "title": "10 Email sending", "mode": "MANUAL", "expected": "Sender, recipient, subject, body, and attachment confirmation needs mail-server evidence."},
+    {"id": "external_integration", "title": "11 External integration", "mode": "MANUAL", "expected": "External system responses and generated interface files need environment evidence."},
+    {"id": "permission", "title": "12 Permission checks", "mode": "MANUAL", "expected": "Requires role-specific login entries and expected access matrix."},
+    {"id": "multi_browser", "title": "13 Multi-browser compatibility", "mode": "AUTO", "expected": "Covered when the same regression is run per browser/login entry."},
 ]
 
-# checklist_generator.py reads this policy to expand element-level cases into viewpoint-level checklist rows.
-# Depth is intentionally conservative enough for 1,600+ pages, but richer than simple one-click coverage.
+
 CASE_DEPTH = {
     "High": "full",
     "Medium": "standard",
     "Low": "smoke",
 }
+
 
 ELEMENT_CASE_LIMIT_HINT = {
     "page": {"smoke": 3, "standard": 5, "full": 7},
@@ -108,7 +108,14 @@ def coverage_matrix(results: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
             state = "MANUAL_GAP"
         else:
             state = "MANUAL"
-        rows.append({**section, "state": state, "automated_cases": hit_count, "statuses": dict(status_by_section.get(section_id, Counter()))})
+        rows.append(
+            {
+                **section,
+                "state": state,
+                "automated_cases": hit_count,
+                "statuses": dict(status_by_section.get(section_id, Counter())),
+            }
+        )
     return rows
 
 
@@ -121,7 +128,10 @@ def _action_type_from_payload(item: Dict[str, Any]) -> str:
 
 
 def _page_closed(item: Dict[str, Any]) -> bool:
-    return any(bool((item.get(key) or {}).get("page_closed_after_action")) for key in ("legacy_action", "new_action")) or item.get("legacy_url") == "about:closed" or item.get("new_url") == "about:closed"
+    return any(
+        bool((item.get(key) or {}).get("page_closed_after_action"))
+        for key in ("legacy_action", "new_action")
+    ) or item.get("legacy_url") == "about:closed" or item.get("new_url") == "about:closed"
 
 
 def _popup_opened(item: Dict[str, Any]) -> bool:

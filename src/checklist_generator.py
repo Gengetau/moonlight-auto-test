@@ -397,7 +397,7 @@ def common_element_fields(page: str, element: Dict[str, Any]) -> Dict[str, str]:
     evidence = element_evidence(element)
     related_fields = element.get("related_fields", [])
     if related_fields:
-        evidence = f"{evidence}\n字段完整性校验：{field_summary(related_fields)}"
+        evidence = f"{evidence}\nField completeness check: {field_summary(related_fields)}"
     return {
         "page": page,
         "kind": as_text(element.get("kind"), "unknown"),
@@ -461,13 +461,13 @@ def page_cases(page: Dict[str, Any]) -> List[TestCase]:
         "evidence": f"risk={risk}, counts={counts}, legacy_sources={page.get('legacy_sources')}, new_sources={page.get('new_sources')}",
     }
     cases = [
-        TestCase("画面初期表示確認", "Legacy/New の同一業務入口から画面が正常に表示されることを確認する。", "対象 .do にアクセスし、白画面、HTTP エラー、権限エラー、タイトル/見出し/主要文言を確認する。", "両環境で対象画面が表示され、重大な表示欠落がない。", "High", **fields),
-        TestCase("画面レイアウト差分確認", "移行前後の画面レイアウト差分を確認する。", "同一条件でスクリーンショットを取得し、差分率と目視差分を確認する。", "業務影響のある差分がない。差分がある場合は許容可否を記録する。", "High", **fields),
-        TestCase("DOM/文言差分確認", "主要文言、項目名、ボタン名、説明文が移行前後で一致することを確認する。", "DOM テキストを取得し、Legacy/New の差分を確認する。", "業務文言やメッセージに意図しない差分がない。", "Medium", **fields),
-        TestCase("文字化け確認", "Windows-31J/UTF-8 変換により日本語・記号が文字化けしないことを確認する。", "日本語、英語、全角半角、記号、改行を含む表示文言を確認する。", "豆腐文字、記号欠落、改行崩れ、エンコード崩れがない。", "High", **fields),
-        TestCase("ブラウザ戻る/再読込確認", "戻る・再読込時に不正な再送信やエラー画面にならないことを確認する。", "画面表示後に戻る、進む、再読込を実行し、画面状態とメッセージを確認する。", "安全に状態復元され、二重登録・二重送信・セッション破壊が発生しない。", "Medium", **fields),
-        TestCase("権限別初期表示確認", "権限により表示/非表示になる項目が移行後も同等であることを確認する。", "一般ユーザ、管理者、参照権限などで同一画面を表示する。", "権限外ボタンやリンクが表示されず、表示範囲が Legacy と一致する。", "High", **fields),
-        TestCase("マルチブラウザ表示確認", "対象ブラウザで画面が同等に動作することを確認する。", "Chrome/Edge/Firefox 等で初期表示、主要ボタン、スクリーンショットを確認する。", "ブラウザ差によるレイアウト崩れや JS エラーがない。", "Low", **fields),
+        TestCase("Initial page display", "Verify that the page opens successfully from the same business entry in Legacy and New.", "Open the target .do entry and check for blank pages, HTTP errors, permission errors, titles, headings, and primary text.", "Both environments display the target page without major missing content.", "High", **fields),
+        TestCase("Layout difference check", "Compare page layout before and after migration.", "Capture screenshots under the same conditions and review the visual diff rate.", "No business-impacting layout differences are present, or acceptable differences are recorded.", "High", **fields),
+        TestCase("DOM and copy difference check", "Verify that primary labels, button names, and explanatory text match after migration.", "Capture DOM text and compare Legacy/New differences.", "No unintended differences exist in business copy or messages.", "Medium", **fields),
+        TestCase("Character encoding check", "Verify that Japanese text and symbols survive Windows-31J/UTF-8 conversion.", "Review Japanese, English, full-width, half-width, symbol, and newline text.", "No replacement glyphs, missing symbols, line-break regressions, or encoding corruption appear.", "High", **fields),
+        TestCase("Back and reload behavior", "Verify that back/reload does not cause unsafe resubmission or error pages.", "Use back, forward, and reload after page display and inspect state and messages.", "State is restored safely without duplicate registration, duplicate submit, or session corruption.", "Medium", **fields),
+        TestCase("Role-based initial display", "Verify permission-dependent visible and hidden controls after migration.", "Open the same page with general, admin, and read-only roles where available.", "Out-of-scope buttons and links are hidden, and visible scope matches Legacy.", "High", **fields),
+        TestCase("Multi-browser display", "Verify equivalent behavior in the target browsers.", "Check initial display, primary buttons, and screenshots in Chrome, Edge, and Firefox where required.", "No browser-specific layout breakage or JavaScript errors occur.", "Low", **fields),
     ]
     return take_by_depth(cases, case_depth(page))
 
@@ -481,13 +481,13 @@ def form_cases(page: str, element: Dict[str, Any]) -> List[TestCase]:
     target = first_attr(attrs, "target") or "unspecified"
     label = element_label(element)
     return [
-        TestCase(f"form action/method 確認：{label}", f"action={action}, method={method}, enctype={enctype}, target={target} が移行前後で同等であることを確認する。", "画面初期表示時の form 属性を Legacy/New で比較する。", "submit 先、method、multipart、target/window/frame が同等である。", "High", **fields),
-        TestCase(f"表单提交主路径：{label}", "正常データで submit した時に想定業務処理が完了することを確認する。", "会社環境で利用可能な正常値を設定し、submit ボタンを押下する。", "新旧系统の遷移、提示文案、关键字段、后端状态一致。", "High", **fields),
-        TestCase(f"必填与空值校验：{label}", "必須・空値チェックが移行後も維持されていることを確認する。", "可见输入项逐个置空；hidden 可篡改项改空后提交。", "阻止提交或返回明确业务错误；不得出现 500、空指针或静默成功。", "High", **fields),
-        TestCase(f"字段完整性確認：{label}", "form 内字段数量、name、初期値、readonly/disabled 状态保持一致。", "初期表示 DOM 中的 input/select/textarea/hidden を比較する。", "Legacy/New 字段集合一致，差异均有迁移理由。", "Medium", **fields),
-        TestCase(f"二重送信防止確認：{label}", "重复点击/网络延迟时不会重复登録/更新。", "网络慢速条件下快速双击 submit，并刷新/重放请求。", "只产生一次有效业务处理，重复请求被拦截或幂等处理。", "High", **fields),
-        TestCase(f"边界长度与特殊字符：{label}", "覆盖字段长度、编码和转义差异。", "输入最大长度、超长、多字节、换行、单双引号、反斜杠后提交。", "长度限制稳定，多字节不乱码，特殊字符不破坏页面或 SQL/API。", "Medium", **fields),
-        TestCase(f"XSS 探针注入：{label}", "提交值在当前页/确认页/错误页被正确转义。", "输入 <script>alert(1)</script> 等探针并提交。", "浏览器不执行脚本；响应中无未转义用户输入。", "High", **fields),
+        TestCase(f"Form action and method: {label}", f"Verify action={action}, method={method}, enctype={enctype}, target={target} after migration.", "Compare form attributes on initial display in Legacy and New.", "Submit target, method, multipart settings, and target window/frame behavior are equivalent.", "High", **fields),
+        TestCase(f"Primary form submit path: {label}", "Verify that normal data submit completes the intended business process.", "Enter valid business data available in the client environment and submit the form.", "Navigation, messages, key fields, and backend state match between Legacy and New.", "High", **fields),
+        TestCase(f"Required and empty-value validation: {label}", "Verify that required and empty-value validation remains intact.", "Clear visible inputs and tamper-capable hidden values before submit.", "Submit is blocked or a clear business error is shown; no 500, null-pointer, or silent success occurs.", "High", **fields),
+        TestCase(f"Field completeness: {label}", "Verify field count, names, initial values, readonly state, and disabled state.", "Compare input, select, textarea, and hidden fields from the initial DOM.", "Legacy/New field sets match, and every difference has a migration reason.", "Medium", **fields),
+        TestCase(f"Duplicate submit prevention: {label}", "Verify that repeat clicks and network delay do not duplicate updates.", "Double-click submit under slow-network conditions and retry/replay where appropriate.", "Only one effective business operation is produced, or duplicate requests are rejected/idempotent.", "High", **fields),
+        TestCase(f"Boundary length and special characters: {label}", "Cover field length, encoding, and escaping differences.", "Submit max length, overlong, multibyte, newline, quote, and backslash values.", "Length limits remain stable, multibyte text is not corrupted, and special characters do not break the page or SQL/API layers.", "Medium", **fields),
+        TestCase(f"XSS probe injection: {label}", "Verify submitted values are escaped on current, confirmation, and error pages.", "Submit probes such as <script>alert(1)</script>.", "The browser does not execute script, and the response has no unescaped user input.", "High", **fields),
     ]
 
 
@@ -499,13 +499,13 @@ def field_cases(page: str, element: Dict[str, Any]) -> List[TestCase]:
     readonly = first_attr(attrs, "readonly", "readOnly") or "false"
     disabled = first_attr(attrs, "disabled") or "false"
     return [
-        TestCase(f"入力項目表示確認：{label}", "入力項目が移行前後で同じ名称・位置・初期値で表示されることを確認する。", "初期表示で対象項目の表示、活性/非活性、初期値、readonly/disabled を確認する。", f"Legacy/New で表示状態、初期値、readonly={readonly}, disabled={disabled} が一致する。", "High", **fields),
-        TestCase(f"入力可能確認：{label}", "対象項目に通常文字列を入力できることを確認する。", "半角英数、全角日本語、数字、記号を入力し、フォーカスアウト/submit を実行する。", "入力値が保持され、文字化けや JS エラーが発生しない。", "Medium", **fields),
-        TestCase(f"最大桁数確認：{label}", f"maxlength={maxlength} の制御が移行後も維持されていることを確認する。", "最大桁数ちょうど、最大桁数超過、全角/半角混在値を入力する。", "桁数内は正常、超過時は入力制限または業務エラーとなる。", "Medium", **fields),
-        TestCase(f"空値/必須チェック：{label}", "必須または業務必須項目の空値制御を確認する。", "対象項目を空欄にして登録/検索/更新を実行する。", "必要に応じてエラーメッセージが表示され、不正データが登録されない。", "High", **fields),
-        TestCase(f"前後空白・改行確認：{label}", "trim、改行、タブの扱いが移行前後で一致することを確認する。", "前後空白、タブ、改行を含む値を入力して submit する。", "保存/検索/表示時の空白処理が Legacy と一致する。", "Medium", **fields),
-        TestCase(f"特殊文字入力確認：{label}", "特殊文字、記号、SQL/XSS 探針に対する入力制御を確認する。", "単引号、ダブルクォート、HTML タグ、円記号、全角記号を入力する。", "画面崩れ、SQL エラー、スクリプト実行、文字化けが発生しない。", "High", **fields),
-        TestCase(f"IME/多バイト文字確認：{label}", "日本語 IME 入力やサロゲート文字の扱いを確認する。", "ひらがな、カタカナ、漢字、旧字体、機種依存文字を入力する。", "文字化け・欠落・桁数誤判定がない。", "Low", **fields),
+        TestCase(f"Input display: {label}", "Verify that the input appears with the same label, position, and initial value after migration.", "Check visibility, enabled/disabled state, initial value, readonly, and disabled attributes on initial display.", f"Legacy/New display state, initial value, readonly={readonly}, and disabled={disabled} match.", "High", **fields),
+        TestCase(f"Input editing: {label}", "Verify that normal text can be entered into the field.", "Enter alphanumeric, Japanese, numeric, and symbol values, then blur or submit.", "The value is retained without encoding corruption or JavaScript errors.", "Medium", **fields),
+        TestCase(f"Maximum length: {label}", f"Verify that maxlength={maxlength} behavior is preserved after migration.", "Enter exact-limit, over-limit, and mixed full-width/half-width values.", "Within-limit values pass, and over-limit values are blocked or rejected with a business error.", "Medium", **fields),
+        TestCase(f"Empty and required checks: {label}", "Verify empty-value handling for required or business-required fields.", "Clear the target field and run register, search, or update.", "An appropriate error message is shown and invalid data is not saved.", "High", **fields),
+        TestCase(f"Whitespace and newline handling: {label}", "Verify consistent trimming, newline, and tab handling.", "Submit values with leading/trailing spaces, tabs, and newlines.", "Whitespace handling during save, search, and display matches Legacy.", "Medium", **fields),
+        TestCase(f"Special character input: {label}", "Verify controls for symbols and SQL/XSS probes.", "Enter single quotes, double quotes, HTML tags, yen/backslash characters, and full-width symbols.", "No page breakage, SQL error, script execution, or encoding corruption occurs.", "High", **fields),
+        TestCase(f"IME and multibyte input: {label}", "Verify Japanese IME input and surrogate-character handling.", "Enter hiragana, katakana, kanji, legacy glyphs, and platform-dependent characters.", "No encoding corruption, missing characters, or length miscalculation occurs.", "Low", **fields),
     ]
 
 
@@ -513,9 +513,9 @@ def hidden_cases(page: str, element: Dict[str, Any]) -> List[TestCase]:
     fields = common_element_fields(page, element)
     label = element_label(element)
     return [
-        TestCase(f"hidden 引継ぎ確認：{label}", "画面遷移・submit 時に hidden 値が移行前後で同等に引き継がれることを確認する。", "初期表示時と submit 直前の hidden 値を Legacy/New で比較する。", "userId、projectId、権限、mode などの hidden 値が意図通り保持される。", "High", **fields),
-        TestCase(f"hidden 改ざん耐性確認：{label}", "hidden 値改ざんで権限回避や他データ操作ができないことを確認する。", "hidden 値を空値、他ユーザ値、不正値、超長値に変更して submit する。", "不正値は拒否され、権限外データ参照・更新が発生しない。", "High", **fields),
-        TestCase(f"hidden 欠落時エラー制御：{label}", "hidden 欠落時に安全なエラー制御となることを確認する。", "対象 hidden を DOM から削除して submit する。", "NullPointer/500 ではなく業務エラーまたは安全な再表示となる。", "Medium", **fields),
+        TestCase(f"Hidden value carry-over: {label}", "Verify hidden values are carried through screen transitions and submits.", "Compare hidden values on initial display and immediately before submit in Legacy and New.", "Hidden values such as userId, projectId, permission, and mode are preserved as intended.", "High", **fields),
+        TestCase(f"Hidden tamper resistance: {label}", "Verify that hidden-value tampering cannot bypass permissions or operate on other data.", "Change hidden values to empty, another user, invalid, or overlong values before submit.", "Invalid values are rejected and out-of-scope data is not viewed or updated.", "High", **fields),
+        TestCase(f"Hidden missing-value handling: {label}", "Verify safe behavior when a hidden value is missing.", "Remove the target hidden field from the DOM and submit.", "A business error or safe redisplay occurs instead of NullPointer or HTTP 500.", "Medium", **fields),
     ]
 
 
@@ -525,18 +525,18 @@ def file_cases(page: str, element: Dict[str, Any]) -> List[TestCase]:
     accept = first_attr(attrs, "accept") or "(not specified)"
     label = element_label(element)
     return [
-        TestCase(f"ファイル選択欄表示確認：{label}", "ファイル選択欄が移行前後で表示され、input[type=file] として操作可能であることを確認する。", "初期表示でファイル選択欄の表示、name、活性状態を確認する。", "Legacy/New で同じ name の file input が存在し、操作可能である。", "High", **fields),
-        TestCase(f"未選択アップロード：{label}", "ファイル未選択でアップロードした場合のエラー制御を確認する。", "ファイルを選択せずアップロードボタンを押下する。", "業務エラーが表示され、500 エラーや空登録が発生しない。", "High", **fields),
-        TestCase(f"正常ファイルアップロード：{label}", f"業務で許可されたファイルを正常にアップロードできることを確認する。accept={accept}。", "有効なテンプレート/サンプルファイルを選択して submit する。", "上传成功；メッセージ、遷移、登録結果が Legacy/New で一致する。", "High", **fields),
-        TestCase(f"空ファイルアップロード：{label}", "0 byte または空内容ファイルの扱いを確認する。", "0 byte ファイル、空行のみのファイルをアップロードする。", "不正ファイルとして拒否、または仕様通り処理される。", "High", **fields),
-        TestCase(f"拡張子不正：{label}", "許可外拡張子が拒否されることを確認する。", "txt、exe、zip 等の非許可拡張子ファイルをアップロードする。", "非法类型被拒绝；错误消息清晰；服务端不保存危险文件。", "High", **fields),
-        TestCase(f"ファイルタイプ偽装：{label}", "扩展名と MIME/内容が不一致のファイルを拒否できることを確認する。", "テキストを .xls/.xlsx に改名、または MIME が異なるファイルをアップロードする。", "真实内容校验或业务校验生效，不发生异常处理。", "High", **fields),
-        TestCase(f"サイズ上限境界：{label}", "multipart 上限、业务上限、反向代理限制が一致することを確認する。", "上限直下、上限ちょうど、上限超過ファイルをアップロードする。", "境界内は正常、超過は安定拒否。500/504 や临时文件残留がない。", "High", **fields),
-        TestCase(f"日本語ファイル名：{label}", "日本語ファイル名が文字化けせず処理されることを確認する。", "漢字、かな、全角スペース、長音、括弧を含むファイル名でアップロードする。", "メッセージ、ログ、登録結果、ダウンロード時のファイル名が文字化けしない。", "Medium", **fields),
-        TestCase(f"記号付きファイル名：{label}", "記号・空白を含むファイル名の安全性を確認する。", "../、..\\、单双引号、空白、括号、换行、超长文件名でアップロードする。", "路径穿越、日志污染、页面崩れがなく、安全に拒否または正規化される。", "Medium", **fields),
-        TestCase(f"テンプレート形式不正：{label}", "Excel/CSV 等の列不足、型不正、必須列欠落を検出できることを確認する。", "必須列缺失、列名错误、重复行、型不正、件数超過のファイルをアップロードする。", "該当行/列の業務エラーが表示され、不正データは登録されない。", "High", **fields),
-        TestCase(f"二重アップロード：{label}", "同一ファイルを連続アップロードした場合の重複処理を確認する。", "同じファイルを連続でアップロードし、二重クリックも実行する。", "重複登録が防止される、または仕様通り上書き/エラーとなる。", "Medium", **fields),
-        TestCase(f"アップロード後メッセージ/画面状態：{label}", "アップロード後のメッセージ、画面遷移、入力欄状態が移行前後で一致することを確認する。", "正常/异常アップロード後の画面、メッセージ、戻る操作、再アップロード可否を確認する。", "Legacy/New でメッセージ、遷移、再操作状態が一致する。", "High", **fields),
+        TestCase(f"File input display: {label}", "Verify that the file input appears after migration and is operable as input[type=file].", "Check file input visibility, name, and enabled state on initial display.", "Legacy/New contain an operable file input with the same name.", "High", **fields),
+        TestCase(f"Upload with no file selected: {label}", "Verify error handling when upload is submitted without a file.", "Press the upload button without selecting a file.", "A business error is shown without HTTP 500 or empty registration.", "High", **fields),
+        TestCase(f"Valid file upload: {label}", f"Verify that an allowed business file can be uploaded. accept={accept}.", "Select a valid template or sample file and submit.", "Upload succeeds, and messages, navigation, and registration results match between Legacy and New.", "High", **fields),
+        TestCase(f"Empty file upload: {label}", "Verify handling for 0-byte or empty-content files.", "Upload a 0-byte file or a file containing only blank lines.", "The file is rejected as invalid or processed exactly as specified.", "High", **fields),
+        TestCase(f"Invalid file extension: {label}", "Verify that disallowed extensions are rejected.", "Upload files with extensions such as txt, exe, and zip when not allowed.", "Invalid types are rejected with a clear error, and dangerous files are not saved server-side.", "High", **fields),
+        TestCase(f"File type spoofing: {label}", "Verify rejection when extension and MIME/content do not match.", "Rename text content to .xls/.xlsx or upload a file with mismatched MIME.", "Content validation or business validation is effective without abnormal processing.", "High", **fields),
+        TestCase(f"File size boundary: {label}", "Verify multipart, business, and reverse-proxy size limits.", "Upload files just below, exactly at, and above the limit.", "Within-boundary files pass, over-limit files are rejected reliably, and no 500/504 or temporary-file leak occurs.", "High", **fields),
+        TestCase(f"Japanese filename: {label}", "Verify that Japanese filenames are processed without encoding corruption.", "Upload filenames containing kanji, kana, full-width spaces, long vowels, and brackets.", "Messages, logs, registration results, and download filenames are not corrupted.", "Medium", **fields),
+        TestCase(f"Symbol-heavy filename: {label}", "Verify filename safety for symbols and spaces.", "Upload filenames containing ../, ..\\, quotes, spaces, brackets, newlines, and very long names.", "Path traversal, log pollution, and page breakage do not occur; unsafe names are rejected or normalized.", "Medium", **fields),
+        TestCase(f"Invalid template format: {label}", "Verify detection of missing columns, invalid types, and missing required fields in Excel/CSV files.", "Upload files with missing required columns, incorrect column names, duplicate rows, invalid types, or excessive row counts.", "Business errors identify the relevant row or column, and invalid data is not registered.", "High", **fields),
+        TestCase(f"Duplicate upload: {label}", "Verify duplicate handling when the same file is uploaded repeatedly.", "Upload the same file repeatedly and include a double-click attempt.", "Duplicate registration is prevented, or overwrite/error behavior follows the specification.", "Medium", **fields),
+        TestCase(f"Post-upload message and page state: {label}", "Verify messages, navigation, and input state after upload.", "Check page state, messages, back behavior, and re-upload availability after valid and invalid uploads.", "Legacy/New messages, navigation, and re-operation state match.", "High", **fields),
     ]
 
 
@@ -547,25 +547,25 @@ def button_cases(page: str, element: Dict[str, Any]) -> List[TestCase]:
     label = element_label(element)
     semantic = button_semantic(element)
     cases = [
-        TestCase(f"ボタン表示/活性確認：{label}", "ボタンが移行前後で同じ表示名・位置・活性状態で表示されることを確認する。", "初期表示でボタンの文言、表示、disabled、権限別表示を確認する。", "表示/非表示、活性/非活性、文言が Legacy/New で一致する。", "High", **fields),
-        TestCase(f"ボタンクリック主路径：{label}", "ボタン押下時に移行前後で同じ業務動作が実行されることを確認する。", "正常页面状态でクリックし、请求、跳转、弹窗、页面刷新、后端状态变化を記録する。", "新旧系统行为一致；按钮不会无响应、重复触发或触发错误 action。", "High", **fields),
-        TestCase(f"前端脚本依赖检查：{label}", f"onclick 或关联脚本迁移后没有丢失。onclick={onclick}。", "打开浏览器控制台点击按钮；观察 JS 错误、缺失函数、未定义变量和被拦截请求。", "控制台无脚本错误；动态校验、确认框、参数拼接、页面状态更新正常。", "Medium", **fields),
-        TestCase(f"重复点击与防重提交：{label}", "重复点击时不会重复登记/更新/发送。", "快速双击/多击按钮；网络慢速条件下重复点击。", "只产生一次有效业务处理；重复请求被拦截或安全幂等。", "High", **fields),
+        TestCase(f"Button display and enabled state: {label}", "Verify that the button keeps the same label, position, and enabled state after migration.", "Check button text, visibility, disabled state, and role-dependent display on initial display.", "Visible/hidden state, enabled/disabled state, and label match between Legacy and New.", "High", **fields),
+        TestCase(f"Primary button click path: {label}", "Verify that clicking the button performs the same business action after migration.", "Click from a normal page state and record requests, navigation, popups, refreshes, and backend state changes.", "Legacy/New behavior matches; the button does not become unresponsive, duplicate-triggered, or routed to the wrong action.", "High", **fields),
+        TestCase(f"Frontend script dependency: {label}", f"Verify that onclick and related scripts survived migration. onclick={onclick}.", "Click the button with the browser console open and observe JavaScript errors, missing functions, undefined variables, and blocked requests.", "No console script errors occur; dynamic validation, confirms, parameter composition, and page-state updates work normally.", "Medium", **fields),
+        TestCase(f"Repeat click and duplicate-submit guard: {label}", "Verify that repeated clicks do not duplicate registration, update, or send operations.", "Double-click or multi-click quickly, including under slow-network conditions.", "Only one effective business operation is produced, or duplicate requests are blocked/idempotent.", "High", **fields),
     ]
     if semantic == "submit":
         cases.extend([
-            TestCase(f"submit 先確認：{label}", "按钮押下时提交到预期 action，target/frame/window 保持一致。", "点击按钮并记录 request URL、method、target、遷移先。", "Legacy/New で submit 先、遷移、メッセージが一致する。", "High", **fields),
-            TestCase(f"submit エラー時再表示確認：{label}", "submit 后业务错误时页面可安全再显示。", "输入异常数据后点击按钮，确认错误消息和输入保持。", "不发生 500/白画面；错误消息、输入保持、焦点位置与 Legacy 一致。", "High", **fields),
+            TestCase(f"Submit target check: {label}", "Verify the button submits to the expected action and preserves target/frame/window behavior.", "Click the button and record request URL, method, target, and destination.", "Legacy/New submit target, transition, and message behavior match.", "High", **fields),
+            TestCase(f"Redisplay after submit error: {label}", "Verify safe redisplay after a business error on submit.", "Click the button with invalid data and check error messages and retained input.", "No HTTP 500 or blank page occurs; error message, input retention, and focus position match Legacy.", "High", **fields),
         ])
     elif semantic == "close_window":
         cases.extend([
-            TestCase(f"閉じる/キャンセル動作確認：{label}", "キャンセル/閉じるボタン押下時に対象ウィンドウが仕様通り閉じることを確認する。", "クリック後の window close、親画面状態、セッション状態を確認する。", "対象ウィンドウが閉じる、または仕様通り前画面へ戻る。親画面に異常がない。", "High", **fields),
-            TestCase(f"閉じる後の再表示確認：{label}", "閉じる操作後に再度同じ画面を開けることを確認する。", "キャンセル後、メニューまたは業務入口から同じ画面を再表示する。", "再表示でき、session/context が壊れていない。", "Medium", **fields),
+            TestCase(f"Close/cancel behavior: {label}", "Verify that the target window closes or returns according to specification.", "Click the control and inspect window close behavior, parent page state, and session state.", "The target window closes or returns to the previous page as specified, with no parent-page error.", "High", **fields),
+            TestCase(f"Redisplay after close: {label}", "Verify that the same page can be opened again after close/cancel.", "After cancel, reopen the same page through the menu or business entry.", "The page can be redisplayed and session/context remains valid.", "Medium", **fields),
         ])
     elif semantic == "download":
         cases.extend([
-            TestCase(f"ダウンロード起動確認：{label}", "ボタン押下で想定ファイル出力が開始されることを確認する。", "クリック後の download event、ファイル名、拡張子、サイズを確認する。", "Legacy/New でファイル名、形式、内容概要が一致する。", "High", **fields),
-            TestCase(f"ダウンロード権限確認：{label}", "権限外ユーザがファイル出力できないことを確認する。", "権限の異なるユーザで同ボタンを表示/クリックする。", "権限外では非表示またはエラーとなり、ファイルが出力されない。", "High", **fields),
+            TestCase(f"Download start: {label}", "Verify that clicking the button starts the expected file output.", "Inspect the download event, filename, extension, and size after click.", "Legacy/New filename, format, and content summary match.", "High", **fields),
+            TestCase(f"Download permission: {label}", "Verify that unauthorized users cannot export the file.", "Display or click the button with users that have different permissions.", "Unauthorized users see a hidden control or error, and no file is exported.", "High", **fields),
         ])
     return cases
 
@@ -577,14 +577,14 @@ def link_cases(page: str, element: Dict[str, Any]) -> List[TestCase]:
     target = first_attr(attrs, "target") or "(not specified)"
     label = element_label(element)
     return [
-        TestCase(f"リンク表示確認：{label}", "リンクが移行前後で同じ文言・位置・表示条件で表示されることを確認する。", "初期表示でリンク文言、href/onclick、target、権限別表示を確認する。", "Legacy/New で表示状態、文言、href/target が一致する。", "High", **fields),
-        TestCase(f"リンク导航主路径：{label}", f"迁移后的链接仍进入正确页面或业务动作，target={href}。", "点击链接，记录目标 URL、请求参数、页面标题和关键内容。", "新旧系统目标一致；参数未丢失；无 404/500；登录态和权限状态保持正确。", "High", **fields),
-        TestCase(f"リンク target/popup 確認：{label}", f"target={target} の挙動が移行前後で同等であることを確認する。", "通常クリック、新タブ/別窗口、popup の有無を確認する。", "popup/window/frame の開き方が Legacy/New で一致する。", "Medium", **fields),
-        TestCase(f"パラメータ引継ぎ確認：{label}", "リンク押下時の id、mode、returnUrl 等のパラメータが正しく引き継がれることを確認する。", "クリック前後の URL、hidden、request parameter を確認する。", "必要パラメータが欠落せず、余計な機密情報が露出しない。", "High", **fields),
-        TestCase(f"参数篡改与权限校验：{label}", "リンクパラメータ改ざんで権限外データを参照できないことを確認する。", "URL 参数を不存在、越权、空值、特殊字符、超长值に変更して访问。", "非法参数被拒绝或回到安全页面；不得泄漏数据、堆栈或内部路径。", "High", **fields),
-        TestCase(f"返回与打开方式：{label}", "浏览器返回、刷新、新标签页打开时状态一致。", "点击后执行返回、刷新、新标签页打开；对弹窗/下载额外确认。", "页面状态可恢复；不会重复提交危险操作；下载/弹窗行为与旧系统一致。", "Medium", **fields),
-        TestCase(f"リンク切れ確認：{label}", "ヘルプ・外部リンク・静的ファイルリンクが切れていないことを確認する。", "リンク先にアクセスし、HTTP status、文字化け、404/500 を確認する。", "リンク先が正常表示される。環境差分がある場合は許容理由を記録する。", "Medium", **fields),
-        TestCase(f"別言語リンク確認：{label}", "言語切替によりヘルプ/文言リンクが正しく切り替わることを確認する。", "日本語/英語等の言語設定でリンク先と表示文言を確認する。", "言語に応じた正しいリンク先・文言が表示される。", "Low", **fields),
+        TestCase(f"Link display: {label}", "Verify that the link keeps the same text, position, and display conditions after migration.", "Check link text, href/onclick, target, and role-dependent display on initial display.", "Legacy/New visibility, text, href, and target match.", "High", **fields),
+        TestCase(f"Primary link navigation path: {label}", f"Verify that the migrated link still reaches the correct page or business action, target={href}.", "Click the link and record target URL, request parameters, page title, and key content.", "Legacy/New targets match; parameters are preserved; no 404/500 occurs; login and permission state remain valid.", "High", **fields),
+        TestCase(f"Link target and popup behavior: {label}", f"Verify target={target} behavior after migration.", "Check normal click, new tab/window, and popup behavior.", "Popup/window/frame opening behavior matches between Legacy and New.", "Medium", **fields),
+        TestCase(f"Parameter carry-over: {label}", "Verify id, mode, returnUrl, and similar parameters on link click.", "Inspect URL, hidden values, and request parameters before and after click.", "Required parameters are not lost, and unnecessary sensitive data is not exposed.", "High", **fields),
+        TestCase(f"Parameter tamper and permission check: {label}", "Verify that link parameter tampering cannot access unauthorized data.", "Change URL parameters to nonexistent, unauthorized, empty, special-character, and overlong values.", "Invalid parameters are rejected or redirected safely without leaking data, stack traces, or internal paths.", "High", **fields),
+        TestCase(f"Back and open-mode behavior: {label}", "Verify state consistency after browser back, refresh, and new-tab open.", "Click, then run back, refresh, and new-tab open; check popups/downloads separately.", "Page state recovers safely without repeating dangerous operations, and download/popup behavior matches Legacy.", "Medium", **fields),
+        TestCase(f"Broken link check: {label}", "Verify that help, external, and static file links are not broken.", "Open the link target and check HTTP status, encoding, and 404/500 responses.", "The link target displays normally, or environment differences have an accepted reason.", "Medium", **fields),
+        TestCase(f"Localized link check: {label}", "Verify that help and copy links switch correctly by language.", "Check link target and displayed text under Japanese and English language settings.", "The correct link target and text appear for each language.", "Low", **fields),
     ]
 
 
@@ -600,10 +600,10 @@ def scenario_cases(page: str, element: Dict[str, Any]) -> List[TestCase]:
         meta = executable_metadata(element)
         return [
             TestCase(
-                title=f"自动化実行シナリオ：ファイル選択→submit：{label}",
-                objective="ファイルアップロード画面で、ファイル選択後に form submit する一連の主経路を自動実行対象として確認する。",
-                steps="pre_steps で uploadFile にテストファイルを設定し、main_step で form submit を実行する。",
-                expected="Legacy/New とも submit が完了し、遷移先・メッセージ・画面状態に重大差分がない。",
+                title=f"Automated scenario: file select to submit: {label}",
+                objective="Verify the primary automated path for selecting a file and submitting the form.",
+                steps="Set the test file through pre_steps and submit the form or button through main_step.",
+                expected="Legacy/New both complete submit without major differences in destination, messages, or page state.",
                 severity="High",
                 **fields,
                 automation_mode="auto",
@@ -620,10 +620,10 @@ def scenario_cases(page: str, element: Dict[str, Any]) -> List[TestCase]:
     meta = executable_metadata(element)
     return [
         TestCase(
-            title=f"自动化実行シナリオ：{case_type}：{label}",
-            objective="page_mapping の executable_cases として生成された実行対象シナリオを確認する。",
-            steps=f"case_type={case_type}, pre_steps={len(pre_steps)}, main_step={as_text(main_step.get('action_type'), '-')} を実行する。",
-            expected="Legacy/New で同等の実行結果となり、BLOCKED または重大 DIFF が発生しない。",
+            title=f"Automated scenario: {case_type}: {label}",
+            objective="Verify an executable scenario generated from page_mapping executable_cases.",
+            steps=f"Run case_type={case_type}, pre_steps={len(pre_steps)}, main_step={as_text(main_step.get('action_type'), '-')}.",
+            expected="Legacy/New produce equivalent results without BLOCKED or major DIFF outcomes.",
             severity="Medium",
             **fields,
             automation_mode="auto",
@@ -706,11 +706,11 @@ def collect_elements(page: Dict[str, Any]) -> List[Dict[str, Any]]:
         locator = normalized_locator(normalized_element)
         label = element_label(normalized_element).strip()
         
-        # 过滤低价值元素，减少 Checklist 噪音
+        # Skip low-value elements to keep the checklist focused.
         if kind in {"link", "button"} and not label and locator == "(locator missing)":
             continue
         if kind == "hidden":
-            continue # 隐藏域通常不需要出现在人工 Checklist 中
+            continue  # Hidden fields are handled through form-level evidence.
             
         line = as_text(normalized_element.get("line"), "-")
         source = as_text(normalized_element.get("_source"), "")
@@ -939,15 +939,15 @@ def automation_case(page: str, element: Dict[str, Any]) -> Optional[TestCase]:
     fields["locator"] = meta["locator"] or fields["locator"]
 
     if case_type == "upload_submit":
-        title = f"AUTO 実行：ファイル選択→submit：{label}"
-        objective = "Excel checklist から自動実行できるファイルアップロード主経路を定義する。"
-        steps = "locator にテストファイルを設定し、submit_locator の form/button/link で submit する。"
-        expected = "Legacy/New とも実行が完了し、BLOCKED または重大 DIFF が発生しない。"
+        title = f"AUTO execution: file select to submit: {label}"
+        objective = "Define the primary upload path that can run from the Excel checklist."
+        steps = "Set the test file on locator, then submit through submit_locator on a form, button, or link."
+        expected = "Legacy/New both complete execution without BLOCKED or major DIFF outcomes."
     else:
-        title = f"AUTO 実行：{action_type}：{label}"
-        objective = "Excel checklist から自動実行できる画面操作を定義する。"
-        steps = "対象 locator に対して action_type の操作を実行し、Legacy/New の結果を比較する。"
-        expected = "Legacy/New とも同等の結果となり、BLOCKED または重大 DIFF が発生しない。"
+        title = f"AUTO execution: {action_type}: {label}"
+        objective = "Define a page operation that can run from the Excel checklist."
+        steps = "Run action_type against the target locator and compare Legacy/New results."
+        expected = "Legacy/New produce equivalent results without BLOCKED or major DIFF outcomes."
 
     return TestCase(
         title,
@@ -1295,27 +1295,27 @@ def render_markdown(scan_data: Dict[str, Any], cases: Sequence[TestCase]) -> str
     pages = list(page_entries(scan_data))
     totals = summarize_counts(scan_data, cases)
     lines = [
-        "# 自动化测试建议报告",
+        "# Automated Test Recommendation Report",
         "",
-        f"- 生成时间：{generated_at}",
-        f"- 扫描根路径：{as_text(scan_data.get('root'), as_text(scan_data.get('source'), '<unknown>'))}",
-        f"- 页面数量：{len(pages)}",
-        f"- 元素统计：form={totals.get('form', 0)}，file={totals.get('file', 0)}，button={totals.get('button', 0)}，link={totals.get('link', 0)}",
-        f"- 建议用例数：{totals.get('test_cases', 0)}",
+        f"- Generated at: {generated_at}",
+        f"- Scan root: {as_text(scan_data.get('root'), as_text(scan_data.get('source'), '<unknown>'))}",
+        f"- Page count: {len(pages)}",
+        f"- Element totals: form={totals.get('form', 0)}, file={totals.get('file', 0)}, button={totals.get('button', 0)}, link={totals.get('link', 0)}",
+        f"- Recommended case count: {totals.get('test_cases', 0)}",
         "",
-        "## 主优先执行清单",
+        "## Priority Execution List",
         "",
     ]
     high_cases = [case for case in cases if case.severity == "High"]
     for index, case in enumerate(high_cases[:20], start=1):
         lines.append(f"{index}. [{case.page}:{case.line}] {case.title} - {case.objective}")
     if not high_cases:
-        lines.append("未发现可生成的高优先级用例。请确认输入 JSON 中包含页面/元素或 page_mapping 信息。")
+        lines.append("No high-priority cases were generated. Confirm that the input JSON contains pages, elements, or page_mapping data.")
     lines.extend(universal_checklist_markdown_lines())
-    lines.extend(["", "## 用例明细", "", "| # | 优先级 | 页面 | 行 | 类型 | 定位器 | 用例 | 操作建议 | 期望结果 | 自动化模式 | action_type |", "|---|---|---|---|---|---|---|---|---|---|---|"])
+    lines.extend(["", "## Case Details", "", "| # | Severity | Page | Line | Type | Locator | Case | Suggested Action | Expected Result | Automation Mode | action_type |", "|---|---|---|---|---|---|---|---|---|---|---|"])
     for index, case in enumerate(cases, start=1):
         lines.append("| " + " | ".join(markdown_escape_cell(value) for value in [str(index), case.severity, case.page, case.line, case.kind, case.locator, f"{case.title}\n{case.objective}", case.steps, case.expected, case.automation_mode, case.action_type]) + " |")
-    lines.extend(["", "## 元素证据", "", "| 页面 | 行 | 类型 | 定位器 | JSP 线索 |", "|---|---|---|---|---|"])
+    lines.extend(["", "## Element Evidence", "", "| Page | Line | Type | Locator | JSP Evidence |", "|---|---|---|---|---|"])
     for case in unique_evidence_cases(cases):
         lines.append("| " + " | ".join(markdown_escape_cell(value) for value in [case.page, case.line, case.kind, case.locator, case.evidence]) + " |")
     return "\n".join(lines) + "\n"
@@ -1363,14 +1363,14 @@ def write_excel(
             export_page_spec_inputs=export_page_spec_inputs,
         )
     summary_rows = [
-        ("生成时间", datetime.now().strftime("%Y-%m-%d %H:%M:%S")),
-        ("扫描根路径", as_text(scan_data.get("root"), as_text(scan_data.get("source"), "<unknown>"))),
-        ("页面数量", len(page_profiles) if page_profiles else len(pages)),
+        ("Generated at", datetime.now().strftime("%Y-%m-%d %H:%M:%S")),
+        ("Scan root", as_text(scan_data.get("root"), as_text(scan_data.get("source"), "<unknown>"))),
+        ("Page count", len(page_profiles) if page_profiles else len(pages)),
         ("form", totals.get("form", 0)),
         ("file", totals.get("file", 0)),
         ("button", totals.get("button", 0)),
         ("link", totals.get("link", 0)),
-        ("建议用例数", totals.get("test_cases", 0)),
+        ("Recommended case count", totals.get("test_cases", 0)),
     ]
     for row in summary_rows:
         summary.append(row)

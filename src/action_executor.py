@@ -1634,7 +1634,7 @@ def _wait_for_semantic_ready(page: Page, timeout: int = 10000) -> Dict[str, Any]
         wait_state["page_closed"] = True
         return wait_state
     wait_state["popup_window_restore"] = restore_popup_window_state(page)
-    # 针对旧系统，优先使用 domcontentloaded
+    # Prefer domcontentloaded for legacy systems.
     try:
         page.wait_for_load_state("domcontentloaded", timeout=timeout)
         wait_state["domcontentloaded"] = True
@@ -1645,7 +1645,7 @@ def _wait_for_semantic_ready(page: Page, timeout: int = 10000) -> Dict[str, Any]
         page.wait_for_load_state("networkidle", timeout=min(timeout, 1500))
         wait_state["networkidle"] = True
     except (PlaywrightTimeoutError, PlaywrightError):
-        # networkidle 对于旧系统经常超时，不作为硬性阻塞
+        # networkidle often times out on legacy systems and is not a hard blocker.
         pass
 
     # Use stable business content instead of a fixed sleep before screenshots.
@@ -1960,12 +1960,12 @@ def _resolve_upload_file_value(value: Any, capture_dir: Optional[Union[str, Path
 
 def _resolve_upload_locator(frame: Frame, selector: str) -> Tuple[str, Dict[str, Any]]:
     """
-    upload action 专用 selector 修正。
+    Resolve upload-specific selector mismatches.
 
-    历史 Struts JSP 中 <html:file name="FormBean" property="uploadFile" />
-    容易被扫描成 [name='FormBean']，实际运行时该 locator 指向 <form>，
-    不能执行 set_input_files()。这里在执行 upload 前确认目标是否为
-    <input type="file">；如果不是，则自动 fallback 到页面内的 file input。
+    Legacy Struts JSP such as <html:file name="FormBean" property="uploadFile" />
+    can be scanned as [name='FormBean'], which may point to a <form> at runtime
+    and cannot run set_input_files(). Before upload execution, confirm that the
+    target is <input type="file">; otherwise fall back to a file input on the page.
     """
     diagnostics: Dict[str, Any] = {
         "original_selector": selector,
@@ -2441,7 +2441,7 @@ def execute_action(
     action_context: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """
-    根据操作类型执行 Playwright UI 操作，包含多端适配容错。
+    Execute Playwright UI actions with cross-browser tolerance.
 
     Returns a structured status and, when capture_dir is provided, an automatic
     post-action screenshot/state payload. Failures are converted to BLOCKED so
@@ -2475,7 +2475,7 @@ def execute_action(
 
     def _record_event(event_type: str, details: Any, *, level: str = "info", url: str = "", status: Optional[int] = None):
         nonlocal event_log_initialized
-        # 内部闭包用于记录 Playwright 事件
+        # Record Playwright events for diagnostics.
         event = {
             "time": time.strftime("%H:%M:%S"),
             "type": event_type,
@@ -2560,7 +2560,7 @@ def execute_action(
         context_event_handlers.append((context, event_name, handler))
 
     try:
-        # 注入 Runtime Debugger
+        # Attach runtime diagnostics.
         _attach_event("console", _on_console)
         _attach_event("pageerror", _on_pageerror)
         _attach_event("requestfailed", _on_requestfailed)
@@ -2761,7 +2761,7 @@ def execute_action(
         if semantic_action in NEGATIVE_ACTIONS or navigated_directly:
             pass
         elif semantic_action in ("click", "navigate", "browser_dialog", "print"):
-            # 增加元素可见性检查
+            # Check element visibility before dispatch.
             locator = frame.locator(selector).first
             action_dispatched = True
             setup_script = str((action_context or {}).get("setup_script") or "").strip()

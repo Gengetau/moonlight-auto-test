@@ -1,13 +1,14 @@
 import re
 import xml.etree.ElementTree as ET
 from pathlib import Path
-from typing import Dict, Optional, Union, List
+from typing import Dict, List, Optional, Union
+
 
 class StrutsResolver:
     """
-    Parses struts-config.xml (or directories of them) to resolve view pages (JSP) 
-    back to their entry actions (.do).
+    Parse struts-config.xml files and resolve view JSP pages back to entry actions.
     """
+
     def __init__(self, config_paths: Optional[Union[str, Path, List[Union[str, Path]]]] = None):
         self.route_map: Dict[str, str] = {}
         if config_paths:
@@ -15,7 +16,6 @@ class StrutsResolver:
 
     def load_configs(self, paths: Union[str, Path, List[Union[str, Path]]]):
         if isinstance(paths, (str, Path)):
-            # Support comma-separated list
             if isinstance(paths, str) and "," in paths:
                 actual_paths = [p.strip() for p in paths.split(",")]
             else:
@@ -28,7 +28,7 @@ class StrutsResolver:
             if not p.exists():
                 print(f"[STRUTS_RESOLVER] Path not found: {p}")
                 continue
-            
+
             if p.is_dir():
                 for xml_file in p.rglob("*.xml"):
                     self.load_config_file(xml_file)
@@ -38,22 +38,20 @@ class StrutsResolver:
     def load_config_file(self, config_path: Path):
         try:
             content = config_path.read_text(encoding="utf-8", errors="replace")
-            content = re.sub(r'<!DOCTYPE.*?>', '', content, flags=re.DOTALL)
+            content = re.sub(r"<!DOCTYPE.*?>", "", content, flags=re.DOTALL)
             root = ET.fromstring(content)
-            
+
             for action in root.findall(".//action"):
                 action_path = action.get("path", "")
                 if not action_path:
                     continue
-                
+
                 entry_url = f"{action_path.lstrip('/')}.do"
-                
+
                 for forward in action.findall("forward"):
                     forward_path = forward.get("path", "")
                     if forward_path.endswith(".jsp"):
                         jsp_name = Path(forward_path).name
-                        # 多路径处理：如果已存在映射，优先保留第一个发现的（或根据业务逻辑调整）
-                        # 这里简单处理：如果已存在，不再覆盖，或者可以存储为列表
                         if jsp_name not in self.route_map:
                             self.route_map[jsp_name] = entry_url
         except Exception as e:
@@ -61,8 +59,8 @@ class StrutsResolver:
 
     def resolve_entry_url(self, jsp_path: str) -> str:
         """
-        Resolves a JSP filename to its Struts entry URL.
-        If no mapping exists, returns the JSP path as fallback.
+        Resolve a JSP filename to its Struts entry URL.
+        If no mapping exists, return the JSP path as a fallback.
         """
         jsp_name = Path(jsp_path).name
         return self.route_map.get(jsp_name, jsp_path)
