@@ -1,0 +1,4 @@
+interface:
+  display_name: "PATLICS Edge Migration Test"
+  short_description: "Compare PATLICS pages across migration environments"
+  default_prompt: "Use $patlics-edge-migration-test to compare a PATLICS popup page between .47 and .192 in Edge and produce reusable evidence reports."
