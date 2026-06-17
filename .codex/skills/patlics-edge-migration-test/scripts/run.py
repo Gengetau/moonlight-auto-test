@@ -15,6 +15,9 @@ SCRIPTS = {
     "pdf": "edge_popup_pdf_compare.py",
     "download": "edge_popup_download_compare.py",
     "download-matrix": "edge_popup_download_matrix.py",
+    "interaction": "edge_interaction_compare.py",
+    "simple-analysis": "edge_simple_analysis_compare.py",
+    "simple-analysis-interaction": "edge_simple_analysis_interaction_compare.py",
 }
 
 

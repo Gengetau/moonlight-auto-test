@@ -9,6 +9,7 @@ Use this checklist in the report or final summary.
 | Visual | Both screenshots, diff image, diff percentage |
 | Structure | DOM, controls, forms, tables, metrics |
 | Resources | Resource count, URL mapping, size, SHA-256 |
+| Interaction | Element selector, text/value, detected behavior type, action type, comparison target after action, before/after URL and title, DOM/text/form/control snapshots, alert/confirm/prompt, network request/status, new window, console error, before/after/diff screenshots |
 | Allowed differences | Raw values, reason, explicit acceptance |
 | PDF | Button, filename, size, raw hash, normalized hash |
 | Download | Condition, result type, normalized filename, size |

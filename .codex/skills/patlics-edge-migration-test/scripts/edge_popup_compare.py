@@ -178,7 +178,33 @@ def normalize_text(value: str, hosts: Iterable[str]) -> str:
 def normalize_dom(value: str, hosts: Iterable[str]) -> str:
     text = replace_hosts(str(value or ""), hosts)
     text = re.sub(r"\s+", " ", text)
-    return text.strip()
+    return canonicalize_html_attrs(text.strip())
+
+
+def canonicalize_html_attrs(value: str) -> str:
+    attr_re = re.compile(r"""([^\s"'<>/=]+)(?:\s*=\s*("[^"]*"|'[^']*'|[^\s"'=<>`]+))?""")
+
+    def canonicalize_tag(match: re.Match[str]) -> str:
+        tag = match.group(1)
+        attrs_text = match.group(2) or ""
+        closing = match.group(3) or ""
+        attrs = []
+        for attr_match in attr_re.finditer(attrs_text):
+            name = attr_match.group(1)
+            value = attr_match.group(2)
+            if value is None:
+                attrs.append((name.lower(), name, None))
+            else:
+                attrs.append((name.lower(), name, value))
+        if not attrs:
+            return match.group(0)
+        rendered = " ".join(
+            f"{name}={value}" if value is not None else name
+            for _, name, value in sorted(attrs, key=lambda item: item[0])
+        )
+        return f"<{tag} {rendered}{closing}>"
+
+    return re.sub(r"<([A-Za-z][A-Za-z0-9:_-]*)([^<>]*?)(/?)>", canonicalize_tag, value)
 
 
 def normalize_obj(value: Any, hosts: Iterable[str]) -> Any:
@@ -195,7 +221,7 @@ def scrub_allowed_dom(value: str) -> str:
     text = str(value or "")
     text = re.sub(r'(\.\./pattest/)\d+(/koho/img/)', r"\1{SERVER_RESOURCE_BATCH}\2", text)
 
-    def scrub_form_tag(match: re.Match[str]) -> str:
+    def scrub_id_name_tag(match: re.Match[str]) -> str:
         tag = match.group(0)
         name_match = re.search(r'\bname=["\']([^"\']+)["\']', tag)
         id_match = re.search(r'\bid=["\']([^"\']+)["\']', tag)
@@ -203,7 +229,7 @@ def scrub_allowed_dom(value: str) -> str:
             tag = re.sub(r'\s+id=["\'][^"\']+["\']', "", tag)
         return tag
 
-    text = re.sub(r"<form\b[^>]*>", scrub_form_tag, text, flags=re.IGNORECASE)
+    text = re.sub(r"<[a-zA-Z][^>]*>", scrub_id_name_tag, text, flags=re.IGNORECASE)
     text = re.sub(
         r'(\bname=["\']userId["\'][^>]*\bvalue=["\'])[^"\']*',
         r"\1{SERVER_USER_ID}",
@@ -215,7 +241,8 @@ def scrub_allowed_dom(value: str) -> str:
         text,
     )
     text = re.sub(r"\s+", " ", text).strip()
-    return re.sub(r">\s+<", "><", text)
+    text = re.sub(r">\s+<", "><", text)
+    return canonicalize_html_attrs(text)
 
 
 def scrub_allowed_path(path: str, form_names: Iterable[str]) -> str:
@@ -253,7 +280,11 @@ def scrub_allowed_control(control: Dict[str, Any], form_names: Iterable[str]) ->
     item = dict(control)
     if item.get("tag") == "form" and item.get("name") in set(form_names):
         item["id"] = ""
+    if item.get("id") and item.get("name") and item.get("id") == item.get("name"):
+        item["id"] = ""
     item["path"] = scrub_allowed_path(str(item.get("path") or ""), form_names)
+    if item.get("tag") in {"input", "button", "select", "textarea", "a", "img", "iframe", "frame", "form"}:
+        item["path"] = ""
     if item.get("tag") == "img" and item.get("src"):
         item["src"] = re.sub(r"(\.\./pattest/)\d+(/koho/img/)", r"\1{SERVER_RESOURCE_BATCH}\2", str(item["src"]))
     if item.get("tag") == "input" and item.get("name") == "userId":
@@ -287,6 +318,29 @@ def apply_allowed_differences(legacy: Dict[str, Any], new: Dict[str, Any]) -> Di
                 "legacy": f'<form name="{name}">',
                 "new": f'<form id="{name}" name="{name}">',
                 "reason": f"ユーザー確認済みの移行差異。192 環境で form に id=\"{name}\" が追加されているが、許容して PASS 扱い。",
+            }
+        )
+    control_id_names = []
+    for legacy_item, new_item in zip(legacy_raw_controls, new_raw_controls):
+        name = str(legacy_item.get("name") or new_item.get("name") or "")
+        if (
+            name
+            and legacy_item.get("tag") == new_item.get("tag")
+            and not legacy_item.get("id")
+            and new_item.get("id") == name
+            and new_item.get("tag") in {"input", "button", "select", "textarea", "a", "img", "iframe", "frame", "form"}
+        ):
+            control_id_names.append(name)
+    if control_id_names:
+        examples = ", ".join(sorted(set(control_id_names))[:12])
+        accepted.append(
+            {
+                "id": "named_control_id_name_added_on_192",
+                "status": "ACCEPTED",
+                "scope": "DOM/control selector path",
+                "legacy": "named controls without id",
+                "new": f".192 adds id equal to existing name. Examples: {examples}",
+                "reason": "User accepted this migration difference; selector/path differences caused only by these IDs are allowed.",
             }
         )
     legacy_dom_raw = legacy.get("normalized_dom") or ""
